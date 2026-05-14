@@ -947,6 +947,36 @@ def media_definitions_from_html(dom):
     return [item for item in data if isinstance(item, dict)]
 
 
+def player_script_media_from_html(dom):
+    text = html_lib.unescape(str(dom or "")).replace("\\/", "/")
+    items = []
+    for match in re.finditer(
+        r"(?:html5player\.)?setVideo(?P<kind>HLS|UrlLow|UrlHigh|URL)\s*\(\s*(?P<quote>['\"])(?P<url>https?://.*?)(?P=quote)\s*\)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        media_url = urllib.parse.unquote(match.group("url")).strip()
+        if not media_url:
+            continue
+        kind = match.group("kind").lower()
+        height_match = re.search(r"[_/-](?P<height>\d{3,4})p(?:[_.?/-]|$)", media_url, flags=re.IGNORECASE)
+        height = safe_int(height_match.group("height")) if height_match else 0
+        if not height and kind == "urllow":
+            height = 240
+        elif not height and kind == "urlhigh":
+            height = 360
+        items.append(
+            {
+                "videoUrl": media_url,
+                "format": "hls" if kind == "hls" else "mp4",
+                "quality": height or ("hls" if kind == "hls" else kind),
+                "height": height,
+                "source": "player-script",
+            }
+        )
+    return items
+
+
 def first_html_match(dom, patterns):
     text = str(dom or "")
     for pattern in patterns:
@@ -967,6 +997,7 @@ def thumbnail_from_browser_dom(dom):
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
             r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'setThumbUrl(?:169)?\(\s*["\']([^"\']+)["\']\s*\)',
         ],
     )
 
@@ -981,7 +1012,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
     origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
     candidates = []
     seen = set()
-    for item in media_definitions_from_html(dom):
+    for item in [*media_definitions_from_html(dom), *player_script_media_from_html(dom)]:
         media_url = item.get("videoUrl") or item.get("url")
         if not media_url:
             continue
@@ -1002,10 +1033,14 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         height = safe_int(item.get("height") or item.get("quality"))
         width = safe_int(item.get("width"))
         ext = "webm" if "webm" in lower_url else "mp4"
+        source = str(item.get("source") or "media")
+        format_label = item.get("format") or source
+        quality = item.get("quality") or ""
+        format_id_label = f"browser-{height}" if height else f"browser-{format_label}"
         candidates.append(
             {
                 "id": f"browser-{len(candidates) + 1}",
-                "format_id": f"browser-{height or len(candidates) + 1}",
+                "format_id": format_id_label,
                 "format_selector": "best",
                 "url": media_url,
                 "title": title,
@@ -1030,12 +1065,12 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "media_type": "video",
                 "referer": url,
                 "origin": origin,
-                "note": f"browser {item.get('format') or 'media'} {item.get('quality') or ''}".strip(),
+                "note": f"browser {format_label} {quality}".strip(),
             }
         )
     candidates = sort_candidates(candidates)
     if not candidates:
-        raise RuntimeError("Browser DOM fallback found no downloadable media definitions.")
+        raise RuntimeError("Browser DOM fallback found no downloadable media entries.")
     return {
         "url": url,
         "webpage_url": url,

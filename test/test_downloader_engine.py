@@ -327,6 +327,34 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["format_selector"], "best")
         self.assertEqual(result["candidates"][0]["thumbnail"], "https://img.example.test/thumb.jpg")
 
+    def test_browser_dom_player_scripts_extract_xvideos_style_candidates(self):
+        html = """
+        <html><head><title>Script Video - xvideos.com</title></head><body>
+        <script>
+          html5player.setVideoUrlLow('https://mp4.example.test/path/video_240p.mp4?secure=low');
+          html5player.setVideoUrlHigh('https://mp4.example.test/path/video_360p.mp4?secure=high');
+          html5player.setVideoHLS('https://hls.example.test/path/hls.m3u8');
+          html5player.setThumbUrl('https://thumb.example.test/thumb.jpg');
+        </script></body></html>
+        """
+
+        result = engine.analyze_browser_dom_media(
+            "https://www.xvideos.com/video123/example",
+            html,
+            output_ext="MP4",
+        )
+
+        self.assertEqual(result["source"], "browser-dom")
+        self.assertEqual(result["title"], "Script Video")
+        self.assertEqual([candidate["format_id"] for candidate in result["candidates"]], ["browser-360", "browser-240", "browser-hls"])
+        self.assertEqual(result["candidates"][0]["url"], "https://mp4.example.test/path/video_360p.mp4?secure=high")
+        self.assertEqual(result["candidates"][0]["height"], 360)
+        self.assertFalse(result["candidates"][0]["is_manifest"])
+        self.assertEqual(result["candidates"][0]["referer"], "https://www.xvideos.com/video123/example")
+        self.assertEqual(result["candidates"][0]["origin"], "https://www.xvideos.com")
+        self.assertEqual(result["candidates"][0]["thumbnail"], "https://thumb.example.test/thumb.jpg")
+        self.assertTrue(result["candidates"][2]["is_manifest"])
+
     def test_analyze_uses_browser_dom_fallback_after_tls_reset(self):
         class ResetYoutubeDL(FakeYoutubeDL):
             def extract_info(self, url, download=False):
