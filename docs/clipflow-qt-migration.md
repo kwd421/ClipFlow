@@ -24,22 +24,23 @@ This split is meant to make UI changes cheap: future ClipFlow layout changes sho
 Implemented:
 
 - App title `ClipFlow`
-- URL input
-- MP4 / WEBM / WAV selector
+- URL input with a single primary button: paste, analyze, download
 - Save folder picker
-- Cookie selector with existing choices: `없음`, `Chrome`, `Edge`, `Firefox`
-- Primary button states: paste, analyze, download
+- Cookie selector with existing choices: none, Chrome, Edge, Firefox
 - QThread-based analysis worker
 - QThread-based download worker
-- Grouped candidate table
-- Per-row quality dropdown
-- Selected quality maps to the underlying candidate passed to download
-- Status, progress, and collapsible log area
+- Download-manager style row list with columns for media, quality, format, duration, size, status, and actions
+- Per-row quality and format dropdowns
+- Completed rows switch quality and format controls to fixed text
+- Selected quality and format map to the underlying candidate passed to download
+- Row-local status pills, progress indicators, completion checks, and error details
+- Unified action buttons for opening folders, removing rows, deleting completed files, and future row actions
+- Placeholder thumbnails and source link buttons
 
 ## Current Limitations
 
-- Thumbnail loading is not implemented in the PySide6 UI yet.
-- PySide6 UI polish is intentionally light; it is a stable MVP, not the final visual design.
+- Real thumbnail and site-icon loading are not implemented in the PySide6 UI yet.
+- PySide6 UI polish is improved but still not the final visual design.
 - PySide6 PyInstaller packaging is not added in this pass.
 - The legacy Tkinter Windows build path is preserved as the packaged app path.
 - No DRM, CAPTCHA, paid/private content, age-restricted-content, login bypass, or new site-specific circumvention behavior was added.
@@ -50,7 +51,7 @@ Recommended next PR: `codex/clipflow-qt-polish-and-packaging`
 
 Suggested scope:
 
-- Improve ClipFlow layout and visual polish without touching downloader logic.
-- Add safe async thumbnail loading with placeholders and timeouts.
-- Add a PySide6-specific PyInstaller spec only after launch and workflow tests are stable.
+- Add safe async thumbnail and site-icon loading with placeholders and timeouts.
+- Add playlist/gallery row expansion only through generic shared models.
+- Add a PySide6-specific PyInstaller spec after launch and workflow tests are stable.
 - Add a small manual QA checklist for Windows and macOS.
