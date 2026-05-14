@@ -135,14 +135,46 @@ class AnalyzeWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class DownloadWorker(QObject):
+    event = Signal(dict)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, page_url, candidate, output_dir, cookie_source, download_func):
+        super().__init__()
+        self.page_url = page_url
+        self.candidate = candidate
+        self.output_dir = output_dir
+        self.cookie_source = cookie_source
+        self.download_func = download_func
+
+    @Slot()
+    def run(self):
+        try:
+            result = self.download_func(
+                self.page_url,
+                self.candidate,
+                self.output_dir,
+                cookie_source=self.cookie_source,
+                on_event=self.event.emit,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ClipFlowWindow(QMainWindow):
-    def __init__(self, analyze_func=engine.analyze_url):
+    def __init__(self, analyze_func=engine.analyze_url, download_func=engine.download_candidate):
         super().__init__()
         self.analyze_func = analyze_func
+        self.download_func = download_func
         self.analysis = None
         self.rows = []
         self.analysis_thread = None
         self.analysis_worker = None
+        self.download_thread = None
+        self.download_worker = None
+        self.active_download_row = -1
         self.setWindowTitle("ClipFlow")
         self.resize(1120, 720)
         self.setStyleSheet(APP_STYLE)
@@ -297,7 +329,7 @@ class ClipFlowWindow(QMainWindow):
                 self.url_input.setText(text)
             return
         if self.table.currentRow() >= 0 and self.rows:
-            self._set_status("다운로드 연결은 다음 checkpoint에서 활성화됩니다.")
+            self._start_download()
             return
         self._start_analysis()
 
@@ -356,6 +388,69 @@ class ClipFlowWindow(QMainWindow):
         self.primary_button.setEnabled(True)
         self.analysis_thread = None
         self.analysis_worker = None
+        self._refresh_primary_action()
+
+    def _start_download(self):
+        if self.download_thread and self.download_thread.isRunning():
+            return
+        row_index = self.table.currentRow()
+        candidate = self.selected_candidate_for_row(row_index)
+        if not candidate:
+            self._set_status("다운로드할 항목을 선택하세요")
+            return
+
+        self.active_download_row = row_index
+        self.table.setItem(row_index, 5, QTableWidgetItem("다운로드 중"))
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.primary_button.setEnabled(False)
+        self._set_status("다운로드 중")
+
+        page_url = (self.analysis or {}).get("webpage_url") or self.url_input.text().strip()
+        self.download_thread = QThread(self)
+        self.download_worker = DownloadWorker(
+            page_url,
+            candidate,
+            self.folder_input.text(),
+            self.cookie_combo.currentText(),
+            self.download_func,
+        )
+        self.download_worker.moveToThread(self.download_thread)
+        self.download_thread.started.connect(self.download_worker.run)
+        self.download_worker.event.connect(self._handle_engine_event)
+        self.download_worker.finished.connect(self._download_finished)
+        self.download_worker.failed.connect(self._download_failed)
+        self.download_worker.finished.connect(self.download_thread.quit)
+        self.download_worker.failed.connect(self.download_thread.quit)
+        self.download_thread.finished.connect(self.download_worker.deleteLater)
+        self.download_thread.finished.connect(self._download_thread_finished)
+        self.download_thread.start()
+
+    @Slot(dict)
+    def _download_finished(self, result):
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        if self.active_download_row >= 0:
+            self.table.setItem(self.active_download_row, 5, QTableWidgetItem("완료"))
+        self._set_status("완료")
+        output_dir = result.get("output_dir") if isinstance(result, dict) else None
+        if output_dir:
+            self.log_output.append(str(output_dir))
+
+    @Slot(str)
+    def _download_failed(self, message):
+        if self.active_download_row >= 0:
+            self.table.setItem(self.active_download_row, 5, QTableWidgetItem("오류"))
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self._set_status(f"{engine.classify_error(message)}: {message}")
+
+    @Slot()
+    def _download_thread_finished(self):
+        self.primary_button.setEnabled(True)
+        self.download_thread = None
+        self.download_worker = None
+        self.active_download_row = -1
         self._refresh_primary_action()
 
     @Slot(dict)
