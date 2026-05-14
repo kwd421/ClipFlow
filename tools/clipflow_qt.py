@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -38,6 +38,10 @@ APP_NAME = "ClipFlow"
 DEFAULT_OUTPUT_EXT = "MP4"
 COOKIE_CHOICES = ["없음", "Chrome", "Edge", "Firefox"]
 COOKIE_DISPLAY_CHOICES = [f"쿠키: {choice}" for choice in COOKIE_CHOICES]
+FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\NotoSansKR-Regular.ttf",
+    r"C:\Windows\Fonts\malgun.ttf",
+]
 
 APP_STYLE = """
 QMainWindow {
@@ -65,16 +69,19 @@ QFrame#DownloadRow {
     border-radius: 0px;
 }
 QFrame#DownloadRow[selected="true"] {
-    background: #f3f8ff;
-    border-color: #b8d3ff;
+    background: #ffffff;
+    border-color: #e1e8f3;
 }
 QFrame#DownloadRow[hovered="true"] {
     background: #f8fbff;
     border-color: #c8d9f2;
 }
 QFrame#DownloadRow[selected="true"][hovered="true"] {
-    background: #eef6ff;
-    border-color: #a9c9fb;
+    background: #f8fbff;
+    border-color: #c8d9f2;
+}
+QWidget#RowContainer {
+    background: #ffffff;
 }
 QFrame#ThumbBox {
     background: #e9eff7;
@@ -158,6 +165,13 @@ QLabel#StatusPill {
     font-size: 12px;
     font-weight: 700;
 }
+QLabel#StatusCheck {
+    background: #dcfce7;
+    border-radius: 8px;
+    color: #15803d;
+    font-size: 10px;
+    font-weight: 700;
+}
 QLineEdit, QComboBox {
     background: #ffffff;
     border: 1px solid #cad7e8;
@@ -228,11 +242,19 @@ QScrollArea {
 
 STATUS_STYLES = {
     "준비": "background: #eef2f7; color: #344054;",
+    "대기": "background: #eef2f7; color: #344054;",
     "분석 중": "background: #e7f0ff; color: #1d4ed8;",
     "다운로드 중": "background: #e7f0ff; color: #1d4ed8;",
     "완료": "background: #dcfce7; color: #15803d;",
     "오류": "background: #fee2e2; color: #dc2626;",
 }
+
+
+def configure_app_font(app):
+    for font_path in FONT_CANDIDATES:
+        if Path(font_path).exists():
+            QFontDatabase.addApplicationFont(font_path)
+    app.setFont(QFont("Noto Sans KR", 10))
 
 
 def source_domain(url):
@@ -296,6 +318,42 @@ def quality_display_label(candidate):
 
 def format_display_label(candidate):
     return str(candidate.get("output_ext") or candidate.get("ext") or "").upper() or "MP4"
+
+
+def format_sort_rank(label):
+    normalized = str(label or "").upper()
+    ranks = {"MP4": 0, "WEBM": 1, "WAV": 2}
+    return ranks.get(normalized, 10)
+
+
+def candidate_size_value(candidate):
+    return (
+        engine.safe_int(candidate.get("sort_bytes"))
+        or engine.safe_int(candidate.get("filesize"))
+        or engine.safe_int(candidate.get("filesize_approx"))
+        or 0
+    )
+
+
+def build_quality_options(qualities):
+    grouped = {}
+    for candidate in qualities or []:
+        quality_label = quality_display_label(candidate)
+        format_label = format_display_label(candidate)
+        option = grouped.setdefault(quality_label, {"label": quality_label, "formats": {}})
+        existing = option["formats"].get(format_label)
+        if not existing or candidate_size_value(candidate) > candidate_size_value(existing):
+            option["formats"][format_label] = candidate
+
+    options = []
+    for option in grouped.values():
+        formats = [
+            {"label": label, "candidate": candidate}
+            for label, candidate in option["formats"].items()
+        ]
+        formats.sort(key=lambda item: (format_sort_rank(item["label"]), -candidate_size_value(item["candidate"])))
+        options.append({"label": option["label"], "formats": formats})
+    return options
 
 
 def cookie_source_from_display(display_text):
@@ -408,6 +466,14 @@ class CleanComboBox(QComboBox):
         painter.drawLine(QPointF(center_x - 4, center_y - 1), QPointF(center_x, center_y + 3))
         painter.drawLine(QPointF(center_x, center_y + 3), QPointF(center_x + 4, center_y - 1))
 
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
 
 class ActionIconButton(QToolButton):
     def __init__(self, icon_kind, parent=None):
@@ -422,12 +488,20 @@ class ActionIconButton(QToolButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        if self.underMouse() and self.isEnabled():
+        hovered = self.underMouse() and self.isEnabled()
+        if hovered:
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#edf4ff"))
+            painter.setBrush(QColor("#e6f0ff" if not self.isDown() else "#d7e7ff"))
             painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 6, 6)
 
-        color = QColor("#243b5a" if self.isEnabled() else "#aeb8c7")
+        if not self.isEnabled():
+            color = QColor("#aeb8c7")
+        elif self.isDown():
+            color = QColor("#1e40af")
+        elif hovered:
+            color = QColor("#1d4ed8")
+        else:
+            color = QColor("#243b5a")
         pen = QPen(color, 1.8)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -453,6 +527,14 @@ class ActionIconButton(QToolButton):
             painter.setPen(Qt.NoPen)
             for y in (9, 14, 19):
                 painter.drawEllipse(QPointF(14, y), 1.35, 1.35)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
 
 
 class AnalyzeWorker(QObject):
@@ -583,6 +665,7 @@ class DownloadRowWidget(QFrame):
 
         self.format_combo = CleanComboBox()
         self.format_combo.setFixedWidth(78)
+        self.format_combo.currentIndexChanged.connect(self._format_changed)
         outer.addWidget(self.format_combo)
 
         self.format_label = QLabel()
@@ -622,18 +705,31 @@ class DownloadRowWidget(QFrame):
         outer.addWidget(self.size_widget)
 
         self.status_widget = QWidget()
-        self.status_widget.setFixedWidth(104)
+        self.status_widget.setFixedWidth(112)
         status_layout = QVBoxLayout(self.status_widget)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(3)
         status_layout.setAlignment(Qt.AlignCenter)
 
+        self.status_row = QWidget()
+        status_row_layout = QHBoxLayout(self.status_row)
+        status_row_layout.setContentsMargins(0, 0, 0, 0)
+        status_row_layout.setSpacing(4)
+        status_row_layout.setAlignment(Qt.AlignCenter)
+
         self.status_label = QLabel()
         self.status_label.setObjectName("StatusPill")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setMinimumWidth(88)
+        self.status_label.setMinimumWidth(72)
         self.status_label.setMaximumHeight(28)
-        status_layout.addWidget(self.status_label, 0, Qt.AlignCenter)
+        status_row_layout.addWidget(self.status_label)
+
+        self.status_check_label = QLabel("✓")
+        self.status_check_label.setObjectName("StatusCheck")
+        self.status_check_label.setFixedSize(16, 16)
+        self.status_check_label.setAlignment(Qt.AlignCenter)
+        status_row_layout.addWidget(self.status_check_label)
+        status_layout.addWidget(self.status_row, 0, Qt.AlignCenter)
 
         self.progress_text = QLabel("")
         self.progress_text.setObjectName("MetaText")
@@ -695,33 +791,40 @@ class DownloadRowWidget(QFrame):
         self.title_label.setText(str(title))
         self.title_label.setToolTip(str(title))
         self.info_label.setText(row_info_text(candidate))
-        self.format_label.setText(format_display_label(candidate))
-        self._refresh_format_combo(candidate)
         self.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
         self._refresh_quality_combo()
+        self._refresh_format_combo()
         self._refresh_source_button()
         self.set_status(self.row.get("status") or "준비", self.row.get("status_detail") or "")
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
         self._refresh_actions()
 
     def _refresh_quality_combo(self):
-        current = max(0, min(int(self.row.get("selected_index") or 0), len(self.row["qualities"]) - 1))
+        options = self.row.get("quality_options") or []
+        current = max(0, min(int(self.row.get("selected_index") or 0), len(options) - 1)) if options else 0
+        self.row["selected_index"] = current
         self.quality_combo.blockSignals(True)
         self.quality_combo.clear()
-        for quality in self.row["qualities"]:
-            self.quality_combo.addItem(quality_display_label(quality))
+        for option in options:
+            self.quality_combo.addItem(option["label"])
         self.quality_combo.setCurrentIndex(current)
         self.quality_combo.blockSignals(False)
         self.quality_value_label.setText(self.quality_combo.currentText())
         self._refresh_quality_mode()
 
-    def _refresh_format_combo(self, candidate):
-        label = format_display_label(candidate)
+    def _refresh_format_combo(self):
+        option = self.owner.selected_quality_option_for_row_ref(self.row)
+        formats = option.get("formats") if option else []
+        current = max(0, min(int(self.row.get("selected_format_index") or 0), len(formats) - 1)) if formats else 0
+        self.row["selected_format_index"] = current
         self.format_combo.blockSignals(True)
         self.format_combo.clear()
-        self.format_combo.addItem(label)
-        self.format_combo.setCurrentIndex(0)
+        for item in formats:
+            self.format_combo.addItem(item["label"])
+        self.format_combo.setCurrentIndex(current)
         self.format_combo.blockSignals(False)
+        candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
+        label = format_display_label(candidate)
         self.format_label.setText(label)
 
     def _refresh_source_button(self):
@@ -756,6 +859,9 @@ class DownloadRowWidget(QFrame):
     def _quality_changed(self, index):
         self.owner.quality_changed_for_row(self.row, index)
 
+    def _format_changed(self, index):
+        self.owner.format_changed_for_row(self.row, index)
+
     def _open_source(self):
         self.owner.open_source_for_row(self.row)
 
@@ -783,6 +889,7 @@ class DownloadRowWidget(QFrame):
         self.status_label.setText(status)
         self.status_label.setToolTip(detail or status)
         self.status_label.setStyleSheet(STATUS_STYLES.get(status, STATUS_STYLES["준비"]))
+        self.status_check_label.setHidden(status != "완료")
         self._refresh_quality_mode()
         self._refresh_actions()
 
@@ -790,12 +897,13 @@ class DownloadRowWidget(QFrame):
         bounded = max(0, min(100, int(float(value or 0))))
         self.row["progress"] = bounded
         active = self.row.get("status") in {"분석 중", "다운로드 중"}
-        display_text = text if active else ""
+        error_detail = self.row.get("status") == "오류" and self.row.get("status_detail")
+        display_text = text if active else (self.row.get("status_detail") if error_detail else "")
         self.row["progress_text"] = display_text
         self.progress_bar.setValue(bounded)
-        show = active and (bool(display_text) or bounded > 0)
-        self.progress_bar.setVisible(show)
-        self.progress_text.setVisible(show)
+        show_progress = active and (bool(display_text) or bounded > 0)
+        self.progress_bar.setVisible(show_progress)
+        self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
 
 
@@ -935,7 +1043,7 @@ class ClipFlowWindow(QMainWindow):
             ("포맷", 0, 78),
             ("길이", 0, 84),
             ("크기", 0, 92),
-            ("상태", 0, 104),
+            ("상태", 0, 112),
             ("작업", 0, 116),
         ]:
             label = QLabel(text)
@@ -953,6 +1061,7 @@ class ClipFlowWindow(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.row_container = QWidget()
+        self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
         self.row_layout.setContentsMargins(0, 0, 0, 0)
         self.row_layout.setSpacing(0)
@@ -1064,7 +1173,9 @@ class ClipFlowWindow(QMainWindow):
                 "kind": row_kind(candidate),
                 "candidate": candidate,
                 "qualities": grouped_row["qualities"],
+                "quality_options": build_quality_options(grouped_row["qualities"]),
                 "selected_index": 0,
+                "selected_format_index": 0,
                 "analysis_source_url": source_url,
                 "source_url": source_url or row_source_url(analysis, candidate),
                 "status": "준비",
@@ -1117,7 +1228,25 @@ class ClipFlowWindow(QMainWindow):
     def quality_changed_for_row(self, row, quality_index):
         if row not in self.rows:
             return
-        row["selected_index"] = max(0, min(int(quality_index), len(row["qualities"]) - 1))
+        options = row.get("quality_options") or []
+        row["selected_index"] = max(0, min(int(quality_index), len(options) - 1)) if options else 0
+        row["selected_format_index"] = 0
+        candidate = self.selected_candidate_for_row_ref(row)
+        if candidate:
+            row["candidate"] = candidate
+            widget = row.get("widget")
+            if widget:
+                widget.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
+                widget.info_label.setText(row_info_text(candidate))
+                widget._refresh_format_combo()
+                widget.quality_value_label.setText(widget.quality_combo.currentText())
+
+    def format_changed_for_row(self, row, format_index):
+        if row not in self.rows:
+            return
+        option = self.selected_quality_option_for_row_ref(row)
+        formats = option.get("formats") if option else []
+        row["selected_format_index"] = max(0, min(int(format_index), len(formats) - 1)) if formats else 0
         candidate = self.selected_candidate_for_row_ref(row)
         if candidate:
             row["candidate"] = candidate
@@ -1126,14 +1255,30 @@ class ClipFlowWindow(QMainWindow):
                 widget.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
                 widget.info_label.setText(row_info_text(candidate))
                 widget.format_label.setText(format_display_label(candidate))
-                widget._refresh_format_combo(candidate)
-                widget.quality_value_label.setText(widget.quality_combo.currentText())
+
+    def selected_quality_option_for_row_ref(self, row):
+        if not row:
+            return None
+        options = row.get("quality_options")
+        if options is None:
+            options = build_quality_options(row.get("qualities") or [])
+            row["quality_options"] = options
+        if not options:
+            return None
+        selected_index = max(0, min(int(row.get("selected_index") or 0), len(options) - 1))
+        row["selected_index"] = selected_index
+        return options[selected_index]
 
     def selected_candidate_for_row_ref(self, row):
-        if not row or not row.get("qualities"):
+        option = self.selected_quality_option_for_row_ref(row)
+        if not option:
             return None
-        selected_index = max(0, min(int(row.get("selected_index") or 0), len(row["qualities"]) - 1))
-        return row["qualities"][selected_index]
+        formats = option.get("formats") or []
+        if not formats:
+            return None
+        selected_format_index = max(0, min(int(row.get("selected_format_index") or 0), len(formats) - 1))
+        row["selected_format_index"] = selected_format_index
+        return formats[selected_format_index]["candidate"]
 
     def selected_candidate_for_row(self, row_index):
         if row_index < 0 or row_index >= len(self.rows):
@@ -1319,6 +1464,7 @@ class ClipFlowWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    configure_app_font(app)
     window = ClipFlowWindow()
     window.show()
 

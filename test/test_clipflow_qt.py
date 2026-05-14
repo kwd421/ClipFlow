@@ -245,6 +245,112 @@ app.exec()
             ],
         )
 
+    def test_clipflow_qt_format_dropdown_maps_to_candidate_variant(self):
+        script = r'''
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+downloaded = []
+started_download = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "webm-1080", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "webm", "output_ext": "webm", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 40},
+            {"id": "mp4-1080", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+            {"id": "mp4-720", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "720p", "height": 720, "duration": 120, "sort_bytes": 20},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append(candidate["id"])
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window.url_input.setText("https://media.test/video")
+window._start_analysis()
+
+def drive():
+    if window.analysis_thread or window.download_thread:
+        return
+    if window.rows and not started_download:
+        started_download.append(True)
+        row_widget = window.rows[0]["widget"]
+        print(row_widget.quality_combo.count())
+        print(row_widget.quality_combo.itemText(0))
+        print(row_widget.quality_combo.itemText(1))
+        print(row_widget.format_combo.count())
+        print(row_widget.format_combo.itemText(0))
+        print(row_widget.format_combo.itemText(1))
+        row_widget.format_combo.setCurrentIndex(1)
+        window.select_row(0)
+        window._handle_primary_action()
+        return
+    if downloaded:
+        print(downloaded[0])
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["2", "1080p", "720p", "2", "MP4", "WEBM", "webm-1080"],
+        )
+
+    def test_clipflow_qt_status_column_shows_done_check_and_error_detail(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window._analysis_finished(fake_analyze(url))
+row_widget = window.rows[0]["widget"]
+print(hasattr(row_widget, "status_check_label"))
+row_widget.set_status("완료")
+print(row_widget.status_check_label.isHidden())
+print(row_widget.progress_text.isHidden())
+row_widget.set_status("오류", "network problem")
+row_widget.set_progress(0, "")
+print(row_widget.status_check_label.isHidden())
+print(row_widget.progress_text.isHidden())
+print(row_widget.progress_text.text())
+print(row_widget.progress_bar.isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["True", "False", "True", "True", "False", "network problem", "True"],
+        )
+
     def test_clipflow_qt_site_button_and_safe_actions(self):
         script = r'''
 from PySide6.QtCore import QTimer
