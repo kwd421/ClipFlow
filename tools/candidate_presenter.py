@@ -148,10 +148,11 @@ def _best_candidate(candidates, preferences):
 def select_candidate_for_preferences(candidates, preferences):
     preferences = preferences or DownloadPreferences()
     family = _format_family(preferences.output_format)
+    allowed_formats = set(AUDIO_FORMATS if family == "audio" else VIDEO_FORMATS)
     family_candidates = [
         candidate
         for candidate in candidates or []
-        if _candidate_family(candidate) == family
+        if _candidate_family(candidate) == family and _normalized_format(candidate) in allowed_formats
     ]
     for output_format in _format_order(preferences.output_format):
         matching = [
@@ -167,7 +168,9 @@ def select_candidate_for_preferences(candidates, preferences):
 
 def filter_manifest_duplicates(candidates):
     has_sized_direct = any(
-        not candidate.get("is_manifest") and engine.safe_int(candidate.get("sort_bytes")) > 0
+        _candidate_family(candidate) == "video"
+        and not candidate.get("is_manifest")
+        and engine.safe_int(candidate.get("sort_bytes")) > 0
         for candidate in candidates
     )
     if not has_sized_direct:
@@ -176,9 +179,9 @@ def filter_manifest_duplicates(candidates):
     filtered = []
     for candidate in candidates:
         note = str(candidate.get("note") or "").lower()
-        if candidate.get("is_manifest"):
+        if _candidate_family(candidate) == "video" and candidate.get("is_manifest"):
             continue
-        if note in {"original", "default", "(original)", "(default)"}:
+        if _candidate_family(candidate) == "video" and note in {"original", "default", "(original)", "(default)"}:
             continue
         filtered.append(candidate)
     return filtered or candidates

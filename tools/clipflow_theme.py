@@ -55,7 +55,7 @@ QWidget#RowContainer {
     background: #ffffff;
 }
 QFrame#ActionOverlay {
-    background: rgba(255, 255, 255, 245);
+    background: #ffffff;
     border-left: 1px solid #edf2f8;
 }
 QFrame#ThumbBox {

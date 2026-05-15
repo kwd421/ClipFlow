@@ -243,7 +243,7 @@ class DownloadRowWidget(QFrame):
 
         self.actions_widget = QFrame(self)
         self.actions_widget.setObjectName("ActionOverlay")
-        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 44)
+        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 68)
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(8, 0, 8, 0)
         actions.setSpacing(4)
