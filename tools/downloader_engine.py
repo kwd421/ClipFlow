@@ -228,8 +228,27 @@ def filename_stem_for_candidate(candidate):
     return title or "video"
 
 
+def output_dir_for_candidate(candidate, output_dir):
+    output_path = Path(output_dir).expanduser()
+    if str((candidate or {}).get("media_type") or "").lower() != "playlist":
+        return output_path
+    folder_name = filename_stem_for_candidate(candidate)
+    if output_path.name == folder_name:
+        return output_path
+    return output_path / folder_name
+
+
 def escape_yt_dlp_template_literal(value):
     return str(value).replace("%", "%%")
+
+
+def looks_like_playlist_url(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    path = parsed.path.lower()
+    query = urllib.parse.parse_qs(parsed.query)
+    if "list" in query and not path.endswith("/watch"):
+        return True
+    return "playlist" in path
 
 
 def caption_title_from_info(*infos):
@@ -789,11 +808,11 @@ def candidates_from_info(info, output_ext=None):
     return sort_candidates(candidates)
 
 
-def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_url=None, impersonate=False):
+def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_url=None, impersonate=False, allow_playlist=False):
     options = {
         "quiet": quiet,
         "no_warnings": quiet,
-        "noplaylist": True,
+        "noplaylist": not allow_playlist,
         "http_headers": {
             "User-Agent": USER_AGENT,
             "Accept-Language": ACCEPT_LANGUAGE,
@@ -817,11 +836,13 @@ def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_u
 
 
 def build_download_options(candidate, output_dir, cookie_source="없음", on_event=None, proxy_url=None):
-    output_dir = Path(output_dir).expanduser()
+    output_dir = output_dir_for_candidate(candidate, output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    options = build_ydl_options(cookie_source=cookie_source, on_event=on_event, quiet=True, proxy_url=proxy_url)
+    is_playlist = str((candidate or {}).get("media_type") or "").lower() == "playlist"
+    options = build_ydl_options(cookie_source=cookie_source, on_event=on_event, quiet=True, proxy_url=proxy_url, allow_playlist=is_playlist)
     output_ext = normalized_output_ext(candidate.get("output_ext")) or "mp4"
+    output_name = "%(playlist_index)s - %(title).200B.%(ext)s" if is_playlist else f"{escape_yt_dlp_template_literal(filename_stem_for_candidate(candidate))}.%(ext)s"
     headers = options.setdefault("http_headers", {})
     if candidate.get("referer"):
         headers["Referer"] = candidate["referer"]
@@ -830,7 +851,7 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
     options.update(
         {
             "format": candidate.get("format_selector") or "bestvideo*+bestaudio/best",
-            "outtmpl": str(output_dir / f"{escape_yt_dlp_template_literal(filename_stem_for_candidate(candidate))}.%(ext)s"),
+            "outtmpl": str(output_dir / output_name),
             "windowsfilenames": True,
             "continuedl": True,
             "retries": 10,
@@ -1265,8 +1286,17 @@ def analyze_url(
 
         ydl_factory = YoutubeDL
 
+    allow_playlist = looks_like_playlist_url(url)
+
     def extract_with(source, impersonate=False):
-        options = build_ydl_options(cookie_source=source, on_event=on_event, quiet=True, proxy_url=proxy_url, impersonate=impersonate)
+        options = build_ydl_options(
+            cookie_source=source,
+            on_event=on_event,
+            quiet=True,
+            proxy_url=proxy_url,
+            impersonate=impersonate,
+            allow_playlist=allow_playlist,
+        )
         options.update({"simulate": True, "skip_download": True, "check_formats": False})
         emit_event(on_event, "status", message="URL 분석 중")
         with ydl_factory(options) as ydl:
@@ -1324,10 +1354,16 @@ def analyze_url(
     candidates = sort_candidates(enrich_missing_sizes(candidates_from_info(info, output_ext=output_ext)))
     if not candidates:
         raise RuntimeError("No downloadable non-audio video formats were found.")
+    entries = info.get("entries") if isinstance(info, dict) else None
+    is_playlist = bool(allow_playlist and entries)
+    playlist_title = clean_video_title(info.get("title") or info.get("playlist_title") or "") if isinstance(info, dict) else ""
     return {
         "url": url,
         "webpage_url": info.get("webpage_url") or url,
         "title": clean_video_title(info.get("title") or candidates[0].get("title")) or "video",
+        "is_playlist": is_playlist,
+        "playlist_title": playlist_title,
+        "playlist_count": safe_int(info.get("playlist_count") or info.get("n_entries") or (len(entries) if entries else 0)),
         "candidates": candidates,
         "warnings": warnings,
     }

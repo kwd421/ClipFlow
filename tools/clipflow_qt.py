@@ -9,7 +9,6 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -46,8 +45,8 @@ except ImportError:
     from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
 
 
-SETTINGS_ORG = "ClipFlow"
-SETTINGS_APP = "ClipFlow"
+SETTINGS_ORG = os.environ.get("CLIPFLOW_SETTINGS_ORG", "ClipFlow")
+SETTINGS_APP = os.environ.get("CLIPFLOW_SETTINGS_APP", "ClipFlow")
 SAVE_FOLDER_SETTING = "save_folder"
 COOKIE_SOURCE_SETTING = "cookie_source"
 DOWNLOAD_HISTORY_SETTING = "download_history"
@@ -195,10 +194,16 @@ class PreferencesDialog(QDialog):
             form.addWidget(combo, row, 1)
 
         layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton("취소")
+        self.cancel_button.setObjectName("SecondaryButton")
+        self.ok_button = QPushButton("확인")
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
         self.refresh_controls()
 
     def refresh_controls(self):
@@ -213,6 +218,37 @@ class PreferencesDialog(QDialog):
             codec=_combo_text(self.codec_combo),
             frame_rate=_combo_text(self.frame_combo),
         )
+
+
+class DeleteConfirmDialog(QDialog):
+    def __init__(self, output_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("파일 삭제")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        title = QLabel("파일을 삭제하시겠습니까?")
+        title.setObjectName("SectionTitle")
+        detail = QLabel(str(output_path))
+        detail.setObjectName("MetaText")
+        detail.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton("취소")
+        self.cancel_button.setObjectName("SecondaryButton")
+        self.ok_button = QPushButton("확인")
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
 
 
 class ClipFlowWindow(QMainWindow):
@@ -633,6 +669,34 @@ class ClipFlowWindow(QMainWindow):
             for row in self.rows
             if row.get("status") == "완료"
         ]
+        if analysis.get("is_playlist"):
+            playlist_candidate = self._playlist_candidate_from_analysis(analysis, grouped_rows, source_url)
+            self.rows = [
+                {
+                    "id": "playlist",
+                    "kind": "playlist",
+                    "candidate": playlist_candidate,
+                    "qualities": [playlist_candidate],
+                    "quality_options": build_quality_options([playlist_candidate]),
+                    "selected_index": 0,
+                    "selected_format_index": 0,
+                    "analysis_source_url": source_url,
+                    "source_url": source_url,
+                    "status": "준비",
+                    "status_detail": "",
+                    "progress": 0,
+                    "progress_text": "",
+                    "output_path": "",
+                    "messages": [],
+                    "created_order": self._next_row_sequence(),
+                    "playlist_entries": grouped_rows,
+                    "expanded": False,
+                }
+            ] + preserved_rows
+            self._sort_rows()
+            self.selected_row_index = 0 if self.rows else -1
+            self._render_rows()
+            return
         new_rows = []
         for grouped_row in grouped_rows:
             candidate = grouped_row["candidate"]
@@ -659,6 +723,34 @@ class ClipFlowWindow(QMainWindow):
         self._sort_rows()
         self.selected_row_index = 0 if self.rows else -1
         self._render_rows()
+
+    def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):
+        first_candidate = (grouped_rows[0].get("candidate") if grouped_rows else {}) or {}
+        candidates = [row.get("candidate") or {} for row in grouped_rows]
+        title = (
+            analysis.get("playlist_title")
+            or analysis.get("title")
+            or first_candidate.get("display_title")
+            or first_candidate.get("title")
+            or "Playlist"
+        )
+        return {
+            "id": "playlist",
+            "media_type": "playlist",
+            "format_selector": "bestvideo*+bestaudio/best",
+            "title": title,
+            "display_title": title,
+            "thumbnail": first_candidate.get("thumbnail") or "",
+            "duration": sum(engine.safe_int(candidate.get("duration")) for candidate in candidates),
+            "sort_bytes": sum(engine.safe_int(candidate.get("sort_bytes")) for candidate in candidates),
+            "item_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
+            "playlist_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
+            "source": source_url,
+            "url": source_url,
+            "webpage_url": source_url,
+            "output_ext": self.current_preferences().output_format if self.current_preferences().output_format != "자동" else DEFAULT_OUTPUT_EXT.lower(),
+            "ext": self.current_preferences().output_format if self.current_preferences().output_format != "자동" else DEFAULT_OUTPUT_EXT.lower(),
+        }
 
     def _render_rows(self):
         self._sort_rows()
@@ -772,6 +864,15 @@ class ClipFlowWindow(QMainWindow):
         return options[selected_index]
 
     def selected_candidate_for_row_ref(self, row):
+        if row and row.get("kind") == "playlist":
+            candidate = dict(row.get("candidate") or {})
+            preferences = self.current_preferences()
+            output_format = preferences.output_format
+            if str(output_format).casefold() == "자동".casefold():
+                output_format = DEFAULT_OUTPUT_EXT
+            candidate["output_ext"] = str(output_format).lower()
+            candidate["ext"] = str(output_format).lower()
+            return candidate
         if row and row.get("status") == "완료":
             return row.get("candidate")
         selected = presenter.select_candidate_for_preferences(row.get("qualities") or [], self.current_preferences())
@@ -817,7 +918,7 @@ class ClipFlowWindow(QMainWindow):
         self.download_worker = DownloadWorker(
             page_url,
             candidate,
-            self.folder_input.text(),
+            engine.output_dir_for_candidate(candidate, self.folder_input.text()),
             cookie_source_from_display(self.cookie_combo.currentText()),
             self.download_func,
         )
@@ -992,21 +1093,12 @@ class ClipFlowWindow(QMainWindow):
             widget._refresh_actions()
         self._save_completed_history()
 
+    def _create_delete_confirm_dialog(self, output_path):
+        return DeleteConfirmDialog(output_path, self)
+
     def _confirm_file_delete(self, output_path):
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("파일 삭제")
-        dialog.setText("파일을 삭제하시겠습니까?")
-        dialog.setInformativeText(str(output_path))
-        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        dialog.setDefaultButton(QMessageBox.No)
-        yes_button = dialog.button(QMessageBox.Yes)
-        no_button = dialog.button(QMessageBox.No)
-        if yes_button:
-            yes_button.setText("예")
-        if no_button:
-            no_button.setText("아니오")
-        return dialog.exec() == QMessageBox.Yes
+        dialog = self._create_delete_confirm_dialog(output_path)
+        return dialog.exec() == QDialog.Accepted
 
     def _refresh_primary_action(self):
         has_url = bool(self.url_input.text().strip())

@@ -1,7 +1,8 @@
 # Auto-split from clipflow_qt.py; keep behavior changes in focused commits.
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -165,11 +166,19 @@ class DownloadRowWidget(QFrame):
         item_area.setContentsMargins(0, 0, 0, 0)
         item_area.setSpacing(3)
 
+        title_line = QHBoxLayout()
+        title_line.setContentsMargins(0, 0, 0, 0)
+        title_line.setSpacing(4)
+        self.playlist_toggle_button = LucideIconButton("chevron-down", size=22, icon_size=14)
+        self.playlist_toggle_button.setToolTip("펼치기/접기")
+        self.playlist_toggle_button.clicked.connect(self._toggle_playlist)
+        title_line.addWidget(self.playlist_toggle_button, 0, Qt.AlignVCenter)
         self.title_label = QLabel()
         self.title_label.setObjectName("RowTitle")
         self.title_label.setWordWrap(False)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
-        item_area.addWidget(self.title_label)
+        title_line.addWidget(self.title_label, 1)
+        item_area.addLayout(title_line)
 
         source_line = QHBoxLayout()
         source_line.setSpacing(6)
@@ -189,11 +198,18 @@ class DownloadRowWidget(QFrame):
         self.progress_bar.setFixedHeight(4)
         self.progress_bar.setMaximumWidth(220)
         self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.progress_bar.hide()
         self.progress_text = QLabel("")
         self.progress_text.setObjectName("MetaText")
         progress_line.addWidget(self.progress_bar, 1)
         progress_line.addWidget(self.progress_text, 0)
         item_area.addLayout(progress_line)
+
+        self.playlist_detail_label = QLabel("")
+        self.playlist_detail_label.setObjectName("MetaText")
+        self.playlist_detail_label.setWordWrap(True)
+        self.playlist_detail_label.hide()
+        item_area.addWidget(self.playlist_detail_label)
 
         outer.addWidget(self.item_widget, 1)
 
@@ -277,6 +293,7 @@ class DownloadRowWidget(QFrame):
         self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
         self._refresh_source_button()
+        self._refresh_playlist_detail()
         self.set_status(self.row.get("status") or "준비", self.row.get("status_detail") or "")
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
         self._refresh_actions()
@@ -294,6 +311,30 @@ class DownloadRowWidget(QFrame):
         self.remove_button.setEnabled(completed and not active)
         self.delete_file_button.setEnabled(completed and has_output and not active)
         self.more_button.setEnabled(completed)
+
+    def _playlist_detail_text(self):
+        entries = self.row.get("playlist_entries") or []
+        lines = []
+        for index, item in enumerate(entries[:20], start=1):
+            candidate = item.get("candidate") if isinstance(item, dict) else item
+            title = (candidate or {}).get("display_title") or (candidate or {}).get("title") or f"Video {index}"
+            lines.append(f"{index}. {title}")
+        if len(entries) > 20:
+            lines.append(f"... +{len(entries) - 20}")
+        return "\n".join(lines)
+
+    def _refresh_playlist_detail(self):
+        is_playlist = self.row.get("kind") == "playlist"
+        self.playlist_toggle_button.setVisible(is_playlist)
+        self.playlist_detail_label.setVisible(is_playlist and bool(self.row.get("expanded")))
+        self.playlist_detail_label.setText(self._playlist_detail_text() if is_playlist else "")
+
+    def _toggle_playlist(self):
+        if self.row.get("kind") != "playlist":
+            return
+        self.row["expanded"] = not bool(self.row.get("expanded"))
+        self._refresh_playlist_detail()
+        self.updateGeometry()
 
     def _position_actions(self):
         width = self.actions_widget.width()
@@ -345,7 +386,54 @@ class DownloadRowWidget(QFrame):
         display_text = text if active else (self.row.get("status_detail") if error_detail else "")
         self.row["progress_text"] = display_text
         self.progress_bar.setValue(bounded)
-        show_progress = active and (bool(display_text) or bounded > 0)
-        self.progress_bar.setVisible(show_progress)
+        self.progress_bar.hide()
+        self.setProperty("progressActive", "true" if active and bounded > 0 else "false")
+        self.setProperty("progressValue", str(bounded if active else 0))
         self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
+        self._repolish()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.property("progressActive") != "true":
+            return
+        progress = max(0, min(100, int(self.property("progressValue") or 0)))
+        if progress <= 0:
+            return
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        width = rect.width()
+        height = rect.height()
+        perimeter = max(1.0, 2 * (width + height))
+        remaining = perimeter * progress / 100.0
+        points = [
+            (rect.left(), rect.top(), rect.right(), rect.top(), width),
+            (rect.right(), rect.top(), rect.right(), rect.bottom(), height),
+            (rect.right(), rect.bottom(), rect.left(), rect.bottom(), width),
+            (rect.left(), rect.bottom(), rect.left(), rect.top(), height),
+        ]
+        path = QPainterPath()
+        path.moveTo(rect.left(), rect.top())
+        current_x = rect.left()
+        current_y = rect.top()
+        for x1, y1, x2, y2, length in points:
+            if remaining <= 0:
+                break
+            draw = min(remaining, length)
+            ratio = draw / length if length else 0
+            next_x = x1 + (x2 - x1) * ratio
+            next_y = y1 + (y2 - y1) * ratio
+            if current_x != x1 or current_y != y1:
+                path.moveTo(x1, y1)
+            path.lineTo(next_x, next_y)
+            current_x, current_y = next_x, next_y
+            remaining -= draw
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+        gradient.setColorAt(0.0, QColor("#2563EB"))
+        gradient.setColorAt(0.45, QColor("#06B6D4"))
+        gradient.setColorAt(0.75, QColor("#22C55E"))
+        gradient.setColorAt(1.0, QColor("#A855F7"))
+        painter.setPen(QPen(QBrush(gradient), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)

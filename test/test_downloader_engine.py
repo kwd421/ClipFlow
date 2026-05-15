@@ -341,6 +341,22 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertNotIn("videosite", filename)
         self.assertNotIn("master", filename)
 
+    def test_download_options_put_playlist_in_named_subfolder(self):
+        candidate = {
+            "media_type": "playlist",
+            "format_selector": "bestvideo*+bestaudio/best",
+            "output_ext": "mp4",
+            "display_title": "Road Trip Mix",
+            "title": "Road Trip Mix",
+        }
+
+        options = engine.build_download_options(candidate, "C:/Temp")
+
+        output_template = Path(options["outtmpl"])
+        self.assertEqual(output_template.parent.name, "Road Trip Mix")
+        self.assertFalse(options["noplaylist"])
+        self.assertIn("playlist_index", output_template.name)
+
     def test_effective_proxy_prefers_explicit_then_environment_then_windows(self):
         self.assertEqual(
             engine.effective_proxy_url(

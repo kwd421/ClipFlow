@@ -1,18 +1,31 @@
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+import uuid
 
 
 def run_qt_script(script, timeout=10):
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
+    settings_app = f"ClipFlowTest{uuid.uuid4().hex}"
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "CLIPFLOW_SETTINGS_APP": settings_app}
+    with tempfile.TemporaryDirectory() as settings_dir:
+        isolated_script = (
+            "import atexit, os\n"
+            "from PySide6.QtCore import QSettings\n"
+            "QSettings.setDefaultFormat(QSettings.IniFormat)\n"
+            f"QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, {settings_dir!r})\n"
+            f"QSettings.setPath(QSettings.NativeFormat, QSettings.UserScope, {settings_dir!r})\n"
+            "atexit.register(lambda: QSettings(os.environ.get('CLIPFLOW_SETTINGS_ORG', 'ClipFlow'), os.environ.get('CLIPFLOW_SETTINGS_APP', 'ClipFlow')).clear())\n"
+            + script
+        )
+        return subprocess.run(
+            [sys.executable, "-c", isolated_script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
 
 
 class ClipFlowQtTests(unittest.TestCase):
@@ -1172,6 +1185,154 @@ app.exec()
                 "['https://media.test/watch/1', 'https://media.test/watch/2']",
                 "[]",
                 "https://media.test/watch/2",
+            ],
+        )
+
+    def test_clipflow_qt_confirmation_buttons_put_ok_on_the_right(self):
+        script = r'''
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+preferences = window._create_preferences_dialog()
+delete_dialog = window._create_delete_confirm_dialog(Path("C:/Temp/video.mp4"))
+preferences.show()
+delete_dialog.show()
+app.processEvents()
+
+print(hasattr(preferences, "cancel_button"))
+print(hasattr(preferences, "ok_button"))
+print(preferences.cancel_button.mapTo(preferences, preferences.cancel_button.rect().topLeft()).x() < preferences.ok_button.mapTo(preferences, preferences.ok_button.rect().topLeft()).x())
+print(delete_dialog.cancel_button.mapTo(delete_dialog, delete_dialog.cancel_button.rect().topLeft()).x() < delete_dialog.ok_button.mapTo(delete_dialog, delete_dialog.ok_button.rect().topLeft()).x())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True"])
+
+    def test_clipflow_qt_spinner_advances_clockwise_and_row_uses_border_progress(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_rows import ACTIVE_STATUSES
+from tools.clipflow_theme import APP_STYLE
+from tools.clipflow_widgets import PrimaryActionButton
+
+url = "https://media.test/video"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+button = PrimaryActionButton()
+button._angle = 0
+button._advance()
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window._analysis_finished(fake_analyze(url))
+row_widget = window.rows[0]["widget"]
+row_widget.set_status(next(iter(ACTIVE_STATUSES)))
+row_widget.set_progress(42, "42% · 7.0 MB/s")
+
+print(button._angle == 332)
+print("border-radius: 8px" in APP_STYLE)
+print(row_widget.progress_bar.isHidden())
+print(row_widget.property("progressActive"))
+print(row_widget.property("progressValue"))
+print(row_widget.progress_text.isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "true", "42", "False"])
+
+    def test_clipflow_qt_playlist_analysis_uses_single_disclosure_row_and_playlist_folder(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+downloaded = []
+tempdir = tempfile.TemporaryDirectory()
+url = "https://media.test/playlist/road"
+
+def fake_analysis():
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Road Trip Mix",
+        "playlist_title": "Road Trip Mix",
+        "is_playlist": True,
+        "playlist_count": 2,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+            {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append([page_url, candidate.get("media_type"), Path(output_dir).name])
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(download_func=fake_download)
+window.folder_input.setText(tempdir.name)
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+row = window.rows[0]
+row_widget = row["widget"]
+
+print(len(window.rows))
+print(row["kind"])
+print(row["candidate"]["media_type"])
+print(row["candidate"]["item_count"])
+print(row_widget.playlist_detail_label.isHidden())
+row_widget.playlist_toggle_button.click()
+print(row_widget.playlist_detail_label.isHidden())
+print("One" in row_widget.playlist_detail_label.text())
+window.select_row(0)
+window._handle_primary_action()
+
+def drive():
+    if window.download_thread:
+        return
+    if downloaded:
+        print(downloaded)
+        tempdir.cleanup()
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "1",
+                "playlist",
+                "playlist",
+                "2",
+                "True",
+                "False",
+                "True",
+                "[['https://media.test/playlist/road', 'playlist', 'Road Trip Mix']]",
             ],
         )
 

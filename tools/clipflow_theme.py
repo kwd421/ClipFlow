@@ -37,7 +37,7 @@ QFrame#FieldBox {
 QFrame#DownloadRow {
     background: #ffffff;
     border: 1px solid #e1e8f3;
-    border-radius: 0px;
+    border-radius: 8px;
 }
 QFrame#DownloadRow[selected="true"] {
     background: #ffffff;

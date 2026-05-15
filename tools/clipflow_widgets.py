@@ -284,7 +284,7 @@ class PrimaryActionButton(QPushButton):
         return self._loading
 
     def _advance(self):
-        self._angle = (self._angle + 28) % 360
+        self._angle = (self._angle - 28) % 360
         self.update()
 
     def paintEvent(self, event):
