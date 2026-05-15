@@ -3,24 +3,47 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 try:
     from tools import downloader_engine as engine
-    from tools.clipflow_theme import (
-        ACTIONS_WIDTH, DURATION_WIDTH, FORMAT_WIDTH, MEDIA_MIN_WIDTH, QUALITY_WIDTH, ROW_COLUMN_SPACING,
-        SIZE_WIDTH, STATUS_STYLES, STATUS_WIDTH, THUMBNAIL_WIDTH,
-    )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget
-    from tools.clipflow_widgets import CleanComboBox, ThumbnailPlaceholder
+    from tools.clipflow_theme import (
+        ACTIONS_WIDTH,
+        DURATION_WIDTH,
+        MEDIA_MIN_WIDTH,
+        ROW_COLUMN_SPACING,
+        SIZE_WIDTH,
+        THUMBNAIL_WIDTH,
+    )
+    from tools.clipflow_widgets import ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
-    from clipflow_theme import (
-        ACTIONS_WIDTH, DURATION_WIDTH, FORMAT_WIDTH, MEDIA_MIN_WIDTH, QUALITY_WIDTH, ROW_COLUMN_SPACING,
-        SIZE_WIDTH, STATUS_STYLES, STATUS_WIDTH, THUMBNAIL_WIDTH,
-    )
     from clipflow_icons import LucideIconButton, LucideIconWidget
-    from clipflow_widgets import CleanComboBox, ThumbnailPlaceholder
+    from clipflow_theme import (
+        ACTIONS_WIDTH,
+        DURATION_WIDTH,
+        MEDIA_MIN_WIDTH,
+        ROW_COLUMN_SPACING,
+        SIZE_WIDTH,
+        THUMBNAIL_WIDTH,
+    )
+    from clipflow_widgets import ThumbnailPlaceholder
+
+
+ACTIVE_STATUSES = {"분석 중", "다운로드 중"}
+COMPLETED_STATUS = "완료"
+ERROR_STATUS = "오류"
+
 
 def source_domain(url):
     host = urlparse(url or "").netloc.lower()
@@ -87,7 +110,7 @@ def format_display_label(candidate):
 
 def format_sort_rank(label):
     normalized = str(label or "").upper()
-    ranks = {"MP4": 0, "WEBM": 1, "WAV": 2}
+    ranks = {"MP4": 0, "WEBM": 1, "MP3": 2, "WAV": 3, "AAC": 4}
     return ranks.get(normalized, 10)
 
 
@@ -121,7 +144,6 @@ def build_quality_options(qualities):
     return options
 
 
-
 class DownloadRowWidget(QFrame):
     def __init__(self, owner, row):
         super().__init__()
@@ -132,18 +154,18 @@ class DownloadRowWidget(QFrame):
         self.setProperty("hovered", "false")
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
-        self.setMinimumHeight(70)
+        self.setMinimumHeight(72)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._build()
         self.refresh()
 
     def _build(self):
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(12, 5, 12, 5)
+        outer.setContentsMargins(12, 6, 12, 6)
         outer.setSpacing(ROW_COLUMN_SPACING)
 
         self.thumbnail = ThumbnailPlaceholder()
-        outer.addWidget(self.thumbnail)
+        outer.addWidget(self.thumbnail, 0, Qt.AlignVCenter)
 
         self.item_widget = QWidget()
         self.item_widget.setMinimumWidth(MEDIA_MIN_WIDTH - THUMBNAIL_WIDTH - ROW_COLUMN_SPACING)
@@ -151,6 +173,7 @@ class DownloadRowWidget(QFrame):
         item_area = QVBoxLayout(self.item_widget)
         item_area.setContentsMargins(0, 0, 0, 0)
         item_area.setSpacing(3)
+
         self.title_label = QLabel()
         self.title_label.setObjectName("RowTitle")
         self.title_label.setWordWrap(False)
@@ -165,37 +188,31 @@ class DownloadRowWidget(QFrame):
         self.site_button.clicked.connect(self._open_source)
         source_line.addWidget(self.site_button)
 
-        self.domain_label = QLabel("")
-        self.domain_label.setObjectName("MetaText")
+        self.domain_label = QToolButton()
+        self.domain_label.setObjectName("SourceTextButton")
+        self.domain_label.setCursor(Qt.PointingHandCursor)
+        self.domain_label.clicked.connect(self._open_source)
         source_line.addWidget(self.domain_label)
         source_line.addStretch(1)
         item_area.addLayout(source_line)
 
+        progress_line = QHBoxLayout()
+        progress_line.setContentsMargins(0, 0, 0, 0)
+        progress_line.setSpacing(8)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setMaximumWidth(220)
+        self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.progress_text = QLabel("")
+        self.progress_text.setObjectName("MetaText")
+        progress_line.addWidget(self.progress_bar, 1)
+        progress_line.addWidget(self.progress_text, 0)
+        item_area.addLayout(progress_line)
+
         outer.addWidget(self.item_widget, 1)
-
-        self.quality_combo = CleanComboBox()
-        self.quality_combo.setFixedWidth(QUALITY_WIDTH)
-        self.quality_combo.currentIndexChanged.connect(self._quality_changed)
-        outer.addWidget(self.quality_combo)
-
-        self.quality_value_label = QLabel()
-        self.quality_value_label.setObjectName("QualityValue")
-        self.quality_value_label.setFixedWidth(QUALITY_WIDTH)
-        self.quality_value_label.setMaximumHeight(30)
-        self.quality_value_label.setAlignment(Qt.AlignCenter)
-        outer.addWidget(self.quality_value_label)
-
-        self.format_combo = CleanComboBox()
-        self.format_combo.setFixedWidth(FORMAT_WIDTH)
-        self.format_combo.currentIndexChanged.connect(self._format_changed)
-        outer.addWidget(self.format_combo)
-
-        self.format_label = QLabel()
-        self.format_label.setObjectName("FormatValue")
-        self.format_label.setFixedWidth(FORMAT_WIDTH)
-        self.format_label.setMaximumHeight(30)
-        self.format_label.setAlignment(Qt.AlignCenter)
-        outer.addWidget(self.format_label)
 
         self.info_widget = QWidget()
         self.info_widget.setFixedWidth(DURATION_WIDTH)
@@ -204,13 +221,12 @@ class DownloadRowWidget(QFrame):
         info_layout.setSpacing(4)
         info_layout.setAlignment(Qt.AlignCenter)
         self.info_icon = LucideIconWidget("clock", size=18)
-        self.info_icon.setFixedSize(18, 18)
         info_layout.addWidget(self.info_icon)
         self.info_label = QLabel()
         self.info_label.setObjectName("MetaText")
         self.info_label.setAlignment(Qt.AlignCenter)
         info_layout.addWidget(self.info_label)
-        outer.addWidget(self.info_widget)
+        outer.addWidget(self.info_widget, 0, Qt.AlignVCenter)
 
         self.size_widget = QWidget()
         self.size_widget.setFixedWidth(SIZE_WIDTH)
@@ -219,55 +235,25 @@ class DownloadRowWidget(QFrame):
         size_layout.setSpacing(4)
         size_layout.setAlignment(Qt.AlignCenter)
         self.size_icon = LucideIconWidget("file-text", size=18)
-        self.size_icon.setFixedSize(18, 18)
         size_layout.addWidget(self.size_icon)
         self.size_label = QLabel()
         self.size_label.setAlignment(Qt.AlignCenter)
         size_layout.addWidget(self.size_label)
-        outer.addWidget(self.size_widget)
+        outer.addWidget(self.size_widget, 0, Qt.AlignVCenter)
 
-        self.status_widget = QWidget()
-        self.status_widget.setFixedWidth(STATUS_WIDTH)
-        status_layout = QVBoxLayout(self.status_widget)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(3)
-        status_layout.setAlignment(Qt.AlignCenter)
-
-        self.status_row = QWidget()
-        status_row_layout = QHBoxLayout(self.status_row)
-        status_row_layout.setContentsMargins(0, 0, 0, 0)
-        status_row_layout.setSpacing(4)
-        status_row_layout.setAlignment(Qt.AlignCenter)
-
-        self.status_label = QLabel()
-        self.status_label.setObjectName("StatusPill")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setMinimumWidth(72)
-        self.status_label.setMaximumHeight(28)
-        status_row_layout.addWidget(self.status_label)
-
-        status_layout.addWidget(self.status_row, 0, Qt.AlignCenter)
-
-        self.progress_text = QLabel("")
-        self.progress_text.setObjectName("MetaText")
-        self.progress_text.setAlignment(Qt.AlignCenter)
-        status_layout.addWidget(self.progress_text, 0, Qt.AlignCenter)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.setFixedWidth(76)
-        status_layout.addWidget(self.progress_bar, 0, Qt.AlignCenter)
-        outer.addWidget(self.status_widget)
-
-        self.actions_widget = QWidget()
-        self.actions_widget.setFixedWidth(ACTIONS_WIDTH)
+        self.actions_widget = QFrame(self)
+        self.actions_widget.setObjectName("ActionOverlay")
+        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 44)
         actions = QHBoxLayout(self.actions_widget)
-        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setContentsMargins(8, 0, 8, 0)
         actions.setSpacing(4)
         actions.setAlignment(Qt.AlignCenter)
+
+        self.open_source_button = LucideIconButton("link")
+        self.open_source_button.setToolTip("원본 열기")
+        self.open_source_button.clicked.connect(self._open_source)
+        actions.addWidget(self.open_source_button)
+
         self.open_folder_button = LucideIconButton("folder")
         self.open_folder_button.setToolTip("폴더 열기")
         self.open_folder_button.clicked.connect(self._open_folder)
@@ -278,7 +264,7 @@ class DownloadRowWidget(QFrame):
         self.remove_button.clicked.connect(self._remove_row)
         actions.addWidget(self.remove_button)
 
-        self.delete_file_button = LucideIconButton("trash-2")
+        self.delete_file_button = LucideIconButton("trash-2", danger=True)
         self.delete_file_button.setToolTip("파일 삭제")
         self.delete_file_button.clicked.connect(self._delete_file)
         actions.addWidget(self.delete_file_button)
@@ -286,21 +272,23 @@ class DownloadRowWidget(QFrame):
         self.more_button = LucideIconButton("more-vertical")
         self.more_button.setToolTip("더보기")
         actions.addWidget(self.more_button)
-        outer.addWidget(self.actions_widget)
+        self.actions_widget.hide()
 
     def mousePressEvent(self, event):
         self.owner.select_row_for_widget(self)
         super().mousePressEvent(event)
 
     def enterEvent(self, event):
-        self.setProperty("hovered", "true")
-        self._repolish()
+        self._set_hovered(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self.setProperty("hovered", "false")
-        self._repolish()
+        self._set_hovered(False)
         super().leaveEvent(event)
+
+    def resizeEvent(self, event):
+        self._position_actions()
+        super().resizeEvent(event)
 
     def refresh(self):
         candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
@@ -309,75 +297,44 @@ class DownloadRowWidget(QFrame):
         self.title_label.setToolTip(str(title))
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
-        self._refresh_quality_combo()
-        self._refresh_format_combo()
         self._refresh_source_button()
         self.set_status(self.row.get("status") or "준비", self.row.get("status_detail") or "")
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
         self._refresh_actions()
 
-    def _refresh_quality_combo(self):
-        options = self.row.get("quality_options") or []
-        current = max(0, min(int(self.row.get("selected_index") or 0), len(options) - 1)) if options else 0
-        self.row["selected_index"] = current
-        self.quality_combo.blockSignals(True)
-        self.quality_combo.clear()
-        for option in options:
-            self.quality_combo.addItem(option["label"])
-        self.quality_combo.setCurrentIndex(current)
-        self.quality_combo.blockSignals(False)
-        self.quality_value_label.setText(self.quality_combo.currentText())
-        self._refresh_quality_mode()
-
-    def _refresh_format_combo(self):
-        option = self.owner.selected_quality_option_for_row_ref(self.row)
-        formats = option.get("formats") if option else []
-        current = max(0, min(int(self.row.get("selected_format_index") or 0), len(formats) - 1)) if formats else 0
-        self.row["selected_format_index"] = current
-        self.format_combo.blockSignals(True)
-        self.format_combo.clear()
-        for item in formats:
-            self.format_combo.addItem(item["label"])
-        self.format_combo.setCurrentIndex(current)
-        self.format_combo.blockSignals(False)
-        candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
-        label = format_display_label(candidate)
-        self.format_label.setText(label)
-
     def _refresh_source_button(self):
         source_url = self.row.get("source_url") or ""
         domain = source_domain(source_url)
+        tooltip = f"{domain}\n원본 링크 열기"
         self.domain_label.setText(domain)
-        self.site_button.setToolTip(f"{domain}\n원본 링크 열기")
+        self.domain_label.setToolTip(tooltip)
+        self.site_button.setToolTip(tooltip)
         self.site_button.setEnabled(bool(source_url))
+        self.domain_label.setEnabled(bool(source_url))
+        self.open_source_button.setEnabled(bool(source_url))
 
     def _refresh_actions(self):
-        active = self.row.get("status") in {"분석 중", "다운로드 중"}
+        active = self.row.get("status") in ACTIVE_STATUSES
         output_path = Path(self.row.get("output_path") or "")
+        has_output = bool(self.row.get("output_path")) and output_path.exists()
+        self.open_source_button.setEnabled(bool(self.row.get("source_url")))
+        self.open_folder_button.setEnabled(not active)
         self.remove_button.setEnabled(not active)
-        self.delete_file_button.setEnabled(bool(self.row.get("output_path")) and output_path.exists() and not active)
+        self.delete_file_button.setEnabled(has_output and not active)
+        self.more_button.setEnabled(True)
 
-    def _refresh_quality_mode(self):
-        status = self.row.get("status") or "준비"
-        completed = status == "완료"
-        self.quality_value_label.setText(self.quality_combo.currentText())
-        self.quality_combo.setHidden(completed)
-        self.quality_value_label.setHidden(not completed)
-        self.format_combo.setHidden(completed)
-        self.format_label.setHidden(not completed)
-        locked_value = "true" if completed else "false"
-        self.quality_value_label.setProperty("locked", locked_value)
-        self.format_label.setProperty("locked", locked_value)
-        for widget in (self.quality_value_label, self.format_label):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
-            widget.update()
+    def _position_actions(self):
+        width = self.actions_widget.width()
+        self.actions_widget.setGeometry(max(0, self.width() - width - 6), 0, width, self.height())
+        self.actions_widget.raise_()
 
-    def _quality_changed(self, index):
-        self.owner.quality_changed_for_row(self.row, index)
-
-    def _format_changed(self, index):
-        self.owner.format_changed_for_row(self.row, index)
+    def _set_hovered(self, hovered):
+        self.setProperty("hovered", "true" if hovered else "false")
+        self.actions_widget.setVisible(hovered)
+        if hovered:
+            self._position_actions()
+        self._refresh_actions()
+        self._repolish()
 
     def _open_source(self):
         self.owner.open_source_for_row(self.row)
@@ -403,17 +360,15 @@ class DownloadRowWidget(QFrame):
     def set_status(self, status, detail=""):
         self.row["status"] = status
         self.row["status_detail"] = detail
-        self.status_label.setText(status)
-        self.status_label.setToolTip(detail or status)
-        self.status_label.setStyleSheet(STATUS_STYLES.get(status, STATUS_STYLES["준비"]))
-        self._refresh_quality_mode()
         self._refresh_actions()
+        self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
 
     def set_progress(self, value, text=""):
         bounded = max(0, min(100, int(float(value or 0))))
         self.row["progress"] = bounded
-        active = self.row.get("status") in {"분석 중", "다운로드 중"}
-        error_detail = self.row.get("status") == "오류" and self.row.get("status_detail")
+        status = self.row.get("status")
+        active = status in ACTIVE_STATUSES
+        error_detail = status == ERROR_STATUS and self.row.get("status_detail")
         display_text = text if active else (self.row.get("status_detail") if error_detail else "")
         self.row["progress_text"] = display_text
         self.progress_bar.setValue(bounded)

@@ -54,6 +54,10 @@ QFrame#DownloadRow[selected="true"][hovered="true"] {
 QWidget#RowContainer {
     background: #ffffff;
 }
+QFrame#ActionOverlay {
+    background: rgba(255, 255, 255, 245);
+    border-left: 1px solid #edf2f8;
+}
 QFrame#ThumbBox {
     background: #e9eff7;
     border: 1px solid #d8e2ef;
@@ -69,6 +73,17 @@ QToolButton#SourceButton {
 }
 QToolButton#SourceButton:hover {
     background: #dc2626;
+}
+QToolButton#SourceTextButton {
+    background: transparent;
+    border: none;
+    color: #52627a;
+    font-size: 12px;
+    padding: 0px;
+}
+QToolButton#SourceTextButton:hover {
+    color: #2563eb;
+    background: transparent;
 }
 QToolButton#HelpButton {
     background: #ffffff;

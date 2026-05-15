@@ -353,13 +353,10 @@ def drive():
     if window.rows and not started_download:
         started_download.append(True)
         row_widget = window.rows[0]["widget"]
-        print(row_widget.quality_combo.itemText(0))
-        print(row_widget.format_combo.currentText())
-        print(row_widget.format_combo.isHidden())
-        print(row_widget.format_label.isHidden())
         print(row_widget.info_label.text())
         print(row_widget.size_label.text())
-        print(row_widget.quality_combo.isHidden())
+        print(row_widget.progress_bar.isHidden())
+        print(row_widget.progress_text.isHidden())
         window.select_row(0)
         window._handle_primary_action()
         return
@@ -370,19 +367,9 @@ def drive():
         print(row_widget.progress_text.text())
         print(row_widget.progress_bar.isHidden())
         print(row_widget.progress_text.isHidden())
-        print(row_widget.status_label.text())
-        print(row_widget.quality_combo.isHidden())
-        print(row_widget.quality_combo.isEnabled())
-        print(row_widget.format_combo.isHidden())
-        print(row_widget.format_combo.isEnabled())
+        print(hasattr(row_widget, "status_label"))
         print(hasattr(row_widget, "quality_value_label"))
-        if hasattr(row_widget, "quality_value_label"):
-            print(row_widget.quality_value_label.isHidden())
-            print(row_widget.quality_value_label.text())
-            print(row_widget.quality_value_label.property("locked"))
-        print(row_widget.format_label.isHidden())
-        print(row_widget.format_label.text())
-        print(row_widget.format_label.property("locked"))
+        print(hasattr(row_widget, "format_label"))
         print(hasattr(window, "progress"))
         app.quit()
 
@@ -398,30 +385,18 @@ app.exec()
         self.assertEqual(
             result.stdout.splitlines(),
             [
-                "1080p",
-                "MP4",
-                "False",
-                "True",
                 "00:02:00",
                 "30 B",
-                "False",
+                "True",
+                "True",
                 "1080",
                 "100",
                 "",
                 "True",
                 "True",
-                "완료",
-                "True",
-                "True",
-                "True",
-                "True",
-                "True",
                 "False",
-                "1080p",
-                "true",
                 "False",
-                "MP4",
-                "true",
+                "False",
                 "False",
             ],
         )
@@ -463,13 +438,9 @@ def drive():
     if window.rows and not started_download:
         started_download.append(True)
         row_widget = window.rows[0]["widget"]
-        print(row_widget.quality_combo.count())
-        print(row_widget.quality_combo.itemText(0))
-        print(row_widget.quality_combo.itemText(1))
-        print(row_widget.format_combo.count())
-        print(row_widget.format_combo.itemText(0))
-        print(row_widget.format_combo.itemText(1))
+        print(row_widget.size_label.text())
         window.format_pref_combo.setCurrentText("WEBM")
+        print(row_widget.size_label.text())
         window.select_row(0)
         window._handle_primary_action()
         return
@@ -488,7 +459,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["2", "1080p", "720p", "2", "MP4", "WEBM", "webm-1080"],
+            ["30 B", "40 B", "webm-1080"],
         )
 
     def test_clipflow_qt_status_column_has_no_done_check_and_shows_error_detail(self):
@@ -515,7 +486,7 @@ window._analysis_finished(fake_analyze(url))
 row_widget = window.rows[0]["widget"]
 print(hasattr(row_widget, "status_check_label"))
 row_widget.set_status("완료")
-print(row_widget.status_label.text())
+print(hasattr(row_widget, "status_label"))
 print(row_widget.progress_text.isHidden())
 row_widget.set_status("오류", "network problem")
 row_widget.set_progress(0, "")
@@ -528,7 +499,52 @@ print(row_widget.progress_bar.isHidden())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["False", "완료", "True", "False", "network problem", "True"],
+            ["False", "False", "True", "False", "network problem", "True"],
+        )
+
+    def test_clipflow_qt_row_is_simplified_and_actions_are_hover_overlay(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+opened = []
+url = "https://media.test/video"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, open_url_func=opened.append)
+window._analysis_finished(fake_analyze(url))
+row_widget = window.rows[0]["widget"]
+
+print(hasattr(row_widget, "quality_combo"))
+print(hasattr(row_widget, "format_combo"))
+print(hasattr(row_widget, "status_label"))
+print(row_widget.actions_widget.isHidden())
+row_widget._set_hovered(True)
+print(row_widget.actions_widget.isHidden())
+row_widget._set_hovered(False)
+print(row_widget.actions_widget.isHidden())
+print(row_widget.delete_file_button.property("danger"))
+row_widget.site_button.click()
+row_widget.domain_label.click()
+print(opened)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["False", "False", "False", "True", "False", "True", "true", "['https://media.test/video', 'https://media.test/video']"],
         )
 
     def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
@@ -557,7 +573,7 @@ window._analysis_finished(fake_analyze(url))
 window.show()
 app.processEvents()
 row_widget = window.rows[0]["widget"]
-fixed_column_widgets = [row_widget.quality_combo, row_widget.format_combo, row_widget.info_widget, row_widget.size_widget, row_widget.status_widget, row_widget.actions_widget]
+fixed_column_widgets = [row_widget.info_widget, row_widget.size_widget, row_widget.actions_widget]
 print(len(window.findChildren(QFrame, "HeaderBar")))
 print(row_widget.item_widget.maximumWidth() > 10000)
 print(",".join(str(widget.width()) for widget in fixed_column_widgets))
@@ -571,7 +587,7 @@ print(f"{fresh.width()}x{fresh.height()}")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["0", "True", "88,78,84,92,112,116", "560x420", "True", "720x760"],
+            ["0", "True", "84,92,160", "560x420", "True", "720x760"],
         )
 
     def test_clipflow_qt_sort_label_aligns_with_sort_dropdowns(self):

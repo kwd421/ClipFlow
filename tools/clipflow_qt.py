@@ -527,10 +527,7 @@ class ClipFlowWindow(QMainWindow):
             row["candidate"] = candidate
             widget = row.get("widget")
             if widget:
-                widget.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
-                widget.info_label.setText(row_info_text(candidate))
-                widget._refresh_format_combo()
-                widget.quality_value_label.setText(widget.quality_combo.currentText())
+                widget.refresh()
 
     def format_changed_for_row(self, row, format_index):
         if row not in self.rows:
@@ -543,9 +540,7 @@ class ClipFlowWindow(QMainWindow):
             row["candidate"] = candidate
             widget = row.get("widget")
             if widget:
-                widget.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
-                widget.info_label.setText(row_info_text(candidate))
-                widget.format_label.setText(format_display_label(candidate))
+                widget.refresh()
 
     def selected_quality_option_for_row_ref(self, row):
         if not row:

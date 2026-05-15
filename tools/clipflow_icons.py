@@ -12,6 +12,9 @@ ICON_COLOR = "#64748B"
 ICON_HOVER_COLOR = "#2563EB"
 ICON_ACTIVE_COLOR = "#1D4ED8"
 ICON_DISABLED_COLOR = "#CBD5E1"
+ICON_DANGER_COLOR = "#EF4444"
+ICON_DANGER_HOVER_COLOR = "#DC2626"
+ICON_DANGER_ACTIVE_COLOR = "#B91C1C"
 
 
 def icon_path(name):
@@ -58,17 +61,25 @@ class LucideIconWidget(QWidget):
 
 
 class LucideIconButton(QToolButton):
-    def __init__(self, icon_name, size=26, icon_size=18, parent=None):
+    def __init__(self, icon_name, size=26, icon_size=18, parent=None, danger=False):
         super().__init__(parent)
         self.icon_name = icon_name
         self.icon_size = icon_size
+        self.danger = danger
         self.setObjectName("ActionButton")
+        self.setProperty("danger", "true" if danger else "false")
         self.setFixedSize(size, size)
         self.setCursor(Qt.PointingHandCursor)
 
     def _icon_color(self):
         if not self.isEnabled():
             return ICON_DISABLED_COLOR
+        if self.danger and self.isDown():
+            return ICON_DANGER_ACTIVE_COLOR
+        if self.danger and self.underMouse():
+            return ICON_DANGER_HOVER_COLOR
+        if self.danger:
+            return ICON_DANGER_COLOR
         if self.isDown():
             return ICON_ACTIVE_COLOR
         if self.underMouse():
@@ -82,7 +93,10 @@ class LucideIconButton(QToolButton):
 
         if self.underMouse() and self.isEnabled():
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#EAF2FF" if not self.isDown() else "#DBEAFE"))
+            if self.danger:
+                painter.setBrush(QColor("#FEE2E2" if not self.isDown() else "#FECACA"))
+            else:
+                painter.setBrush(QColor("#EAF2FF" if not self.isDown() else "#DBEAFE"))
             painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 6, 6)
 
         pixmap = lucide_pixmap(self.icon_name, self.icon_size, self._icon_color())
