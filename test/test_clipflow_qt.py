@@ -473,7 +473,7 @@ print(len(window.findChildren(QFrame, "HeaderBar")))
 print(row_widget.item_widget.maximumWidth() > 10000)
 print(",".join(str(widget.width()) for widget in fixed_column_widgets))
 print(f"{window.minimumWidth()}x{window.minimumHeight()}")
-print(window.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded)
+print(window.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff)
 fresh = ClipFlowWindow()
 print(f"{fresh.width()}x{fresh.height()}")
 '''

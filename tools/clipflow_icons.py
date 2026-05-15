@@ -1,4 +1,5 @@
 from pathlib import Path
+from functools import lru_cache
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
@@ -23,14 +24,17 @@ def lucide_svg(name, color=ICON_COLOR):
     return data.replace("currentColor", color)
 
 
-def lucide_pixmap(name, size=20, color=ICON_COLOR):
+@lru_cache(maxsize=256)
+def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=2):
     renderer = QSvgRenderer(lucide_svg(name, color).encode("utf-8"))
-    pixmap = QPixmap(size, size)
+    pixel_size = int(size * scale)
+    pixmap = QPixmap(pixel_size, pixel_size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    renderer.render(painter)
+    renderer.render(painter, QRectF(0, 0, pixel_size, pixel_size))
     painter.end()
+    pixmap.setDevicePixelRatio(scale)
     return pixmap
 
 
@@ -50,8 +54,7 @@ class LucideIconWidget(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        pixmap = lucide_pixmap(self.icon_name, self.icon_size, self.color)
-        painter.drawPixmap(0, 0, pixmap)
+        painter.drawPixmap(0, 0, lucide_pixmap(self.icon_name, self.icon_size, self.color))
 
 
 class LucideIconButton(QToolButton):
@@ -98,3 +101,11 @@ class LucideIconButton(QToolButton):
     def changeEvent(self, event):
         self.update()
         super().changeEvent(event)
+
+    def mousePressEvent(self, event):
+        self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.update()

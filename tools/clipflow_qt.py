@@ -279,7 +279,7 @@ class ClipFlowWindow(QMainWindow):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
