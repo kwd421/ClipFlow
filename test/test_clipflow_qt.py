@@ -88,6 +88,31 @@ print(LucideIconButton("folder").icon_name)
             ["lucide", "True", "False", "False", "False", "folder", "folder"],
         )
 
+    def test_clipflow_qt_discovers_favicon_links_from_html(self):
+        script = r'''
+from tools.clipflow_widgets import default_favicon_urls, favicon_urls_from_html
+
+html = """
+<link rel="stylesheet" href="/site.css">
+<link rel="icon" href="/assets/icon.svg">
+<link rel="apple-touch-icon" href="touch.png">
+<link href="https://cdn.example.test/icon.png" rel="shortcut icon">
+<link rel="icon">
+"""
+print("|".join(favicon_urls_from_html(html, "https://media.example.test/posts/1")))
+print("|".join(default_favicon_urls("https://www.media.example.test/posts/1")))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "https://media.example.test/assets/icon.svg|https://media.example.test/posts/touch.png|https://cdn.example.test/icon.png",
+                "https://www.media.example.test/favicon.ico|https://www.media.example.test/favicon.png|https://www.media.example.test/apple-touch-icon.png",
+            ],
+        )
+
     def test_clipflow_qt_smoke_launches_offscreen(self):
         env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "CLIPFLOW_QT_SMOKE": "1"}
         result = subprocess.run(

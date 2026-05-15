@@ -1,4 +1,6 @@
-from urllib.parse import urlparse
+import html as html_lib
+import re
+from urllib.parse import urljoin, urlparse
 
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
@@ -50,6 +52,49 @@ def source_domain(url):
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+ATTR_RE = re.compile(r"""([:\w-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+)""", re.IGNORECASE)
+
+
+def _tag_attributes(tag):
+    attributes = {}
+    for key, raw_value in ATTR_RE.findall(str(tag or "")):
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+            value = value[1:-1]
+        attributes[key.lower()] = html_lib.unescape(value)
+    return attributes
+
+
+def favicon_urls_from_html(html_text, page_url):
+    urls = []
+    seen = set()
+    for tag in LINK_TAG_RE.findall(str(html_text or "")):
+        attrs = _tag_attributes(tag)
+        rel = attrs.get("rel", "").lower()
+        href = attrs.get("href", "").strip()
+        if "icon" not in rel or not href:
+            continue
+        icon_url = urljoin(page_url, href)
+        if icon_url and icon_url not in seen:
+            seen.add(icon_url)
+            urls.append(icon_url)
+    return urls
+
+
+def default_favicon_urls(url):
+    parsed = urlparse(str(url or ""))
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+    if not parsed.netloc:
+        return []
+    origin = f"{scheme}://{parsed.netloc}"
+    return [
+        f"{origin}/favicon.ico",
+        f"{origin}/favicon.png",
+        f"{origin}/apple-touch-icon.png",
+    ]
 
 
 class AboveTooltipMixin:
@@ -117,6 +162,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self.source_url = ""
         self.favicon_url = ""
         self._reply = None
+        self._icon_candidates = []
+        self._seen_icon_candidates = set()
+        self._page_checked = False
         self.setObjectName("SourceLinkButton")
         self.setCursor(Qt.PointingHandCursor)
         self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -150,30 +198,59 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         if cached:
             self.setIcon(cached)
             return
-        parsed = urlparse(url)
-        scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
-        netloc = parsed.netloc
-        if not netloc:
-            self.favicon_url = ""
-            return
-        self.favicon_url = f"{scheme}://{netloc}/favicon.ico"
-        request = QNetworkRequest(QUrl(self.favicon_url))
-        request.setRawHeader(b"User-Agent", b"Mozilla/5.0")
-        self._reply = self.network_manager().get(request)
-        self._reply.finished.connect(lambda domain=domain, favicon_url=self.favicon_url: self._favicon_finished(domain, favicon_url))
+        self._icon_candidates = []
+        self._seen_icon_candidates = set()
+        self._page_checked = False
+        self._queue_icon_candidates(default_favicon_urls(url))
+        self._fetch_next_icon_candidate()
 
     def _set_fallback_icon(self):
         self.setIcon(QIcon(lucide_pixmap("globe-2", 16, ICON_COLOR)))
 
-    def _favicon_finished(self, domain, favicon_url):
-        reply = self._reply
-        self._reply = None
-        if not reply:
+    def _queue_icon_candidates(self, urls):
+        for icon_url in urls:
+            if not icon_url or icon_url in self._seen_icon_candidates:
+                continue
+            self._seen_icon_candidates.add(icon_url)
+            self._icon_candidates.append(icon_url)
+
+    def _make_request(self, url):
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"User-Agent", b"Mozilla/5.0")
+        request.setRawHeader(b"Accept", b"text/html,image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8")
+        return request
+
+    def _fetch_next_icon_candidate(self):
+        domain = source_domain(self.source_url)
+        while self._icon_candidates:
+            self.favicon_url = self._icon_candidates.pop(0)
+            reply = self.network_manager().get(self._make_request(self.favicon_url))
+            self._reply = reply
+            reply.finished.connect(
+                lambda reply=reply, domain=domain, favicon_url=self.favicon_url: self._favicon_finished(
+                    reply, domain, favicon_url
+                )
+            )
             return
+        if self.source_url and not self._page_checked:
+            self._page_checked = True
+            page_url = self.source_url
+            reply = self.network_manager().get(self._make_request(page_url))
+            self._reply = reply
+            reply.finished.connect(lambda reply=reply, page_url=page_url: self._icon_page_finished(reply, page_url))
+            return
+        self.favicon_url = ""
+
+    def _favicon_finished(self, reply, domain, favicon_url):
+        if reply is not self._reply:
+            reply.deleteLater()
+            return
+        self._reply = None
         try:
             if favicon_url != self.favicon_url:
                 return
             if reply.error() != QNetworkReply.NoError:
+                self._fetch_next_icon_candidate()
                 return
             pixmap = QPixmap()
             if pixmap.loadFromData(reply.readAll()) and not pixmap.isNull():
@@ -181,6 +258,22 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
                 self._icon_cache[domain] = icon
                 if domain == source_domain(self.source_url):
                     self.setIcon(icon)
+            else:
+                self._fetch_next_icon_candidate()
+        finally:
+            reply.deleteLater()
+
+    def _icon_page_finished(self, reply, page_url):
+        if reply is not self._reply:
+            reply.deleteLater()
+            return
+        self._reply = None
+        try:
+            if reply.error() == QNetworkReply.NoError:
+                html_bytes = bytes(reply.readAll())
+                html_text = html_bytes[:524288].decode("utf-8", "ignore")
+                self._queue_icon_candidates(favicon_urls_from_html(html_text, page_url))
+            self._fetch_next_icon_candidate()
         finally:
             reply.deleteLater()
 
