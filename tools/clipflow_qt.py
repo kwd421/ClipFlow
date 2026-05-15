@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -11,7 +12,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -38,10 +38,22 @@ APP_NAME = "ClipFlow"
 DEFAULT_OUTPUT_EXT = "MP4"
 COOKIE_CHOICES = ["없음", "Chrome", "Edge", "Firefox"]
 COOKIE_DISPLAY_CHOICES = [f"쿠키: {choice}" for choice in COOKIE_CHOICES]
+TOP_FIELD_HEIGHT = 42
+PRIMARY_BUTTON_WIDTH = 150
+THUMBNAIL_WIDTH = 96
+MEDIA_MIN_WIDTH = 354
+QUALITY_WIDTH = 88
+FORMAT_WIDTH = 78
+DURATION_WIDTH = 84
+SIZE_WIDTH = 92
+STATUS_WIDTH = 112
+ACTIONS_WIDTH = 116
+ROW_COLUMN_SPACING = 10
 FONT_CANDIDATES = [
     r"C:\Windows\Fonts\NotoSansKR-Regular.ttf",
     r"C:\Windows\Fonts\malgun.ttf",
 ]
+_FONT_CONFIGURED = False
 
 APP_STYLE = """
 QMainWindow {
@@ -102,7 +114,7 @@ QToolButton#SourceButton:hover {
 QToolButton#HelpButton {
     background: #ffffff;
     border: 1px solid #9eb1ca;
-    border-radius: 14px;
+    border-radius: 21px;
     color: #1f3b70;
     font-weight: 700;
 }
@@ -251,10 +263,20 @@ STATUS_STYLES = {
 
 
 def configure_app_font(app):
+    global _FONT_CONFIGURED
+    if _FONT_CONFIGURED:
+        return
+    selected_family = ""
     for font_path in FONT_CANDIDATES:
         if Path(font_path).exists():
-            QFontDatabase.addApplicationFont(font_path)
-    app.setFont(QFont("Noto Sans KR", 10))
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+            if families and not selected_family:
+                selected_family = families[0]
+    if not selected_family:
+        selected_family = "Malgun Gothic"
+    app.setFont(QFont(selected_family, 10))
+    _FONT_CONFIGURED = True
 
 
 def create_app_icon(size=64):
@@ -390,6 +412,29 @@ class ClearingUrlInput(QLineEdit):
     def mousePressEvent(self, event):
         self.clicked_for_edit.emit()
         super().mousePressEvent(event)
+
+
+class PathDisplayInput(QLineEdit):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setReadOnly(True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setCursor(Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        self.deselect()
+        self.clearFocus()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.deselect()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        event.ignore()
 
 
 class LineIcon(QWidget):
@@ -562,7 +607,7 @@ class ThumbnailBox(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("ThumbBox")
-        self.setFixedSize(96, 54)
+        self.setFixedSize(THUMBNAIL_WIDTH, 54)
 
     def paintEvent(self, event):
         del event
@@ -665,14 +710,14 @@ class DownloadRowWidget(QFrame):
     def _build(self):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(12, 5, 12, 5)
-        outer.setSpacing(10)
+        outer.setSpacing(ROW_COLUMN_SPACING)
 
         self.thumbnail = ThumbnailBox()
         outer.addWidget(self.thumbnail)
 
         self.item_widget = QWidget()
-        self.item_widget.setMinimumWidth(248)
-        self.item_widget.setMaximumWidth(248)
+        self.item_widget.setMinimumWidth(MEDIA_MIN_WIDTH - THUMBNAIL_WIDTH - ROW_COLUMN_SPACING)
+        self.item_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         item_area = QVBoxLayout(self.item_widget)
         item_area.setContentsMargins(0, 0, 0, 0)
         item_area.setSpacing(3)
@@ -697,34 +742,34 @@ class DownloadRowWidget(QFrame):
         source_line.addStretch(1)
         item_area.addLayout(source_line)
 
-        outer.addWidget(self.item_widget)
+        outer.addWidget(self.item_widget, 1)
 
         self.quality_combo = CleanComboBox()
-        self.quality_combo.setFixedWidth(88)
+        self.quality_combo.setFixedWidth(QUALITY_WIDTH)
         self.quality_combo.currentIndexChanged.connect(self._quality_changed)
         outer.addWidget(self.quality_combo)
 
         self.quality_value_label = QLabel()
         self.quality_value_label.setObjectName("QualityValue")
-        self.quality_value_label.setFixedWidth(88)
+        self.quality_value_label.setFixedWidth(QUALITY_WIDTH)
         self.quality_value_label.setMaximumHeight(30)
         self.quality_value_label.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.quality_value_label)
 
         self.format_combo = CleanComboBox()
-        self.format_combo.setFixedWidth(78)
+        self.format_combo.setFixedWidth(FORMAT_WIDTH)
         self.format_combo.currentIndexChanged.connect(self._format_changed)
         outer.addWidget(self.format_combo)
 
         self.format_label = QLabel()
         self.format_label.setObjectName("FormatValue")
-        self.format_label.setFixedWidth(78)
+        self.format_label.setFixedWidth(FORMAT_WIDTH)
         self.format_label.setMaximumHeight(30)
         self.format_label.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.format_label)
 
         self.info_widget = QWidget()
-        self.info_widget.setFixedWidth(84)
+        self.info_widget.setFixedWidth(DURATION_WIDTH)
         info_layout = QHBoxLayout(self.info_widget)
         info_layout.setContentsMargins(0, 0, 0, 0)
         info_layout.setSpacing(4)
@@ -739,7 +784,7 @@ class DownloadRowWidget(QFrame):
         outer.addWidget(self.info_widget)
 
         self.size_widget = QWidget()
-        self.size_widget.setFixedWidth(92)
+        self.size_widget.setFixedWidth(SIZE_WIDTH)
         size_layout = QHBoxLayout(self.size_widget)
         size_layout.setContentsMargins(0, 0, 0, 0)
         size_layout.setSpacing(4)
@@ -753,7 +798,7 @@ class DownloadRowWidget(QFrame):
         outer.addWidget(self.size_widget)
 
         self.status_widget = QWidget()
-        self.status_widget.setFixedWidth(112)
+        self.status_widget.setFixedWidth(STATUS_WIDTH)
         status_layout = QVBoxLayout(self.status_widget)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(3)
@@ -794,7 +839,7 @@ class DownloadRowWidget(QFrame):
         outer.addWidget(self.status_widget)
 
         self.actions_widget = QWidget()
-        self.actions_widget.setFixedWidth(116)
+        self.actions_widget.setFixedWidth(ACTIONS_WIDTH)
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(4)
@@ -956,11 +1001,21 @@ class DownloadRowWidget(QFrame):
 
 
 class ClipFlowWindow(QMainWindow):
-    def __init__(self, analyze_func=engine.analyze_url, download_func=engine.download_candidate, open_url_func=None):
+    def __init__(
+        self,
+        analyze_func=engine.analyze_url,
+        download_func=engine.download_candidate,
+        open_url_func=None,
+        confirm_delete_func=None,
+    ):
         super().__init__()
+        app = QApplication.instance()
+        if app:
+            configure_app_font(app)
         self.analyze_func = analyze_func
         self.download_func = download_func
         self.open_url_func = open_url_func or (lambda url: QDesktopServices.openUrl(QUrl(url)))
+        self.confirm_delete_func = confirm_delete_func
         self.analysis = None
         self.rows = []
         self.analysis_thread = None
@@ -974,7 +1029,7 @@ class ClipFlowWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
         self.resize(1080, 1280)
-        self.setMinimumSize(860, 640)
+        self.setMinimumSize(1080, 640)
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
         self._refresh_primary_action()
@@ -998,6 +1053,7 @@ class ClipFlowWindow(QMainWindow):
     def _field_box(self, icon_kind, line_edit, trailing_widget=None):
         frame = QFrame()
         frame.setObjectName("FieldBox")
+        frame.setFixedHeight(TOP_FIELD_HEIGHT)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(10)
@@ -1011,10 +1067,9 @@ class ClipFlowWindow(QMainWindow):
 
     def _build_input_panel(self):
         panel = self._panel()
-        grid = QGridLayout(panel)
-        grid.setContentsMargins(18, 16, 18, 16)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
         self.url_input = ClearingUrlInput()
         self.url_input.setPlaceholderText("URL을 입력하세요")
@@ -1023,10 +1078,10 @@ class ClipFlowWindow(QMainWindow):
         url_field = self._field_box("link", self.url_input)
 
         self.primary_button = QPushButton()
-        self.primary_button.setMinimumWidth(140)
+        self.primary_button.setFixedSize(PRIMARY_BUTTON_WIDTH, TOP_FIELD_HEIGHT)
         self.primary_button.clicked.connect(self._handle_primary_action)
 
-        self.folder_input = QLineEdit(str(Path.home() / "Videos" / APP_NAME))
+        self.folder_input = PathDisplayInput(str(Path.home() / "Videos" / APP_NAME))
         self.folder_button = ActionIconButton("folder")
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
@@ -1034,24 +1089,35 @@ class ClipFlowWindow(QMainWindow):
 
         self.cookie_combo = CleanComboBox("cookie")
         self.cookie_combo.addItems(COOKIE_DISPLAY_CHOICES)
-        self.cookie_combo.setMinimumWidth(260)
+        self.cookie_combo.setFixedHeight(TOP_FIELD_HEIGHT)
+        self.cookie_combo.setMinimumWidth(300)
+        self.cookie_combo.setMaximumWidth(360)
 
         self.cookie_help_button = QToolButton()
         self.cookie_help_button.setObjectName("HelpButton")
         self.cookie_help_button.setText("?")
-        self.cookie_help_button.setFixedSize(28, 28)
+        self.cookie_help_button.setFixedSize(TOP_FIELD_HEIGHT, TOP_FIELD_HEIGHT)
         self.cookie_help_button.setToolTip(
             "로그인한 사이트의 영상이 안 보일 때만 사용하세요.\n"
             "선택한 브라우저의 로그인 세션을 읽어 접근 가능한 항목인지 확인합니다.\n"
             "비밀번호는 저장하지 않으며 권한 우회 기능은 제공하지 않습니다."
         )
 
-        grid.addWidget(url_field, 0, 0, 1, 4)
-        grid.addWidget(self.primary_button, 0, 4)
-        grid.addWidget(folder_field, 1, 0, 1, 3)
-        grid.addWidget(self.cookie_combo, 1, 3)
-        grid.addWidget(self.cookie_help_button, 1, 4)
-        grid.setColumnStretch(0, 1)
+        url_row = QHBoxLayout()
+        url_row.setContentsMargins(0, 0, 0, 0)
+        url_row.setSpacing(12)
+        url_row.addWidget(url_field, 1)
+        url_row.addWidget(self.primary_button)
+
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(0, 0, 0, 0)
+        options_row.setSpacing(12)
+        options_row.addWidget(folder_field, 1)
+        options_row.addWidget(self.cookie_combo)
+        options_row.addWidget(self.cookie_help_button, 0, Qt.AlignVCenter)
+
+        layout.addLayout(url_row)
+        layout.addLayout(options_row)
         return panel
 
     def _build_list_panel(self):
@@ -1087,23 +1153,23 @@ class ClipFlowWindow(QMainWindow):
         column_layout.setSpacing(10)
         self.header_labels = []
         for text, stretch, width in [
-            ("영상", 0, 354),
-            ("품질", 0, 88),
-            ("포맷", 0, 78),
-            ("길이", 0, 84),
-            ("크기", 0, 92),
-            ("상태", 0, 112),
-            ("작업", 0, 116),
+            ("영상", 1, MEDIA_MIN_WIDTH),
+            ("품질", 0, QUALITY_WIDTH),
+            ("포맷", 0, FORMAT_WIDTH),
+            ("길이", 0, DURATION_WIDTH),
+            ("크기", 0, SIZE_WIDTH),
+            ("상태", 0, STATUS_WIDTH),
+            ("작업", 0, ACTIONS_WIDTH),
         ]:
             label = QLabel(text)
             label.setStyleSheet("font-weight: 700; color: #344054;")
             if width:
                 label.setMinimumWidth(width)
-                label.setMaximumWidth(width)
+                if stretch == 0:
+                    label.setMaximumWidth(width)
                 label.setAlignment(Qt.AlignCenter)
             column_layout.addWidget(label, stretch)
             self.header_labels.append(label)
-        column_layout.addStretch(1)
         layout.addWidget(columns)
 
         self.scroll_area = QScrollArea()
@@ -1348,6 +1414,7 @@ class ClipFlowWindow(QMainWindow):
             return
 
         self.active_download_row = row
+        row["download_started_at"] = time.time()
         row["widget"].set_status("다운로드 중")
         row["widget"].set_progress(0, "0%")
         self.primary_button.setEnabled(False)
@@ -1376,14 +1443,50 @@ class ClipFlowWindow(QMainWindow):
     @Slot(dict)
     def _download_finished(self, result):
         if self.active_download_row:
+            self._resolve_finished_output_path(self.active_download_row, result)
             widget = self.active_download_row.get("widget")
             if widget:
                 widget.set_status("완료")
                 widget.set_progress(100, "완료")
+                widget._refresh_actions()
         self._set_status("완료")
         output_dir = result.get("output_dir") if isinstance(result, dict) else None
         if output_dir:
             self.event_messages.append(str(output_dir))
+
+    def _resolve_finished_output_path(self, row, result):
+        if not row:
+            return
+        known_value = row.get("output_path")
+        if known_value:
+            known_path = Path(known_value)
+            if known_path.exists():
+                row["output_path"] = str(known_path)
+                return
+
+        result = result if isinstance(result, dict) else {}
+        for key in ("output_path", "filepath", "filename", "path"):
+            value = result.get(key)
+            if value and Path(value).exists():
+                row["output_path"] = str(Path(value))
+                return
+
+        output_dir = Path(result.get("output_dir") or self.folder_input.text()).expanduser()
+        if not output_dir.exists():
+            return
+
+        selected = self.selected_candidate_for_row_ref(row) or {}
+        preferred_ext = (selected.get("output_ext") or selected.get("ext") or "mp4").lower()
+        extensions = [preferred_ext, "mp4", "webm", "wav"]
+        try:
+            since = max(0, float(row.get("download_started_at") or 0) - 1)
+        except (TypeError, ValueError):
+            since = 0
+        for ext in dict.fromkeys(extensions):
+            found = engine.newest_file(output_dir, ext, since=since)
+            if found and found.exists():
+                row["output_path"] = str(found)
+                return
 
     @Slot(str)
     def _download_failed(self, message):
@@ -1477,19 +1580,38 @@ class ClipFlowWindow(QMainWindow):
         output_path = Path(row.get("output_path") or "")
         if not output_path.exists() or row.get("status") == "다운로드 중":
             return
-        answer = QMessageBox.question(
-            self,
-            "파일 삭제",
-            f"파일을 삭제할까요?\n{output_path}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+        confirmed = (
+            self.confirm_delete_func(output_path)
+            if self.confirm_delete_func
+            else self._confirm_file_delete(output_path)
         )
-        if answer == QMessageBox.Yes:
+        if not confirmed:
+            return
+        try:
             output_path.unlink()
-            row["output_path"] = ""
-            widget = row.get("widget")
-            if widget:
-                widget._refresh_actions()
+        except OSError as exc:
+            QMessageBox.warning(self, "파일 삭제 실패", str(exc))
+            return
+        row["output_path"] = ""
+        widget = row.get("widget")
+        if widget:
+            widget._refresh_actions()
+
+    def _confirm_file_delete(self, output_path):
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("파일 삭제")
+        dialog.setText("파일을 삭제하시겠습니까?")
+        dialog.setInformativeText(str(output_path))
+        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        dialog.setDefaultButton(QMessageBox.No)
+        yes_button = dialog.button(QMessageBox.Yes)
+        no_button = dialog.button(QMessageBox.No)
+        if yes_button:
+            yes_button.setText("예")
+        if no_button:
+            no_button.setText("아니오")
+        return dialog.exec() == QMessageBox.Yes
 
     def _refresh_primary_action(self):
         has_url = bool(self.url_input.text().strip())

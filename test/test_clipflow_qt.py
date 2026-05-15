@@ -66,6 +66,21 @@ print(window.windowIcon().isNull())
             ],
         )
 
+    def test_clipflow_qt_window_configures_korean_font_when_created_directly(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+print("Noto Sans KR" in QApplication.font().family() or "Malgun" in QApplication.font().family())
+print(window.font().family())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0], "True")
+
     def test_clipflow_qt_analysis_prepends_and_deduplicates_rows(self):
         script = r'''
 from PySide6.QtCore import QTimer
@@ -351,6 +366,197 @@ print(row_widget.progress_bar.isHidden())
         self.assertEqual(
             result.stdout.splitlines(),
             ["True", "False", "True", "True", "False", "network problem", "True"],
+        )
+
+    def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "A very long media title that should use extra width", "display_title": "A very long media title that should use extra width", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window.resize(1500, 1100)
+window._analysis_finished(fake_analyze(url))
+window.show()
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+fixed_column_widgets = [
+    row_widget.quality_combo,
+    row_widget.format_combo,
+    row_widget.info_widget,
+    row_widget.size_widget,
+    row_widget.status_widget,
+    row_widget.actions_widget,
+]
+fixed_columns_align = all(
+    abs(label.mapTo(window, QPoint(0, 0)).x() - widget.mapTo(window, QPoint(0, 0)).x()) <= 1
+    and abs(label.width() - widget.width()) <= 1
+    for label, widget in zip(window.header_labels[1:], fixed_column_widgets)
+)
+print(row_widget.item_widget.maximumWidth() > 10000)
+print(window.header_labels[0].maximumWidth() > 10000)
+print(window.header_labels[1].minimumWidth())
+print(row_widget.quality_combo.width())
+print(row_widget.format_combo.width())
+print(fixed_columns_align)
+print(window.minimumWidth() >= 1080)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["True", "True", "88", "88", "78", "True", "True"],
+        )
+
+    def test_clipflow_qt_input_controls_keep_shared_grid_edges(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication, QFrame
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(1500, 1100)
+window.show()
+app.processEvents()
+
+field_boxes = window.findChildren(QFrame, "FieldBox")
+folder_box = field_boxes[1]
+folder_top = folder_box.mapTo(window, QPoint(0, 0)).y()
+cookie_top = window.cookie_combo.mapTo(window, QPoint(0, 0)).y()
+help_top = window.cookie_help_button.mapTo(window, QPoint(0, 0)).y()
+primary_right = window.primary_button.mapTo(window, QPoint(0, 0)).x() + window.primary_button.width()
+help_right = window.cookie_help_button.mapTo(window, QPoint(0, 0)).x() + window.cookie_help_button.width()
+
+print(folder_box.height())
+print(window.cookie_combo.height())
+print(window.cookie_help_button.height())
+print(abs(folder_top - cookie_top) <= 1)
+print(abs(folder_top - help_top) <= 1)
+print(abs(primary_right - help_right) <= 1)
+print(window.primary_button.width())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["42", "42", "42", "True", "True", "True", "150"],
+        )
+
+    def test_clipflow_qt_folder_path_is_display_only(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+window.folder_input.selectAll()
+QTest.mouseClick(window.folder_input, Qt.LeftButton)
+app.processEvents()
+
+print(window.folder_input.isReadOnly())
+print(int(window.folder_input.focusPolicy()) == int(Qt.NoFocus))
+print(window.folder_input.hasSelectedText())
+print(window.folder_input.hasFocus())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "False", "False"])
+
+    def test_clipflow_qt_delete_file_confirms_and_deletes_resolved_download_output(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+downloaded = []
+confirmed = []
+started_download = []
+tempdir = tempfile.TemporaryDirectory()
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    output = Path(output_dir) / "Video.mp4"
+    output.write_bytes(b"mp4")
+    downloaded.append(str(output))
+    return {"ok": True, "output_dir": output_dir}
+
+def confirm_delete(path):
+    confirmed.append(Path(path).name)
+    return True
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download, confirm_delete_func=confirm_delete)
+window.folder_input.setText(tempdir.name)
+window.url_input.setText("https://media.test/video")
+window._start_analysis()
+
+def drive():
+    if window.analysis_thread or window.download_thread:
+        return
+    if window.rows and not started_download:
+        started_download.append(True)
+        window.select_row(0)
+        window._handle_primary_action()
+        return
+    if downloaded:
+        row = window.rows[0]
+        row_widget = row["widget"]
+        print(row["output_path"].endswith("Video.mp4"))
+        print(row_widget.delete_file_button.isEnabled())
+        row_widget.delete_file_button.click()
+        print(confirmed)
+        print(Path(downloaded[0]).exists())
+        print(row["output_path"])
+        print(row_widget.delete_file_button.isEnabled())
+        tempdir.cleanup()
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["True", "True", "['Video.mp4']", "False", "", "False"],
         )
 
     def test_clipflow_qt_site_button_and_safe_actions(self):
