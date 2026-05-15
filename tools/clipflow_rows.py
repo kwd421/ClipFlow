@@ -297,6 +297,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.setToolTip(str(title))
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
+        self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
         self._refresh_source_button()
         self.set_status(self.row.get("status") or "준비", self.row.get("status_detail") or "")
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")

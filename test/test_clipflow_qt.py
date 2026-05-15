@@ -642,6 +642,36 @@ print(opened)
             ["False", "False", "False", "True", "True", "False", "True", "true", "['https://media.test/video', 'https://media.test/video']"],
         )
 
+    def test_clipflow_qt_row_sets_thumbnail_url_on_placeholder(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "https://img.media.test/thumb.jpg", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window._analysis_finished(fake_analyze(url))
+row_widget = window.rows[0]["widget"]
+print(row_widget.thumbnail.thumbnail_url)
+print(row_widget.thumbnail.icon.isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["https://img.media.test/thumb.jpg", "False"])
+
     def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
         script = r'''
 from PySide6.QtCore import Qt

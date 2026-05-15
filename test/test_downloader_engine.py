@@ -427,6 +427,56 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["thumbnail"], "https://thumb.example.test/thumb.jpg")
         self.assertTrue(result["candidates"][2]["is_manifest"])
 
+    def test_browser_dom_extracts_generic_video_src_with_duration_and_size(self):
+        html = """
+        <html><head>
+        <title>Generic Video</title>
+        <meta name="description" content="Video Duration: 00:56:57 File Size: 1065.87 MB">
+        </head><body>
+        <video poster="https://media.example.test/thumb.webp" src="https://cdn.example.test/video-1080p.mp4"></video>
+        </body></html>
+        """
+
+        result = engine.analyze_browser_dom_media(
+            "https://media.example.test/watch",
+            html,
+            output_ext=engine.ALL_OUTPUT_EXT,
+        )
+        candidate = result["candidates"][0]
+
+        self.assertEqual(candidate["url"], "https://cdn.example.test/video-1080p.mp4")
+        self.assertEqual(candidate["duration"], 3417)
+        self.assertEqual(candidate["thumbnail"], "https://media.example.test/thumb.webp")
+        self.assertEqual(candidate["height"], 1080)
+        self.assertEqual(candidate["sort_bytes"], 1_117_645_701)
+        self.assertEqual(candidate["size_source"], "metadata")
+
+    def test_browser_dom_challenge_page_reports_bot_block(self):
+        html = """
+        <html><head><title>Just a moment...</title></head>
+        <body><script src="https://challenges.example.test/turnstile/v0/api.js"></script></body></html>
+        """
+
+        with self.assertRaisesRegex(RuntimeError, "봇 차단/CAPTCHA"):
+            engine.analyze_browser_dom_media("https://media.example.test/watch", html)
+
+    def test_analyze_prefers_browser_challenge_error_after_tls_reset(self):
+        class ResetYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False):
+                raise RuntimeError("ConnectionResetError forcibly closed")
+
+        html = """
+        <html><head><title>Just a moment...</title></head>
+        <body><script src="https://challenges.example.test/turnstile/v0/api.js"></script></body></html>
+        """
+
+        with self.assertRaisesRegex(RuntimeError, "봇 차단/CAPTCHA"):
+            engine.analyze_url(
+                "https://media.example.test/watch",
+                ydl_factory=ResetYoutubeDL,
+                browser_dom_fetcher=lambda url, on_event=None: html,
+            )
+
     def test_analyze_uses_browser_dom_fallback_after_tls_reset(self):
         class ResetYoutubeDL(FakeYoutubeDL):
             def extract_info(self, url, download=False):

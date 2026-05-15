@@ -1053,7 +1053,102 @@ def thumbnail_from_browser_dom(dom):
     )
 
 
+def is_browser_challenge_dom(dom):
+    lower = str(dom or "").lower()
+    return (
+        "just a moment" in lower
+        or "challenges.cloudflare.com" in lower
+        or "cf-chl" in lower
+        or "turnstile" in lower
+        or "captcha" in lower
+    )
+
+
+def duration_from_browser_dom(dom):
+    text = compact_text(html_lib.unescape(str(dom or "")), limit=20000)
+    patterns = [
+        r"(?:video\s*)?duration\s*[:：]\s*(\d{1,2}:\d{2}(?::\d{2})?)",
+        r'<meta[^>]+property=["\']og:video:duration["\'][^>]+content=["\'](\d+)["\']',
+        r'<meta[^>]+content=["\'](\d+)["\'][^>]+property=["\']og:video:duration["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1)
+        if ":" not in value:
+            return safe_int(value)
+        parts = [safe_int(part) for part in value.split(":")]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        if len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return 0
+
+
+def size_from_browser_dom(dom):
+    text = compact_text(html_lib.unescape(str(dom or "")), limit=20000)
+    match = re.search(
+        r"(?:file\s*)?size\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)\s*(KB|MB|GB|B)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return 0
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    multiplier = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}.get(unit, 1)
+    return int(value * multiplier)
+
+
+def html_attrs(tag):
+    attrs = {}
+    for match in re.finditer(r"([:\w-]+)\s*=\s*(['\"])(.*?)\2", str(tag or ""), flags=re.DOTALL):
+        attrs[match.group(1).lower()] = html_lib.unescape(match.group(3)).strip()
+    return attrs
+
+
+def height_from_media_url(media_url):
+    match = re.search(r"(?<!\d)(\d{3,4})p(?!\d)", str(media_url or ""), flags=re.IGNORECASE)
+    return safe_int(match.group(1)) if match else 0
+
+
+def generic_video_media_from_html(dom, base_url):
+    text = html_lib.unescape(str(dom or "")).replace("\\/", "/")
+    items = []
+    duration = duration_from_browser_dom(text)
+    page_size = size_from_browser_dom(text)
+    for match in re.finditer(r"<video\b(?P<attrs>[^>]*)>(?P<body>.*?)</video>", text, flags=re.IGNORECASE | re.DOTALL):
+        video_attrs = html_attrs(match.group("attrs"))
+        poster = video_attrs.get("poster") or ""
+        sources = []
+        if video_attrs.get("src"):
+            sources.append((video_attrs.get("src"), video_attrs))
+        for source_match in re.finditer(r"<source\b(?P<attrs>[^>]*)>", match.group("body"), flags=re.IGNORECASE | re.DOTALL):
+            source_attrs = html_attrs(source_match.group("attrs"))
+            if source_attrs.get("src"):
+                sources.append((source_attrs.get("src"), source_attrs))
+        for media_url, attrs in sources:
+            absolute_url = urllib.parse.urljoin(base_url, media_url)
+            items.append(
+                {
+                    "videoUrl": absolute_url,
+                    "format": attrs.get("type") or "html-video",
+                    "quality": height_from_media_url(absolute_url),
+                    "height": height_from_media_url(absolute_url),
+                    "width": safe_int(attrs.get("width") or video_attrs.get("width")),
+                    "duration": duration,
+                    "filesize": page_size,
+                    "poster": urllib.parse.urljoin(base_url, poster) if poster else "",
+                    "source": "html-video",
+                }
+            )
+    return items
+
+
 def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
+    if is_browser_challenge_dom(dom):
+        raise RuntimeError("봇 차단/CAPTCHA: 브라우저 확인 페이지가 표시되었습니다.")
     requested_ext = normalized_output_ext(output_ext)
     if requested_ext in AUDIO_OUTPUT_EXTENSIONS:
         raise RuntimeError("Browser DOM fallback does not expose audio-only candidates.")
@@ -1061,11 +1156,12 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         requested_ext = None
     title = title_from_browser_dom(dom)
     thumbnail = thumbnail_from_browser_dom(dom)
+    fallback_duration = duration_from_browser_dom(dom)
     parsed = urllib.parse.urlsplit(url)
     origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
     candidates = []
     seen = set()
-    for item in [*media_definitions_from_html(dom), *player_script_media_from_html(dom)]:
+    for item in [*media_definitions_from_html(dom), *player_script_media_from_html(dom), *generic_video_media_from_html(dom, url)]:
         media_url = item.get("videoUrl") or item.get("url")
         if not media_url:
             continue
@@ -1083,12 +1179,16 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         if media_url in seen:
             continue
         seen.add(media_url)
-        height = safe_int(item.get("height") or item.get("quality"))
+        height = safe_int(item.get("height") or item.get("quality")) or height_from_media_url(media_url)
         width = safe_int(item.get("width"))
         ext = "webm" if "webm" in lower_url else "mp4"
         source = str(item.get("source") or "media")
         format_label = item.get("format") or source
         quality = item.get("quality") or ""
+        duration = safe_int(item.get("duration") or fallback_duration)
+        size = safe_int(item.get("filesize") or item.get("filesize_approx"))
+        size_source = "metadata" if size else "unknown"
+        filesize, filesize_approx = candidate_filesize_fields({"filesize": size, "url": media_url}, size, size_source)
         format_id_label = f"browser-{height}" if height else f"browser-{format_label}"
         candidates.append(
             {
@@ -1098,8 +1198,8 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "url": media_url,
                 "title": title,
                 "display_title": title,
-                "thumbnail": thumbnail,
-                "duration": 0,
+                "thumbnail": item.get("poster") or thumbnail,
+                "duration": duration,
                 "ext": requested_ext or ext,
                 "source_ext": ext,
                 "output_ext": requested_ext or ext,
@@ -1108,10 +1208,10 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "fps": 0,
                 "vcodec": "unknown",
                 "acodec": "unknown",
-                "filesize": 0,
-                "filesize_approx": 0,
-                "sort_bytes": 0,
-                "size_source": "unknown",
+                "filesize": filesize,
+                "filesize_approx": filesize_approx,
+                "sort_bytes": size,
+                "size_source": size_source,
                 "source": url,
                 "protocol": "m3u8" if is_hls else ("dash" if is_dash else "https"),
                 "is_manifest": is_hls or is_dash,
@@ -1121,7 +1221,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "note": f"browser {format_label} {quality}".strip(),
             }
         )
-    candidates = sort_candidates(candidates)
+    candidates = sort_candidates(enrich_missing_sizes(candidates))
     if not candidates:
         raise RuntimeError("Browser DOM fallback found no downloadable media entries.")
     return {
@@ -1209,6 +1309,8 @@ def analyze_url(
                 warning = "브라우저 DOM fallback 실패: " + str(browser_exc)
                 warnings.append(warning)
                 emit_event(on_event, "log", message=warning)
+                if classify_error(str(browser_exc)) == "봇 차단/CAPTCHA":
+                    raise browser_exc
         if pending_error:
             raise pending_error
         raise RuntimeError("URL analysis failed.")

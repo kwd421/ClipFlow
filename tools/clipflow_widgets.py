@@ -1,5 +1,6 @@
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QPushButton
 
 try:
@@ -90,15 +91,85 @@ class CleanComboBox(QComboBox):
 
 
 class ThumbnailPlaceholder(QFrame):
+    _network_manager = None
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("ThumbBox")
         self.setFixedSize(THUMBNAIL_WIDTH, 54)
         self.icon = LucideIconWidget("video", size=24, color="#94A3B8", parent=self)
+        self.thumbnail_url = ""
+        self._pixmap = QPixmap()
+        self._reply = None
+
+    @classmethod
+    def network_manager(cls):
+        if cls._network_manager is None:
+            cls._network_manager = QNetworkAccessManager()
+        return cls._network_manager
+
+    def set_thumbnail_url(self, url, referer=""):
+        url = str(url or "").strip()
+        if url == self.thumbnail_url:
+            return
+        self.thumbnail_url = url
+        self._pixmap = QPixmap()
+        self.icon.show()
+        if self._reply:
+            self._reply.abort()
+            self._reply = None
+        if not url:
+            self.update()
+            return
+        parsed = QUrl.fromUserInput(url)
+        if parsed.isLocalFile():
+            self._set_pixmap(QPixmap(parsed.toLocalFile()))
+            return
+        if parsed.scheme() not in {"http", "https"}:
+            self.update()
+            return
+        request = QNetworkRequest(parsed)
+        if referer:
+            request.setRawHeader(b"Referer", str(referer).encode("utf-8"))
+        self._reply = self.network_manager().get(request)
+        self._reply.finished.connect(self._thumbnail_finished)
+
+    def _thumbnail_finished(self):
+        reply = self._reply
+        self._reply = None
+        if not reply:
+            return
+        try:
+            if reply.error() == QNetworkReply.NoError:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(reply.readAll()):
+                    self._set_pixmap(pixmap)
+        finally:
+            reply.deleteLater()
+
+    def _set_pixmap(self, pixmap):
+        if pixmap.isNull():
+            self.icon.show()
+            self.update()
+            return
+        self._pixmap = pixmap
+        self.icon.hide()
+        self.update()
 
     def resizeEvent(self, event):
         self.icon.move((self.width() - self.icon.width()) // 2, (self.height() - self.icon.height()) // 2)
         super().resizeEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
 
 
 class PrimaryActionButton(QPushButton):
