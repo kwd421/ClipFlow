@@ -1,7 +1,21 @@
+from dataclasses import dataclass
+
 try:
     from tools import downloader_engine as engine
 except ImportError:
     import downloader_engine as engine
+
+
+VIDEO_FORMATS = ["mp4", "webm"]
+AUDIO_FORMATS = ["mp3", "wav", "aac"]
+
+
+@dataclass(frozen=True)
+class DownloadPreferences:
+    quality: str = "자동"
+    output_format: str = "MP4"
+    codec: str = "자동"
+    frame_rate: str = "자동"
 
 
 def candidate_group_key(candidate):
@@ -46,6 +60,107 @@ def quality_label(candidate):
         return f"{ext} · {size} · {note}"
     resolution = candidate.get("resolution") or "unknown"
     return f"{resolution} · {ext} · {size}"
+
+
+def _normalized_format(candidate):
+    return str(candidate.get("output_ext") or candidate.get("ext") or "").strip().lower()
+
+
+def _format_family(format_label):
+    normalized = str(format_label or "").strip().lower()
+    return "audio" if normalized in AUDIO_FORMATS else "video"
+
+
+def _format_order(format_label):
+    normalized = str(format_label or "").strip().lower()
+    if normalized in AUDIO_FORMATS:
+        return [normalized] + [item for item in AUDIO_FORMATS if item != normalized]
+    preferred = normalized if normalized in VIDEO_FORMATS else VIDEO_FORMATS[0]
+    return [preferred] + [item for item in VIDEO_FORMATS if item != preferred]
+
+
+def _candidate_family(candidate):
+    media_type = str(candidate.get("media_type") or "").lower()
+    return "audio" if media_type == "audio" or _normalized_format(candidate) in AUDIO_FORMATS else "video"
+
+
+def _codec_name(candidate):
+    codec = str(candidate.get("vcodec") or "").lower()
+    if codec.startswith(("avc", "h264")):
+        return "H264"
+    if codec.startswith(("hev", "h265")):
+        return "H265"
+    if codec.startswith(("av01", "av1")):
+        return "AV1"
+    if codec.startswith(("vp9", "vp09")):
+        return "VP9"
+    return codec.upper()
+
+
+def _target_height(quality):
+    text = str(quality or "").strip().lower()
+    if text in {"", "자동", "auto"}:
+        return 0
+    digits = "".join(char for char in text if char.isdigit())
+    return int(digits) if digits else 0
+
+
+def _target_fps(frame_rate):
+    text = str(frame_rate or "").strip().lower()
+    if text in {"", "자동", "auto"}:
+        return 0
+    digits = "".join(char for char in text if char.isdigit())
+    return int(digits) if digits else 0
+
+
+def _best_candidate(candidates, preferences):
+    candidates = list(candidates or [])
+    target_height = _target_height(preferences.quality)
+    target_fps = _target_fps(preferences.frame_rate)
+    target_codec = str(preferences.codec or "").strip().upper()
+    codec_auto = target_codec in {"", "자동", "AUTO"}
+    if target_height and any(engine.safe_int(candidate.get("height")) <= target_height for candidate in candidates):
+        candidates = [
+            candidate
+            for candidate in candidates
+            if engine.safe_int(candidate.get("height")) <= target_height
+        ]
+    if target_fps and any(engine.safe_int(candidate.get("fps")) <= target_fps for candidate in candidates):
+        candidates = [
+            candidate
+            for candidate in candidates
+            if engine.safe_int(candidate.get("fps")) <= target_fps
+        ]
+
+    def score(candidate):
+        height = engine.safe_int(candidate.get("height"))
+        fps = engine.safe_int(candidate.get("fps"))
+        size = engine.safe_int(candidate.get("sort_bytes"))
+        codec = _codec_name(candidate)
+        codec_score = 1 if codec_auto or codec == target_codec else 0
+        return (codec_score, height, fps, size)
+
+    return max(candidates, key=score) if candidates else None
+
+
+def select_candidate_for_preferences(candidates, preferences):
+    preferences = preferences or DownloadPreferences()
+    family = _format_family(preferences.output_format)
+    family_candidates = [
+        candidate
+        for candidate in candidates or []
+        if _candidate_family(candidate) == family
+    ]
+    for output_format in _format_order(preferences.output_format):
+        matching = [
+            candidate
+            for candidate in family_candidates
+            if _normalized_format(candidate) == output_format
+        ]
+        selected = _best_candidate(matching, preferences)
+        if selected:
+            return selected
+    return _best_candidate(family_candidates, preferences)
 
 
 def filter_manifest_duplicates(candidates):

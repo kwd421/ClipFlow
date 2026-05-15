@@ -125,6 +125,96 @@ print(window.windowIcon().isNull())
             ],
         )
 
+    def test_clipflow_qt_global_download_preferences_drive_selected_candidate(self):
+        script = r'''
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+downloaded = []
+analyze_exts = []
+started_download = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    analyze_exts.append(output_ext)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "webm-1080", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "webm", "output_ext": "webm", "resolution": "1080p", "height": 1080, "fps": 60, "duration": 120, "sort_bytes": 40, "vcodec": "vp9"},
+            {"id": "mp4-720", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "720p", "height": 720, "fps": 30, "duration": 120, "sort_bytes": 20, "vcodec": "avc1"},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append(candidate["id"])
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window.format_pref_combo.setCurrentText("WEBM")
+window.url_input.setText("https://media.test/video")
+window._start_analysis()
+
+def drive():
+    if window.analysis_thread or window.download_thread:
+        return
+    if window.rows and not started_download:
+        started_download.append(True)
+        row_widget = window.rows[0]["widget"]
+        print(analyze_exts)
+        print(window.quality_pref_combo.currentText())
+        print(window.codec_pref_combo.currentText())
+        print(window.frame_pref_combo.currentText())
+        print(window.selected_candidate_for_row_ref(window.rows[0])["id"])
+        print(row_widget.size_label.text())
+        print(row_widget.info_label.text())
+        window.select_row(0)
+        window._handle_primary_action()
+        return
+    if downloaded:
+        print(downloaded[0])
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["[None]", "자동", "자동", "자동", "webm-1080", "40 B", "00:02:00", "webm-1080"],
+        )
+
+    def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.format_pref_combo.setCurrentText("MP3")
+window._refresh_preference_controls()
+
+print(window.codec_pref_combo.isEnabled())
+print(window.frame_pref_combo.isEnabled())
+window.format_pref_combo.setCurrentText("MP4")
+window._refresh_preference_controls()
+print(window.codec_pref_combo.isEnabled())
+print(window.frame_pref_combo.isEnabled())
+print(window.cookie_combo.maximumWidth() <= 190)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "False", "True", "True", "True"])
+
     def test_clipflow_qt_window_configures_korean_font_when_created_directly(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
@@ -270,7 +360,6 @@ def drive():
         print(row_widget.info_label.text())
         print(row_widget.size_label.text())
         print(row_widget.quality_combo.isHidden())
-        row_widget.quality_combo.setCurrentIndex(1)
         window.select_row(0)
         window._handle_primary_action()
         return
@@ -316,7 +405,7 @@ app.exec()
                 "00:02:00",
                 "30 B",
                 "False",
-                "720",
+                "1080",
                 "100",
                 "",
                 "True",
@@ -328,7 +417,7 @@ app.exec()
                 "True",
                 "True",
                 "False",
-                "720p",
+                "1080p",
                 "true",
                 "False",
                 "MP4",
@@ -380,7 +469,7 @@ def drive():
         print(row_widget.format_combo.count())
         print(row_widget.format_combo.itemText(0))
         print(row_widget.format_combo.itemText(1))
-        row_widget.format_combo.setCurrentIndex(1)
+        window.format_pref_combo.setCurrentText("WEBM")
         window.select_row(0)
         window._handle_primary_action()
         return

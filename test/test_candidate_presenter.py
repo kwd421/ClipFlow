@@ -68,6 +68,81 @@ class CandidatePresenterTests(unittest.TestCase):
         self.assertIn("WAV", label)
         self.assertNotIn("p", label.lower())
 
+    def test_select_candidate_auto_quality_and_frame_prefers_best_available(self):
+        candidates = [
+            {"id": "1080-30", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 100},
+            {"id": "1080-60", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1", "sort_bytes": 120},
+            {"id": "720-60", "output_ext": "mp4", "height": 720, "fps": 60, "vcodec": "avc1", "sort_bytes": 90},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "1080-60")
+
+    def test_select_candidate_uses_same_family_format_fallback(self):
+        candidates = [
+            {"id": "webm", "output_ext": "webm", "height": 1080, "fps": 30, "vcodec": "vp9", "sort_bytes": 100},
+            {"id": "audio", "media_type": "audio", "output_ext": "wav", "height": 0, "fps": 0, "vcodec": "none", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "webm")
+
+    def test_select_candidate_never_falls_between_video_and_audio_families(self):
+        candidates = [
+            {"id": "audio", "media_type": "audio", "output_ext": "wav", "height": 0, "fps": 0, "vcodec": "none", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertIsNone(selected)
+
+    def test_select_candidate_specific_quality_uses_nearest_lower_then_best_same_family(self):
+        candidates = [
+            {"id": "1440", "output_ext": "mp4", "height": 1440, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},
+            {"id": "720", "output_ext": "mp4", "height": 720, "fps": 30, "vcodec": "avc1", "sort_bytes": 100},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+        fallback = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="360p", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "720")
+        self.assertEqual(fallback["id"], "1440")
+
+    def test_select_candidate_codec_prefers_exact_match_then_falls_back(self):
+        candidates = [
+            {"id": "vp9", "output_ext": "webm", "height": 1080, "fps": 30, "vcodec": "vp9", "sort_bytes": 100},
+            {"id": "av1", "output_ext": "webm", "height": 1080, "fps": 30, "vcodec": "av01", "sort_bytes": 90},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="WEBM", codec="AV1", frame_rate="자동"),
+        )
+        fallback = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="WEBM", codec="H264", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "av1")
+        self.assertEqual(fallback["id"], "vp9")
+
 
 if __name__ == "__main__":
     unittest.main()

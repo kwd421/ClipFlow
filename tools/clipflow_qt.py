@@ -72,6 +72,10 @@ def cookie_source_from_display(display_text):
     return text or "없음"
 
 
+def _combo_text(combo):
+    return str(combo.currentText()).strip()
+
+
 class AnalyzeWorker(QObject):
     event = Signal(dict)
     finished = Signal(dict)
@@ -217,8 +221,8 @@ class ClipFlowWindow(QMainWindow):
         self.cookie_combo = CleanComboBox("cookie")
         self.cookie_combo.addItems(COOKIE_DISPLAY_CHOICES)
         self.cookie_combo.setFixedHeight(TOP_FIELD_HEIGHT)
-        self.cookie_combo.setMinimumWidth(300)
-        self.cookie_combo.setMaximumWidth(360)
+        self.cookie_combo.setMinimumWidth(168)
+        self.cookie_combo.setMaximumWidth(184)
 
         self.cookie_help_button = QToolButton()
         self.cookie_help_button.setObjectName("HelpButton")
@@ -275,6 +279,35 @@ class ClipFlowWindow(QMainWindow):
         header.addWidget(self.sort_direction_combo, 0, Qt.AlignVCenter)
         layout.addLayout(header)
 
+        preferences = QHBoxLayout()
+        preferences.setContentsMargins(0, 0, 0, 0)
+        preferences.setSpacing(8)
+        self.quality_pref_combo = CleanComboBox()
+        self.quality_pref_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        self.quality_pref_combo.setFixedWidth(96)
+        self.format_pref_combo = CleanComboBox()
+        self.format_pref_combo.addItems(["MP4", "WEBM", "MP3", "WAV", "AAC"])
+        self.format_pref_combo.setFixedWidth(86)
+        self.codec_pref_combo = CleanComboBox()
+        self.codec_pref_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
+        self.codec_pref_combo.setFixedWidth(96)
+        self.frame_pref_combo = CleanComboBox()
+        self.frame_pref_combo.addItems(["자동", "60fps", "30fps"])
+        self.frame_pref_combo.setFixedWidth(96)
+        for combo in (self.quality_pref_combo, self.format_pref_combo, self.codec_pref_combo, self.frame_pref_combo):
+            combo.currentIndexChanged.connect(self._preferences_changed)
+        preferences.addWidget(QLabel("품질"))
+        preferences.addWidget(self.quality_pref_combo)
+        preferences.addWidget(QLabel("포맷"))
+        preferences.addWidget(self.format_pref_combo)
+        preferences.addWidget(QLabel("코덱"))
+        preferences.addWidget(self.codec_pref_combo)
+        preferences.addWidget(QLabel("프레임"))
+        preferences.addWidget(self.frame_pref_combo)
+        preferences.addStretch(1)
+        layout.addLayout(preferences)
+        self._refresh_preference_controls()
+
         self.header_labels = []
 
         self.scroll_area = QScrollArea()
@@ -318,6 +351,29 @@ class ClipFlowWindow(QMainWindow):
         if folder:
             self._set_save_folder(folder)
 
+    def current_preferences(self):
+        return presenter.DownloadPreferences(
+            quality=_combo_text(self.quality_pref_combo),
+            output_format=_combo_text(self.format_pref_combo),
+            codec=_combo_text(self.codec_pref_combo),
+            frame_rate=_combo_text(self.frame_pref_combo),
+        )
+
+    def _refresh_preference_controls(self):
+        audio_format = _combo_text(self.format_pref_combo).lower() in presenter.AUDIO_FORMATS
+        self.codec_pref_combo.setEnabled(not audio_format)
+        self.frame_pref_combo.setEnabled(not audio_format)
+
+    def _preferences_changed(self):
+        self._refresh_preference_controls()
+        for row in self.rows:
+            candidate = self.selected_candidate_for_row_ref(row)
+            if candidate:
+                row["candidate"] = candidate
+                widget = row.get("widget")
+                if widget:
+                    widget.refresh()
+
     def _initial_save_folder(self):
         saved = self.settings.value(SAVE_FOLDER_SETTING, "", str)
         if saved:
@@ -357,7 +413,7 @@ class ClipFlowWindow(QMainWindow):
         self.analysis_worker = AnalyzeWorker(
             url,
             cookie_source_from_display(self.cookie_combo.currentText()),
-            DEFAULT_OUTPUT_EXT,
+            None,
             self.analyze_func,
         )
         self.analysis_worker.moveToThread(self.analysis_thread)
@@ -505,6 +561,9 @@ class ClipFlowWindow(QMainWindow):
         return options[selected_index]
 
     def selected_candidate_for_row_ref(self, row):
+        selected = presenter.select_candidate_for_preferences(row.get("qualities") or [], self.current_preferences())
+        if selected:
+            return selected
         option = self.selected_quality_option_for_row_ref(row)
         if not option:
             return None
