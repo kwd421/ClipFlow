@@ -133,8 +133,8 @@ class ClipFlowWindow(QMainWindow):
         self._clear_url_on_next_click = False
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
-        self.resize(1080, 1280)
-        self.setMinimumSize(1080, 640)
+        self.resize(720, 760)
+        self.setMinimumSize(560, 420)
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
         self._refresh_primary_action()
@@ -257,7 +257,7 @@ class ClipFlowWindow(QMainWindow):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)

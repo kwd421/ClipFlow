@@ -416,6 +416,7 @@ print(row_widget.progress_bar.isHidden())
 
     def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
         script = r'''
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFrame
 from tools.clipflow_qt import ClipFlowWindow
 
@@ -443,14 +444,17 @@ fixed_column_widgets = [row_widget.quality_combo, row_widget.format_combo, row_w
 print(len(window.findChildren(QFrame, "HeaderBar")))
 print(row_widget.item_widget.maximumWidth() > 10000)
 print(",".join(str(widget.width()) for widget in fixed_column_widgets))
-print(window.minimumWidth() >= 1080)
+print(f"{window.minimumWidth()}x{window.minimumHeight()}")
+print(window.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded)
+fresh = ClipFlowWindow()
+print(f"{fresh.width()}x{fresh.height()}")
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["0", "True", "88,78,84,92,112,116", "True"],
+            ["0", "True", "88,78,84,92,112,116", "560x420", "True", "720x760"],
         )
 
     def test_clipflow_qt_sort_label_aligns_with_sort_dropdowns(self):
