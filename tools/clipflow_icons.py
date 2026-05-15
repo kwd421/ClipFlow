@@ -1,10 +1,10 @@
 from pathlib import Path
 from functools import lru_cache
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QToolButton, QWidget
+from PySide6.QtWidgets import QToolButton, QToolTip, QWidget
 
 
 LUCIDE_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "icons" / "lucide"
@@ -83,6 +83,15 @@ class LucideIconButton(QToolButton):
         self.setProperty("danger", "true" if danger else "false")
         self.setFixedSize(size, size)
         self.setCursor(Qt.PointingHandCursor)
+
+    def tooltip_position(self):
+        return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
+
+    def event(self, event):
+        if event.type() == event.Type.ToolTip and self.toolTip():
+            QToolTip.showText(self.tooltip_position(), self.toolTip(), self)
+            return True
+        return super().event(event)
 
     def _icon_color(self):
         if not self.isEnabled():

@@ -190,6 +190,13 @@ QToolButton:hover {
 QToolButton:disabled {
     color: #aeb8c7;
 }
+QToolTip {
+    background: #ffffff;
+    color: #1f2937;
+    border: 1px solid #cbdaf1;
+    border-radius: 6px;
+    padding: 6px 8px;
+}
 QProgressBar {
     border: none;
     border-radius: 3px;

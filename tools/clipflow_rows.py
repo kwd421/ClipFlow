@@ -24,7 +24,7 @@ try:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import SourceLinkButton, ThumbnailPlaceholder
+    from tools.clipflow_widgets import MarqueeLabel, SourceLinkButton, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
     from clipflow_icons import LucideIconButton, LucideIconWidget
@@ -36,7 +36,7 @@ except ImportError:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import SourceLinkButton, ThumbnailPlaceholder
+    from clipflow_widgets import MarqueeLabel, SourceLinkButton, ThumbnailPlaceholder
 
 
 ACTIVE_STATUSES = {"분석 중", "다운로드 중"}
@@ -173,7 +173,7 @@ class DownloadRowWidget(QFrame):
         self.playlist_toggle_button.setToolTip("펼치기/접기")
         self.playlist_toggle_button.clicked.connect(self._toggle_playlist)
         title_line.addWidget(self.playlist_toggle_button, 0, Qt.AlignVCenter)
-        self.title_label = QLabel()
+        self.title_label = MarqueeLabel()
         self.title_label.setObjectName("RowTitle")
         self.title_label.setWordWrap(False)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
@@ -289,6 +289,7 @@ class DownloadRowWidget(QFrame):
         title = candidate.get("display_title") or candidate.get("title") or "media"
         self.title_label.setText(str(title))
         self.title_label.setToolTip(str(title))
+        self.title_label.start_marquee_if_needed()
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")

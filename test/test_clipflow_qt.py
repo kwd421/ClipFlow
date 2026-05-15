@@ -1336,6 +1336,64 @@ app.exec()
             ],
         )
 
+    def test_clipflow_qt_long_titles_use_marquee_label(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+long_title = "This is a very long video title that should scroll horizontally when it does not fit"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": long_title,
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": long_title, "display_title": long_title, "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window._analysis_finished(fake_analyze(url))
+row_widget = window.rows[0]["widget"]
+label = row_widget.title_label
+label.setFixedWidth(120)
+label.start_marquee_if_needed()
+label._advance_marquee()
+print(type(label).__name__)
+print(label._marquee_offset > 0)
+label.stop_marquee()
+print(label._marquee_offset)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["MarqueeLabel", "True", "0"])
+
+    def test_clipflow_qt_tooltips_are_styled_and_positioned_above_icon_buttons(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_icons import LucideIconButton
+from tools.clipflow_theme import APP_STYLE
+
+app = QApplication([])
+button = LucideIconButton("folder", size=32, icon_size=18)
+button.setToolTip("Folder")
+button.show()
+app.processEvents()
+position = button.tooltip_position()
+global_top = button.mapToGlobal(button.rect().topLeft()).y()
+print("QToolTip" in APP_STYLE)
+print(position.y() < global_top)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+
 
 if __name__ == "__main__":
     unittest.main()

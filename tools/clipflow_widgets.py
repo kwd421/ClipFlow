@@ -1,9 +1,9 @@
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QPushButton, QToolButton
+from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QToolTip
 
 try:
     from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
@@ -52,7 +52,63 @@ def source_domain(url):
     return host
 
 
-class SourceLinkButton(QToolButton):
+class AboveTooltipMixin:
+    def tooltip_position(self):
+        return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
+
+    def event(self, event):
+        if event.type() == event.Type.ToolTip and self.toolTip():
+            QToolTip.showText(self.tooltip_position(), self.toolTip(), self)
+            return True
+        return super().event(event)
+
+
+class MarqueeLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._marquee_offset = 0
+        self._marquee_timer = QTimer(self)
+        self._marquee_timer.setInterval(80)
+        self._marquee_timer.timeout.connect(self._advance_marquee)
+
+    def start_marquee_if_needed(self):
+        overflow = self.fontMetrics().horizontalAdvance(self.text()) > max(1, self.width() - 4)
+        if overflow and not self._marquee_timer.isActive():
+            self._marquee_timer.start()
+        elif not overflow:
+            self.stop_marquee()
+
+    def stop_marquee(self):
+        self._marquee_timer.stop()
+        self._marquee_offset = 0
+        self.update()
+
+    def _advance_marquee(self):
+        text_width = self.fontMetrics().horizontalAdvance(self.text())
+        if text_width <= self.width():
+            self.stop_marquee()
+            return
+        self._marquee_offset = (self._marquee_offset + 2) % (text_width + 36)
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.start_marquee_if_needed()
+
+    def paintEvent(self, event):
+        if not self._marquee_timer.isActive() or not self.text():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setPen(QColor("#111827"))
+        text_width = self.fontMetrics().horizontalAdvance(self.text())
+        y = (self.height() + self.fontMetrics().ascent() - self.fontMetrics().descent()) // 2
+        x = -self._marquee_offset
+        painter.drawText(x, y, self.text())
+        painter.drawText(x + text_width + 36, y, self.text())
+
+
+class SourceLinkButton(AboveTooltipMixin, QToolButton):
     _network_manager = None
     _icon_cache = {}
 
