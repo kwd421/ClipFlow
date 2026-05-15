@@ -82,6 +82,20 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "1080-60")
 
+    def test_select_candidate_auto_format_uses_best_original_video_candidate(self):
+        candidates = [
+            {"id": "mp4-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},
+            {"id": "webm-1440", "output_ext": "webm", "height": 1440, "fps": 30, "vcodec": "vp9", "sort_bytes": 240},
+            {"id": "audio", "media_type": "audio", "output_ext": "mp3", "height": 0, "fps": 0, "vcodec": "none", "sort_bytes": 20},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "webm-1440")
+
     def test_select_candidate_uses_same_family_format_fallback(self):
         candidates = [
             {"id": "webm", "output_ext": "webm", "height": 1080, "fps": 30, "vcodec": "vp9", "sort_bytes": 100},

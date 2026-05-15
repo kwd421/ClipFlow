@@ -57,15 +57,28 @@ class LucideIconWidget(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.drawPixmap(0, 0, lucide_pixmap(self.icon_name, self.icon_size, self.color))
+        painter.drawPixmap(0, 0, self.icon_size, self.icon_size, lucide_pixmap(self.icon_name, self.icon_size, self.color))
 
 
 class LucideIconButton(QToolButton):
-    def __init__(self, icon_name, size=26, icon_size=18, parent=None, danger=False):
+    def __init__(
+        self,
+        icon_name,
+        size=26,
+        icon_size=18,
+        parent=None,
+        danger=False,
+        icon_color=None,
+        background=None,
+        hover_background=None,
+    ):
         super().__init__(parent)
         self.icon_name = icon_name
         self.icon_size = icon_size
         self.danger = danger
+        self.icon_color = icon_color
+        self.background = background
+        self.hover_background = hover_background
         self.setObjectName("ActionButton")
         self.setProperty("danger", "true" if danger else "false")
         self.setFixedSize(size, size)
@@ -80,6 +93,8 @@ class LucideIconButton(QToolButton):
             return ICON_DANGER_HOVER_COLOR
         if self.danger:
             return ICON_DANGER_COLOR
+        if self.icon_color:
+            return self.icon_color
         if self.isDown():
             return ICON_ACTIVE_COLOR
         if self.underMouse():
@@ -91,7 +106,12 @@ class LucideIconButton(QToolButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        if self.underMouse() and self.isEnabled():
+        if self.background and self.isEnabled():
+            painter.setPen(Qt.NoPen)
+            background = self.hover_background if self.underMouse() and self.hover_background else self.background
+            painter.setBrush(QColor(background))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 5, 5)
+        elif self.underMouse() and self.isEnabled():
             painter.setPen(Qt.NoPen)
             if self.danger:
                 painter.setBrush(QColor("#FEE2E2" if not self.isDown() else "#FECACA"))
@@ -102,7 +122,7 @@ class LucideIconButton(QToolButton):
         pixmap = lucide_pixmap(self.icon_name, self.icon_size, self._icon_color())
         x = (self.width() - self.icon_size) // 2
         y = (self.height() - self.icon_size) // 2
-        painter.drawPixmap(x, y, pixmap)
+        painter.drawPixmap(x, y, self.icon_size, self.icon_size, pixmap)
 
     def enterEvent(self, event):
         self.update()

@@ -13,7 +13,7 @@ AUDIO_FORMATS = ["mp3", "wav", "aac"]
 @dataclass(frozen=True)
 class DownloadPreferences:
     quality: str = "자동"
-    output_format: str = "MP4"
+    output_format: str = "자동"
     codec: str = "자동"
     frame_rate: str = "자동"
 
@@ -79,6 +79,10 @@ def _format_order(format_label):
         return [normalized] + [item for item in AUDIO_FORMATS if item != normalized]
     preferred = normalized if normalized in VIDEO_FORMATS else VIDEO_FORMATS[0]
     return [preferred] + [item for item in VIDEO_FORMATS if item != preferred]
+
+
+def _is_auto(value):
+    return str(value or "").strip().lower() in {"", "자동", "auto"}
 
 
 def _candidate_family(candidate):
@@ -154,6 +158,8 @@ def select_candidate_for_preferences(candidates, preferences):
         for candidate in candidates or []
         if _candidate_family(candidate) == family and _normalized_format(candidate) in allowed_formats
     ]
+    if _is_auto(preferences.output_format):
+        return _best_candidate(family_candidates, preferences)
     for output_format in _format_order(preferences.output_format):
         matching = [
             candidate

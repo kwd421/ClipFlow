@@ -58,7 +58,7 @@ from PySide6.QtWidgets import QApplication
 from tools.clipflow_icons import LUCIDE_ICON_DIR, LucideIconButton, LucideIconWidget, icon_path
 
 app = QApplication([])
-required = ["link", "folder", "x", "trash-2", "more-vertical", "clock", "file-text", "circle-help", "chevron-down", "play", "video", "cookie"]
+required = ["link", "folder", "x", "trash-2", "more-vertical", "clock", "file-text", "circle-help", "chevron-down", "play", "video", "cookie", "sliders-horizontal", "arrow-down-wide-narrow", "arrow-up-narrow-wide", "circle-x"]
 print(LUCIDE_ICON_DIR.name)
 print(all(icon_path(name).is_file() for name in required))
 print(hasattr(widgets, "LineIcon"))
@@ -101,6 +101,8 @@ print(hasattr(window, "progress"))
 print(window.primary_button.text())
 print(window.cookie_combo.itemText(0))
 print(hasattr(window, "cookie_help_button"))
+print(hasattr(window, "preference_button"))
+print(bool(window.cookie_combo.toolTip()))
 print(hasattr(window, "row_container"))
 print("Noto Sans KR" in window.styleSheet())
 print(len(window.findChildren(QFrame, "HeaderBar")))
@@ -117,6 +119,8 @@ print(window.windowIcon().isNull())
                 "False",
                 "붙여넣기",
                 "쿠키: 없음",
+                "False",
+                "True",
                 "True",
                 "True",
                 "True",
@@ -128,8 +132,10 @@ print(window.windowIcon().isNull())
     def test_clipflow_qt_global_download_preferences_drive_selected_candidate(self):
         script = r'''
 from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
-from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
+import tempfile
 
 downloaded = []
 analyze_exts = []
@@ -153,8 +159,16 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     return {"ok": True, "output_dir": output_dir}
 
 app = QApplication([])
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
 window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
-window.format_pref_combo.setCurrentText("WEBM")
+print(window.current_preferences().quality)
+print(window.current_preferences().output_format)
+print(window.current_preferences().codec)
+print(window.current_preferences().frame_rate)
+window._set_preferences(output_format="WEBM")
 window.url_input.setText("https://media.test/video")
 window._start_analysis()
 
@@ -165,9 +179,7 @@ def drive():
         started_download.append(True)
         row_widget = window.rows[0]["widget"]
         print(analyze_exts)
-        print(window.quality_pref_combo.currentText())
-        print(window.codec_pref_combo.currentText())
-        print(window.frame_pref_combo.currentText())
+        print(window.current_preferences().output_format)
         print(window.selected_candidate_for_row_ref(window.rows[0])["id"])
         print(row_widget.size_label.text())
         print(row_widget.info_label.text())
@@ -176,6 +188,7 @@ def drive():
         return
     if downloaded:
         print(downloaded[0])
+        settings_dir.cleanup()
         app.quit()
 
 timer = QTimer()
@@ -189,7 +202,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["['all']", "자동", "자동", "자동", "webm-1080", "40 B", "00:02:00", "webm-1080"],
+            ["자동", "자동", "자동", "자동", "['all']", "WEBM", "webm-1080", "40 B", "00:02:00", "webm-1080"],
         )
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
@@ -199,21 +212,91 @@ from tools.clipflow_qt import ClipFlowWindow
 
 app = QApplication([])
 window = ClipFlowWindow()
-window.format_pref_combo.setCurrentText("MP3")
-window._refresh_preference_controls()
-
-print(window.codec_pref_combo.isEnabled())
-print(window.frame_pref_combo.isEnabled())
-window.format_pref_combo.setCurrentText("MP4")
-window._refresh_preference_controls()
-print(window.codec_pref_combo.isEnabled())
-print(window.frame_pref_combo.isEnabled())
-print(window.cookie_combo.maximumWidth() <= 190)
+dialog = window._create_preferences_dialog()
+dialog.format_combo.setCurrentText("MP3")
+dialog.refresh_controls()
+print(dialog.codec_combo.isEnabled())
+print(dialog.frame_combo.isEnabled())
+dialog.format_combo.setCurrentText("MP4")
+dialog.refresh_controls()
+print(dialog.codec_combo.isEnabled())
+print(dialog.frame_combo.isEnabled())
+print(window.cookie_combo.maximumWidth() <= 142)
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["False", "False", "True", "True", "True"])
+
+    def test_clipflow_qt_download_preferences_persist_with_qsettings(self):
+        script = r'''
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._set_preferences(quality="720p", output_format="WEBM", codec="VP9", frame_rate="60fps")
+second = ClipFlowWindow()
+
+print(second.current_preferences().quality)
+print(second.current_preferences().output_format)
+print(second.current_preferences().codec)
+print(second.current_preferences().frame_rate)
+settings_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["720p", "WEBM", "VP9", "60fps"])
+
+    def test_clipflow_qt_analyze_button_shows_loading_spinner(self):
+        script = r'''
+import time
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    time.sleep(0.25)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window.url_input.setText("https://media.test/video")
+window._start_analysis()
+print(window.primary_button.is_loading())
+
+def drive():
+    if window.analysis_thread:
+        return
+    print(window.primary_button.is_loading())
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False"])
 
     def test_clipflow_qt_window_configures_korean_font_when_created_directly(self):
         script = r'''
@@ -316,9 +399,11 @@ print(window.count_label.text())
     def test_clipflow_qt_download_uses_selected_quality_and_row_local_progress(self):
         script = r'''
 from pathlib import Path
+import tempfile
+from PySide6.QtCore import QSettings
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
-from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
 
 downloaded = []
 started_download = []
@@ -343,6 +428,10 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     return {"ok": True, "output_dir": output_dir}
 
 app = QApplication([])
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
 window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
 window.url_input.setText("https://media.test/video")
 window._start_analysis()
@@ -371,6 +460,7 @@ def drive():
         print(hasattr(row_widget, "quality_value_label"))
         print(hasattr(row_widget, "format_label"))
         print(hasattr(window, "progress"))
+        settings_dir.cleanup()
         app.quit()
 
 timer = QTimer()
@@ -438,8 +528,10 @@ def drive():
     if window.rows and not started_download:
         started_download.append(True)
         row_widget = window.rows[0]["widget"]
+        print(window.selected_candidate_for_row_ref(window.rows[0])["id"])
         print(row_widget.size_label.text())
-        window.format_pref_combo.setCurrentText("WEBM")
+        window._set_preferences(output_format="WEBM")
+        print(window.selected_candidate_for_row_ref(window.rows[0])["id"])
         print(row_widget.size_label.text())
         window.select_row(0)
         window._handle_primary_action()
@@ -459,7 +551,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["30 B", "40 B", "webm-1080"],
+            ["webm-1080", "40 B", "webm-1080", "40 B", "webm-1080"],
         )
 
     def test_clipflow_qt_status_column_has_no_done_check_and_shows_error_detail(self):
@@ -532,6 +624,9 @@ print(hasattr(row_widget, "status_label"))
 print(row_widget.actions_widget.isHidden())
 row_widget._set_hovered(True)
 print(row_widget.actions_widget.isHidden())
+row_widget.set_status("완료")
+row_widget._set_hovered(True)
+print(row_widget.actions_widget.isHidden())
 row_widget._set_hovered(False)
 print(row_widget.actions_widget.isHidden())
 print(row_widget.delete_file_button.property("danger"))
@@ -544,7 +639,7 @@ print(opened)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["False", "False", "False", "True", "False", "True", "true", "['https://media.test/video', 'https://media.test/video']"],
+            ["False", "False", "False", "True", "True", "False", "True", "true", "['https://media.test/video', 'https://media.test/video']"],
         )
 
     def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
@@ -590,7 +685,7 @@ print(f"{fresh.width()}x{fresh.height()}")
             ["0", "True", "84,92,184", "560x420", "True", "720x760"],
         )
 
-    def test_clipflow_qt_sort_label_aligns_with_sort_dropdowns(self):
+    def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
         script = r'''
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
@@ -604,14 +699,17 @@ app.processEvents()
 
 label_top = window.sort_label.mapTo(window, QPoint(0, 0)).y()
 combo_top = window.sort_order_combo.mapTo(window, QPoint(0, 0)).y()
+button_top = window.sort_direction_button.mapTo(window, QPoint(0, 0)).y()
 print(window.sort_label.height())
 print(window.sort_order_combo.height())
 print(abs(label_top - combo_top) <= 1)
+print(abs(label_top - button_top) <= 1)
+print(hasattr(window, "sort_direction_combo"))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["40", "40", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["40", "40", "True", "True", "False"])
 
     def test_clipflow_qt_input_controls_keep_shared_grid_edges(self):
         script = r'''
@@ -629,24 +727,23 @@ field_boxes = window.findChildren(QFrame, "FieldBox")
 folder_box = field_boxes[1]
 folder_top = folder_box.mapTo(window, QPoint(0, 0)).y()
 cookie_top = window.cookie_combo.mapTo(window, QPoint(0, 0)).y()
-help_top = window.cookie_help_button.mapTo(window, QPoint(0, 0)).y()
 primary_right = window.primary_button.mapTo(window, QPoint(0, 0)).x() + window.primary_button.width()
-help_right = window.cookie_help_button.mapTo(window, QPoint(0, 0)).x() + window.cookie_help_button.width()
+cookie_right = window.cookie_combo.mapTo(window, QPoint(0, 0)).x() + window.cookie_combo.width()
 
 print(folder_box.height())
 print(window.cookie_combo.height())
-print(window.cookie_help_button.height())
+print(window.folder_button.text())
 print(abs(folder_top - cookie_top) <= 1)
-print(abs(folder_top - help_top) <= 1)
-print(abs(primary_right - help_right) <= 1)
+print(abs(primary_right - cookie_right) <= 1)
 print(window.primary_button.width())
+print(hasattr(window, "cookie_help_button"))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["42", "42", "42", "True", "True", "True", "150"],
+            ["42", "42", "찾아보기", "True", "True", "150", "False"],
         )
 
     def test_clipflow_qt_folder_path_is_display_only(self):
@@ -850,9 +947,9 @@ app.exec()
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["https://media.test/watch/1", "True", "False", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["https://media.test/watch/1", "True", "False", "False"])
 
-    def test_clipflow_qt_url_click_clears_input_without_clearing_rows(self):
+    def test_clipflow_qt_url_click_keeps_input_and_clear_button_clears_it(self):
         script = r'''
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
@@ -884,6 +981,10 @@ def drive():
         print(window.url_input.text())
         print(len(window.rows))
         print(window.primary_button.text())
+        window.clear_url_button.click()
+        print(window.url_input.text())
+        print(len(window.rows))
+        print(window.primary_button.text())
         app.quit()
 
 timer = QTimer()
@@ -895,7 +996,10 @@ app.exec()
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["", "1", "붙여넣기"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["https://media.test/watch/1", "1", "다운로드", "", "1", "붙여넣기"],
+        )
 
 
     def test_clipflow_qt_changed_url_analyzes_instead_of_downloading_selected_row(self):

@@ -1,6 +1,6 @@
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit
+from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QPushButton
 
 try:
     from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
@@ -67,14 +67,14 @@ class CleanComboBox(QComboBox):
         text_left = 38 if self.icon_kind else 11
         if self.icon_kind:
             icon_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
-            painter.drawPixmap(14, (self.height() - 16) // 2, lucide_pixmap(self.icon_kind, 16, icon_color))
+            painter.drawPixmap(14, (self.height() - 16) // 2, 16, 16, lucide_pixmap(self.icon_kind, 16, icon_color))
 
         text_rect = self.rect().adjusted(text_left, 0, -28, 0)
         painter.setPen(QColor(text_color))
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.currentText())
 
         arrow_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
-        painter.drawPixmap(self.width() - 22, (self.height() - 14) // 2, lucide_pixmap("chevron-down", 14, arrow_color))
+        painter.drawPixmap(self.width() - 22, (self.height() - 14) // 2, 14, 14, lucide_pixmap("chevron-down", 14, arrow_color))
 
     def enterEvent(self, event):
         self.update()
@@ -99,3 +99,45 @@ class ThumbnailPlaceholder(QFrame):
     def resizeEvent(self, event):
         self.icon.move((self.width() - self.icon.width()) // 2, (self.height() - self.icon.height()) // 2)
         super().resizeEvent(event)
+
+
+class PrimaryActionButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(70)
+        self._timer.timeout.connect(self._advance)
+
+    def set_loading(self, loading):
+        loading = bool(loading)
+        if self._loading == loading:
+            return
+        self._loading = loading
+        if loading:
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._angle = 0
+        self.update()
+
+    def is_loading(self):
+        return self._loading
+
+    def _advance(self):
+        self._angle = (self._angle + 28) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._loading:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#FFFFFF"), 2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        size = 14
+        rect = QRectF(20, (self.height() - size) / 2, size, size)
+        painter.drawArc(rect, int(self._angle * 16), int(270 * 16))

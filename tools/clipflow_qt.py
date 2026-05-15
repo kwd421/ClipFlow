@@ -7,8 +7,11 @@ from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QTim
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -16,7 +19,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -30,7 +32,7 @@ try:
         TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget
-    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput
+    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -40,12 +42,27 @@ except ImportError:
         TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget
-    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput
+    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
 
 
 SETTINGS_ORG = "ClipFlow"
 SETTINGS_APP = "ClipFlow"
 SAVE_FOLDER_SETTING = "save_folder"
+PREF_QUALITY_SETTING = "download_quality"
+PREF_FORMAT_SETTING = "download_format"
+PREF_CODEC_SETTING = "download_codec"
+PREF_FRAME_SETTING = "download_frame"
+SORT_KEY_SETTING = "sort_key"
+SORT_DESC_SETTING = "sort_desc"
+
+PREFERENCE_DEFAULTS = {
+    "quality": "자동",
+    "output_format": "자동",
+    "codec": "자동",
+    "frame_rate": "자동",
+}
+SORT_LABELS = {"latest": "최신순", "name": "이름순"}
+SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
 
 
 def default_save_folder():
@@ -130,6 +147,71 @@ class DownloadWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class PreferencesDialog(QDialog):
+    def __init__(self, preferences, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("품질 설정")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        form = QGridLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        self.quality_combo = CleanComboBox()
+        self.quality_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        self.format_combo = CleanComboBox()
+        self.format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
+        self.codec_combo = CleanComboBox()
+        self.codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
+        self.frame_combo = CleanComboBox()
+        self.frame_combo.addItems(["자동", "60fps", "30fps"])
+
+        self.quality_combo.setCurrentText(preferences.quality)
+        self.format_combo.setCurrentText(preferences.output_format)
+        self.codec_combo.setCurrentText(preferences.codec)
+        self.frame_combo.setCurrentText(preferences.frame_rate)
+        self.format_combo.currentIndexChanged.connect(self.refresh_controls)
+
+        for row, (label, combo) in enumerate(
+            (
+                ("품질", self.quality_combo),
+                ("포맷", self.format_combo),
+                ("코덱", self.codec_combo),
+                ("프레임", self.frame_combo),
+            )
+        ):
+            label_widget = QLabel(label)
+            label_widget.setObjectName("MetaText")
+            form.addWidget(label_widget, row, 0)
+            form.addWidget(combo, row, 1)
+
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.refresh_controls()
+
+    def refresh_controls(self):
+        audio_format = self.format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
+        self.codec_combo.setEnabled(not audio_format)
+        self.frame_combo.setEnabled(not audio_format)
+
+    def preferences(self):
+        return presenter.DownloadPreferences(
+            quality=_combo_text(self.quality_combo),
+            output_format=_combo_text(self.format_combo),
+            codec=_combo_text(self.codec_combo),
+            frame_rate=_combo_text(self.frame_combo),
+        )
+
+
 class ClipFlowWindow(QMainWindow):
     def __init__(
         self,
@@ -145,6 +227,11 @@ class ClipFlowWindow(QMainWindow):
         self.analyze_func = analyze_func
         self.download_func = download_func
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self.preference_values = self._initial_preferences()
+        self.sort_key = self.settings.value(SORT_KEY_SETTING, "latest", str) or "latest"
+        if self.sort_key not in SORT_LABELS:
+            self.sort_key = "latest"
+        self.sort_desc = str(self.settings.value(SORT_DESC_SETTING, "true", str)).lower() != "false"
         self.open_url_func = open_url_func or (lambda url: QDesktopServices.openUrl(QUrl(url)))
         self.confirm_delete_func = confirm_delete_func
         self.analysis = None
@@ -157,6 +244,7 @@ class ClipFlowWindow(QMainWindow):
         self.selected_row_index = -1
         self.event_messages = []
         self._clear_url_on_next_click = False
+        self._row_sequence = 0
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
         self.resize(720, 760)
@@ -206,14 +294,19 @@ class ClipFlowWindow(QMainWindow):
         self.url_input.setPlaceholderText("URL을 입력하세요")
         self.url_input.textChanged.connect(self._refresh_primary_action)
         self.url_input.clicked_for_edit.connect(self._prepare_url_edit)
-        url_field = self._field_box("link", self.url_input)
+        self.clear_url_button = LucideIconButton("circle-x", size=30, icon_size=16)
+        self.clear_url_button.setToolTip("URL 지우기")
+        self.clear_url_button.clicked.connect(self._clear_url)
+        url_field = self._field_box("link", self.url_input, self.clear_url_button)
 
-        self.primary_button = QPushButton()
+        self.primary_button = PrimaryActionButton()
         self.primary_button.setFixedSize(PRIMARY_BUTTON_WIDTH, TOP_FIELD_HEIGHT)
         self.primary_button.clicked.connect(self._handle_primary_action)
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
-        self.folder_button = LucideIconButton("folder")
+        self.folder_button = QPushButton("찾아보기")
+        self.folder_button.setObjectName("SecondaryButton")
+        self.folder_button.setFixedSize(92, TOP_FIELD_HEIGHT - 8)
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
         folder_field = self._field_box("folder", self.folder_input, self.folder_button)
@@ -221,14 +314,9 @@ class ClipFlowWindow(QMainWindow):
         self.cookie_combo = CleanComboBox("cookie")
         self.cookie_combo.addItems(COOKIE_DISPLAY_CHOICES)
         self.cookie_combo.setFixedHeight(TOP_FIELD_HEIGHT)
-        self.cookie_combo.setMinimumWidth(168)
-        self.cookie_combo.setMaximumWidth(184)
-
-        self.cookie_help_button = QToolButton()
-        self.cookie_help_button.setObjectName("HelpButton")
-        self.cookie_help_button.setText("?")
-        self.cookie_help_button.setFixedSize(TOP_FIELD_HEIGHT, TOP_FIELD_HEIGHT)
-        self.cookie_help_button.setToolTip(
+        self.cookie_combo.setMinimumWidth(132)
+        self.cookie_combo.setMaximumWidth(142)
+        self.cookie_combo.setToolTip(
             "로그인한 사이트의 영상이 안 보일 때만 사용하세요.\n"
             "선택한 브라우저의 로그인 세션을 읽어 접근 가능한 항목인지 확인합니다.\n"
             "비밀번호는 저장하지 않으며 권한 우회 기능은 제공하지 않습니다."
@@ -245,7 +333,6 @@ class ClipFlowWindow(QMainWindow):
         options_row.setSpacing(12)
         options_row.addWidget(folder_field, 1)
         options_row.addWidget(self.cookie_combo)
-        options_row.addWidget(self.cookie_help_button, 0, Qt.AlignVCenter)
 
         layout.addLayout(url_row)
         layout.addLayout(options_row)
@@ -267,46 +354,25 @@ class ClipFlowWindow(QMainWindow):
         self.sort_label.setFixedHeight(TOP_FIELD_HEIGHT - 2)
         self.sort_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         self.sort_order_combo = CleanComboBox()
-        self.sort_order_combo.addItems(["최신순"])
+        self.sort_order_combo.addItems(["최신순", "이름순"])
+        self.sort_order_combo.setCurrentText(SORT_LABELS.get(self.sort_key, "최신순"))
+        self.sort_order_combo.currentIndexChanged.connect(self._sort_changed)
         self.sort_order_combo.setMaximumWidth(120)
-        self.sort_direction_combo = CleanComboBox()
-        self.sort_direction_combo.addItems(["내림차순"])
-        self.sort_direction_combo.setMaximumWidth(120)
+        self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=40, icon_size=18)
+        self.sort_direction_button.clicked.connect(self._toggle_sort_direction)
+        self._refresh_sort_direction_button()
+        self.preference_button = QPushButton("품질")
+        self.preference_button.setObjectName("SecondaryButton")
+        self.preference_button.setFixedSize(74, TOP_FIELD_HEIGHT - 2)
+        self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
+        self.preference_button.clicked.connect(self._open_preferences_dialog)
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.sort_label, 0, Qt.AlignVCenter)
         header.addWidget(self.sort_order_combo, 0, Qt.AlignVCenter)
-        header.addWidget(self.sort_direction_combo, 0, Qt.AlignVCenter)
+        header.addWidget(self.sort_direction_button, 0, Qt.AlignVCenter)
+        header.addWidget(self.preference_button, 0, Qt.AlignVCenter)
         layout.addLayout(header)
-
-        preferences = QHBoxLayout()
-        preferences.setContentsMargins(0, 0, 0, 0)
-        preferences.setSpacing(8)
-        self.quality_pref_combo = CleanComboBox()
-        self.quality_pref_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
-        self.quality_pref_combo.setFixedWidth(96)
-        self.format_pref_combo = CleanComboBox()
-        self.format_pref_combo.addItems(["MP4", "WEBM", "MP3", "WAV", "AAC"])
-        self.format_pref_combo.setFixedWidth(86)
-        self.codec_pref_combo = CleanComboBox()
-        self.codec_pref_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
-        self.codec_pref_combo.setFixedWidth(96)
-        self.frame_pref_combo = CleanComboBox()
-        self.frame_pref_combo.addItems(["자동", "60fps", "30fps"])
-        self.frame_pref_combo.setFixedWidth(96)
-        for combo in (self.quality_pref_combo, self.format_pref_combo, self.codec_pref_combo, self.frame_pref_combo):
-            combo.currentIndexChanged.connect(self._preferences_changed)
-        preferences.addWidget(QLabel("품질"))
-        preferences.addWidget(self.quality_pref_combo)
-        preferences.addWidget(QLabel("포맷"))
-        preferences.addWidget(self.format_pref_combo)
-        preferences.addWidget(QLabel("코덱"))
-        preferences.addWidget(self.codec_pref_combo)
-        preferences.addWidget(QLabel("프레임"))
-        preferences.addWidget(self.frame_pref_combo)
-        preferences.addStretch(1)
-        layout.addLayout(preferences)
-        self._refresh_preference_controls()
 
         self.header_labels = []
 
@@ -338,13 +404,12 @@ class ClipFlowWindow(QMainWindow):
         return footer
 
     def _prepare_url_edit(self):
-        if self._clear_url_on_next_click and self.url_input.text().strip():
-            self.url_input.clear()
-            self.analysis = None
-            self.selected_row_index = -1
-            self._clear_url_on_next_click = False
-            self._refresh_row_selection()
-            self._refresh_primary_action()
+        return
+
+    def _clear_url(self):
+        self.url_input.clear()
+        self._clear_url_on_next_click = False
+        self._refresh_primary_action()
 
     def _choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.folder_input.text())
@@ -352,20 +417,9 @@ class ClipFlowWindow(QMainWindow):
             self._set_save_folder(folder)
 
     def current_preferences(self):
-        return presenter.DownloadPreferences(
-            quality=_combo_text(self.quality_pref_combo),
-            output_format=_combo_text(self.format_pref_combo),
-            codec=_combo_text(self.codec_pref_combo),
-            frame_rate=_combo_text(self.frame_pref_combo),
-        )
-
-    def _refresh_preference_controls(self):
-        audio_format = _combo_text(self.format_pref_combo).lower() in presenter.AUDIO_FORMATS
-        self.codec_pref_combo.setEnabled(not audio_format)
-        self.frame_pref_combo.setEnabled(not audio_format)
+        return presenter.DownloadPreferences(**self.preference_values)
 
     def _preferences_changed(self):
-        self._refresh_preference_controls()
         for row in self.rows:
             candidate = self.selected_candidate_for_row_ref(row)
             if candidate:
@@ -373,6 +427,42 @@ class ClipFlowWindow(QMainWindow):
                 widget = row.get("widget")
                 if widget:
                     widget.refresh()
+
+    def _initial_preferences(self):
+        return {
+            "quality": self.settings.value(PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS["quality"], str),
+            "output_format": self.settings.value(PREF_FORMAT_SETTING, PREFERENCE_DEFAULTS["output_format"], str),
+            "codec": self.settings.value(PREF_CODEC_SETTING, PREFERENCE_DEFAULTS["codec"], str),
+            "frame_rate": self.settings.value(PREF_FRAME_SETTING, PREFERENCE_DEFAULTS["frame_rate"], str),
+        }
+
+    def _set_preferences(self, quality=None, output_format=None, codec=None, frame_rate=None):
+        values = {
+            "quality": quality or self.preference_values.get("quality") or PREFERENCE_DEFAULTS["quality"],
+            "output_format": output_format or self.preference_values.get("output_format") or PREFERENCE_DEFAULTS["output_format"],
+            "codec": codec or self.preference_values.get("codec") or PREFERENCE_DEFAULTS["codec"],
+            "frame_rate": frame_rate or self.preference_values.get("frame_rate") or PREFERENCE_DEFAULTS["frame_rate"],
+        }
+        self.preference_values = values
+        self.settings.setValue(PREF_QUALITY_SETTING, values["quality"])
+        self.settings.setValue(PREF_FORMAT_SETTING, values["output_format"])
+        self.settings.setValue(PREF_CODEC_SETTING, values["codec"])
+        self.settings.setValue(PREF_FRAME_SETTING, values["frame_rate"])
+        self._preferences_changed()
+
+    def _create_preferences_dialog(self):
+        return PreferencesDialog(self.current_preferences(), self)
+
+    def _open_preferences_dialog(self):
+        dialog = self._create_preferences_dialog()
+        if dialog.exec() == QDialog.Accepted:
+            preferences = dialog.preferences()
+            self._set_preferences(
+                quality=preferences.quality,
+                output_format=preferences.output_format,
+                codec=preferences.codec,
+                frame_rate=preferences.frame_rate,
+            )
 
     def _initial_save_folder(self):
         saved = self.settings.value(SAVE_FOLDER_SETTING, "", str)
@@ -407,6 +497,8 @@ class ClipFlowWindow(QMainWindow):
         self.analysis = None
         self.selected_row_index = -1
         self.primary_button.setEnabled(False)
+        self.primary_button.setText("분석 중")
+        self.primary_button.set_loading(True)
         self._set_status("분석 중")
 
         self.analysis_thread = QThread(self)
@@ -433,7 +525,7 @@ class ClipFlowWindow(QMainWindow):
         grouped = presenter.group_candidates(analysis.get("candidates") or [])
         source_url = analysis.get("webpage_url") or analysis.get("url") or self.url_input.text().strip()
         self._prepend_analysis_rows(analysis, grouped, source_url)
-        self._clear_url_on_next_click = True
+        self._clear_url_on_next_click = False
         self._set_status(f"분석 완료: {len(grouped)}개")
         self._refresh_footer()
         for warning in analysis.get("warnings") or []:
@@ -446,6 +538,7 @@ class ClipFlowWindow(QMainWindow):
     @Slot()
     def _analysis_thread_finished(self):
         self.primary_button.setEnabled(True)
+        self.primary_button.set_loading(False)
         self.analysis_thread = None
         self.analysis_worker = None
         self._refresh_primary_action()
@@ -475,13 +568,16 @@ class ClipFlowWindow(QMainWindow):
                 "progress_text": "",
                 "output_path": "",
                 "messages": [],
+                "created_order": self._next_row_sequence(),
             }
             new_rows.append(row)
         self.rows = new_rows + preserved_rows
+        self._sort_rows()
         self.selected_row_index = 0 if self.rows else -1
         self._render_rows()
 
     def _render_rows(self):
+        self._sort_rows()
         while self.row_layout.count() > 1:
             item = self.row_layout.takeAt(0)
             widget = item.widget()
@@ -495,6 +591,42 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_footer()
         self._refresh_row_selection()
         self._refresh_primary_action()
+
+    def _next_row_sequence(self):
+        self._row_sequence += 1
+        return self._row_sequence
+
+    def _sort_rows(self):
+        reverse = bool(self.sort_desc)
+        if self.sort_key == "name":
+            self.rows.sort(key=lambda row: self._row_sort_name(row), reverse=reverse)
+        else:
+            self.rows.sort(key=lambda row: int(row.get("created_order") or 0), reverse=reverse)
+
+    def _row_sort_name(self, row):
+        candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        return str(candidate.get("display_title") or candidate.get("title") or "").casefold()
+
+    def _sort_changed(self):
+        self.sort_key = SORT_KEYS_BY_LABEL.get(self.sort_order_combo.currentText(), "latest")
+        self.settings.setValue(SORT_KEY_SETTING, self.sort_key)
+        self._render_rows()
+
+    def _sort_direction_icon(self):
+        return "arrow-down-wide-narrow" if self.sort_desc else "arrow-up-narrow-wide"
+
+    def _refresh_sort_direction_button(self):
+        if not hasattr(self, "sort_direction_button"):
+            return
+        self.sort_direction_button.icon_name = self._sort_direction_icon()
+        self.sort_direction_button.setToolTip("내림차순" if self.sort_desc else "오름차순")
+        self.sort_direction_button.update()
+
+    def _toggle_sort_direction(self):
+        self.sort_desc = not self.sort_desc
+        self.settings.setValue(SORT_DESC_SETTING, "true" if self.sort_desc else "false")
+        self._refresh_sort_direction_button()
+        self._render_rows()
 
     def select_row(self, index):
         if index < 0 or index >= len(self.rows):

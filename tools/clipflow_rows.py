@@ -296,7 +296,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.setText(str(title))
         self.title_label.setToolTip(str(title))
         self.info_label.setText(row_info_text(candidate))
-        self.size_label.setText(engine.display_size(candidate.get("sort_bytes")))
+        self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
         self._refresh_source_button()
         self.set_status(self.row.get("status") or "준비", self.row.get("status_detail") or "")
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
@@ -315,13 +315,14 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_actions(self):
         active = self.row.get("status") in ACTIVE_STATUSES
+        completed = self.row.get("status") == COMPLETED_STATUS
         output_path = Path(self.row.get("output_path") or "")
         has_output = bool(self.row.get("output_path")) and output_path.exists()
-        self.open_source_button.setEnabled(bool(self.row.get("source_url")))
-        self.open_folder_button.setEnabled(not active)
-        self.remove_button.setEnabled(not active)
-        self.delete_file_button.setEnabled(has_output and not active)
-        self.more_button.setEnabled(True)
+        self.open_source_button.setEnabled(completed and bool(self.row.get("source_url")))
+        self.open_folder_button.setEnabled(completed and not active)
+        self.remove_button.setEnabled(completed and not active)
+        self.delete_file_button.setEnabled(completed and has_output and not active)
+        self.more_button.setEnabled(completed)
 
     def _position_actions(self):
         width = self.actions_widget.width()
@@ -330,8 +331,9 @@ class DownloadRowWidget(QFrame):
 
     def _set_hovered(self, hovered):
         self.setProperty("hovered", "true" if hovered else "false")
-        self.actions_widget.setVisible(hovered)
-        if hovered:
+        show_actions = hovered and self.row.get("status") == COMPLETED_STATUS
+        self.actions_widget.setVisible(show_actions)
+        if show_actions:
             self._position_actions()
         self._refresh_actions()
         self._repolish()
