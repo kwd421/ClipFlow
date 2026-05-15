@@ -600,6 +600,14 @@ def should_retry_with_impersonation(message):
     return classify_error(message) == "브라우저 지문/TLS 차단 가능성"
 
 
+def should_try_browser_dom_fallback(message):
+    return classify_error(message) in {
+        "브라우저 지문/TLS 차단 가능성",
+        "지원되지 않는 스트림",
+        "네트워크/추출 오류",
+    }
+
+
 def is_audio_format(fmt):
     return (
         str(fmt.get("vcodec") or "none").lower() == "none"
@@ -1302,6 +1310,21 @@ def analyze_url(
         with ydl_factory(options) as ydl:
             return ydl.extract_info(url, download=False)
 
+    def try_browser_dom_fallback(reason):
+        try:
+            fetcher = browser_dom_fetcher or dump_dom_with_browser
+            dom = fetcher(url, on_event=on_event)
+            result = analyze_browser_dom_media(url, dom, output_ext=output_ext, on_event=on_event)
+            warning = "브라우저 DOM fallback 사용: " + str(reason)
+            result["warnings"] = [*warnings, warning, *(result.get("warnings") or [])]
+            emit_event(on_event, "log", message=warning)
+            return result
+        except Exception as browser_exc:
+            warning = "브라우저 DOM fallback 실패: " + str(browser_exc)
+            warnings.append(warning)
+            emit_event(on_event, "log", message=warning)
+            return None
+
     info = None
     pending_error = None
     try:
@@ -1334,26 +1357,21 @@ def analyze_url(
                         pending_error = impersonate_exc
 
     if info is None:
-        if pending_error and should_retry_with_impersonation(str(pending_error)):
-            try:
-                fetcher = browser_dom_fetcher or dump_dom_with_browser
-                dom = fetcher(url, on_event=on_event)
-                result = analyze_browser_dom_media(url, dom, output_ext=output_ext, on_event=on_event)
-                warning = "브라우저 DOM fallback 사용: " + str(pending_error)
-                result["warnings"] = [*warnings, warning, *(result.get("warnings") or [])]
-                emit_event(on_event, "log", message=warning)
+        if pending_error and should_try_browser_dom_fallback(str(pending_error)):
+            result = try_browser_dom_fallback(pending_error)
+            if result:
                 return result
-            except Exception as browser_exc:
-                warning = "브라우저 DOM fallback 실패: " + str(browser_exc)
-                warnings.append(warning)
-                emit_event(on_event, "log", message=warning)
         if pending_error:
             raise pending_error
         raise RuntimeError("URL analysis failed.")
 
     candidates = sort_candidates(enrich_missing_sizes(candidates_from_info(info, output_ext=output_ext)))
     if not candidates:
-        raise RuntimeError("No downloadable non-audio video formats were found.")
+        reason = RuntimeError("No downloadable non-audio video formats were found.")
+        result = try_browser_dom_fallback(reason)
+        if result:
+            return result
+        raise reason
     entries = info.get("entries") if isinstance(info, dict) else None
     is_playlist = bool(allow_playlist and entries)
     playlist_title = clean_video_title(info.get("title") or info.get("playlist_title") or "") if isinstance(info, dict) else ""

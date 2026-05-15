@@ -505,6 +505,63 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["height"], 480)
         self.assertTrue(any("브라우저 DOM" in warning for warning in result["warnings"]))
 
+    def test_analyze_uses_browser_dom_fallback_after_unsupported_error(self):
+        class UnsupportedYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False):
+                raise RuntimeError("unsupported URL")
+
+        html = """
+        <html><head><title>Script Fallback</title></head><body>
+        <video src="https://cdn.example.test/video-720p.mp4"></video>
+        </body></html>
+        """
+
+        result = engine.analyze_url(
+            "https://example.test/watch",
+            ydl_factory=UnsupportedYoutubeDL,
+            browser_dom_fetcher=lambda url, on_event=None: html,
+        )
+
+        self.assertEqual(result["source"], "browser-dom")
+        self.assertEqual(result["title"], "Script Fallback")
+        self.assertEqual(result["candidates"][0]["height"], 720)
+
+    def test_analyze_uses_browser_dom_fallback_when_extractor_has_no_video_candidates(self):
+        class AudioOnlyYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False):
+                return {
+                    "title": "Audio Only",
+                    "webpage_url": url,
+                    "formats": [
+                        {
+                            "format_id": "140",
+                            "ext": "m4a",
+                            "vcodec": "none",
+                            "acodec": "mp4a.40.2",
+                            "filesize": 1000,
+                        }
+                    ],
+                }
+
+        html = """
+        <html><head><title>Rendered Video</title></head><body>
+        <script>
+        var flashvars = {"mediaDefinitions":[
+          {"height":1080,"width":1920,"format":"hls","videoUrl":"https:\\/\\/cdn.example.test\\/master.m3u8","quality":"1080"}
+        ]};
+        </script></body></html>
+        """
+
+        result = engine.analyze_url(
+            "https://example.test/watch",
+            ydl_factory=AudioOnlyYoutubeDL,
+            browser_dom_fetcher=lambda url, on_event=None: html,
+        )
+
+        self.assertEqual(result["source"], "browser-dom")
+        self.assertEqual(result["title"], "Rendered Video")
+        self.assertTrue(result["candidates"][0]["is_manifest"])
+
     def test_chzzk_clip_uid_is_detected(self):
         self.assertEqual(
             engine.find_chzzk_clip_uid("https://chzzk.naver.com/clips/qwr3h4r3Yn"),
