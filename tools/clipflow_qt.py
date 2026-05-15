@@ -1,10 +1,9 @@
 import os
 import sys
-import subprocess
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,6 +41,28 @@ except ImportError:
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget
     from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput
+
+
+SETTINGS_ORG = "ClipFlow"
+SETTINGS_APP = "ClipFlow"
+SAVE_FOLDER_SETTING = "save_folder"
+
+
+def default_save_folder():
+    for location in (
+        QStandardPaths.MoviesLocation,
+        QStandardPaths.DownloadLocation,
+        QStandardPaths.DocumentsLocation,
+        QStandardPaths.HomeLocation,
+    ):
+        base_path = QStandardPaths.writableLocation(location)
+        if base_path:
+            return Path(base_path) / APP_NAME
+    return Path.home() / APP_NAME
+
+
+def local_file_url(path):
+    return QUrl.fromLocalFile(str(Path(path).expanduser().resolve()))
 
 
 def cookie_source_from_display(display_text):
@@ -119,6 +140,7 @@ class ClipFlowWindow(QMainWindow):
             configure_app_font(app)
         self.analyze_func = analyze_func
         self.download_func = download_func
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.open_url_func = open_url_func or (lambda url: QDesktopServices.openUrl(QUrl(url)))
         self.confirm_delete_func = confirm_delete_func
         self.analysis = None
@@ -186,7 +208,7 @@ class ClipFlowWindow(QMainWindow):
         self.primary_button.setFixedSize(PRIMARY_BUTTON_WIDTH, TOP_FIELD_HEIGHT)
         self.primary_button.clicked.connect(self._handle_primary_action)
 
-        self.folder_input = PathDisplayInput(str(Path.home() / "Videos" / APP_NAME))
+        self.folder_input = PathDisplayInput(self._initial_save_folder())
         self.folder_button = LucideIconButton("folder")
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
@@ -294,7 +316,18 @@ class ClipFlowWindow(QMainWindow):
     def _choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.folder_input.text())
         if folder:
-            self.folder_input.setText(folder)
+            self._set_save_folder(folder)
+
+    def _initial_save_folder(self):
+        saved = self.settings.value(SAVE_FOLDER_SETTING, "", str)
+        if saved:
+            return str(Path(saved).expanduser())
+        return str(default_save_folder())
+
+    def _set_save_folder(self, folder):
+        folder_text = str(Path(folder).expanduser())
+        self.folder_input.setText(folder_text)
+        self.settings.setValue(SAVE_FOLDER_SETTING, folder_text)
 
     def _handle_primary_action(self):
         if not self.url_input.text().strip():
@@ -646,12 +679,7 @@ class ClipFlowWindow(QMainWindow):
         self._open_path(target)
 
     def _open_path(self, path):
-        if sys.platform.startswith("win"):
-            os.startfile(str(path))
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
-        else:
-            subprocess.Popen(["xdg-open", str(path)])
+        return QDesktopServices.openUrl(local_file_url(path))
 
     def remove_row(self, row):
         if row.get("status") in {"분석 중", "다운로드 중"}:

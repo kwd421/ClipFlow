@@ -198,6 +198,7 @@ print(window.count_label.text())
 
     def test_clipflow_qt_download_uses_selected_quality_and_row_local_progress(self):
         script = r'''
+from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
@@ -221,7 +222,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     downloaded.append(candidate["id"])
     if on_event:
         on_event({"type": "progress", "percent": 42, "message": "42.0% 7.0 MB/s ETA 00:10"})
-        on_event({"type": "file", "path": output_dir + "/Video.mp4"})
+        on_event({"type": "file", "path": str(Path(output_dir) / "Video.mp4")})
     return {"ok": True, "output_dir": output_dir}
 
 app = QApplication([])
@@ -540,6 +541,61 @@ print(window.folder_input.hasFocus())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "False", "False"])
+
+    def test_clipflow_qt_persists_save_folder_with_qsettings(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, default_save_folder
+
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
+
+app = QApplication([])
+fallback = default_save_folder()
+window = ClipFlowWindow()
+saved = Path(settings_dir.name) / "Saved"
+window._set_save_folder(saved)
+second = ClipFlowWindow()
+
+print(fallback.is_absolute())
+print(fallback.name)
+print(Path(second.folder_input.text()) == saved)
+print(QSettings(SETTINGS_ORG, SETTINGS_APP).value(SAVE_FOLDER_SETTING) == str(saved))
+settings_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "ClipFlow", "True", "True"])
+
+    def test_clipflow_qt_builds_local_file_urls_for_folder_opening(self):
+        script = r'''
+from pathlib import Path
+import inspect
+import tempfile
+from tools import clipflow_qt
+
+tempdir = tempfile.TemporaryDirectory()
+url = clipflow_qt.local_file_url(Path(tempdir.name))
+source = inspect.getsource(clipflow_qt)
+
+print(url.isLocalFile())
+print(Path(url.toLocalFile()) == Path(tempdir.name).resolve())
+print("QDesktopServices.openUrl" in inspect.getsource(clipflow_qt.ClipFlowWindow._open_path))
+print(("os." + "startfile") in source)
+print(("xdg" + "-open") in source)
+print(("explorer" + ".exe") in source)
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "False", "False"])
 
     def test_clipflow_qt_delete_file_confirms_and_deletes_resolved_download_output(self):
         script = r'''
