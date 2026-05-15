@@ -58,7 +58,7 @@ from PySide6.QtWidgets import QApplication
 from tools.clipflow_icons import LUCIDE_ICON_DIR, LucideIconButton, LucideIconWidget, icon_path
 
 app = QApplication([])
-required = ["link", "folder", "x", "trash-2", "more-vertical", "clock", "file-text", "circle-help", "chevron-down", "play", "video", "cookie", "sliders-horizontal", "arrow-down-wide-narrow", "arrow-up-narrow-wide", "circle-x"]
+required = ["link", "folder", "x", "trash-2", "more-vertical", "clock", "file-text", "circle-help", "chevron-down", "play", "video", "cookie", "sliders-horizontal", "arrow-down-wide-narrow", "arrow-up-narrow-wide", "circle-x", "globe-2"]
 print(LUCIDE_ICON_DIR.name)
 print(all(icon_path(name).is_file() for name in required))
 print(hasattr(widgets, "LineIcon"))
@@ -255,6 +255,84 @@ settings_dir.cleanup()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["720p", "WEBM", "VP9", "60fps"])
+
+    def test_clipflow_qt_cookie_selection_persists_with_qsettings(self):
+        script = r'''
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.cookie_combo.setCurrentText("쿠키: Firefox")
+second = ClipFlowWindow()
+
+print(second.cookie_combo.currentText())
+settings_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["쿠키: Firefox"])
+
+    def test_clipflow_qt_completed_download_history_persists_until_removed(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+download_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
+
+url = "https://media.test/watch/1"
+output = Path(download_dir.name) / "Saved.mp4"
+output.write_bytes(b"mp4")
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window._set_save_folder(download_dir.name)
+window._analysis_finished(fake_analyze(url))
+window.active_download_row = window.rows[0]
+window.rows[0]["download_started_at"] = 0
+window._download_finished({"output_path": str(output), "output_dir": download_dir.name})
+
+second = ClipFlowWindow()
+print(len(second.rows))
+print(second.rows[0]["widget"].title_label.text())
+print(Path(second.rows[0]["output_path"]).name)
+second.remove_row(second.rows[0])
+third = ClipFlowWindow()
+print(len(third.rows))
+
+settings_dir.cleanup()
+download_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["1", "Video", "Saved.mp4", "0"])
 
     def test_clipflow_qt_analyze_button_shows_loading_spinner(self):
         script = r'''
@@ -630,8 +708,11 @@ print(row_widget.actions_widget.isHidden())
 row_widget._set_hovered(False)
 print(row_widget.actions_widget.isHidden())
 print(row_widget.delete_file_button.property("danger"))
-row_widget.site_button.click()
-row_widget.domain_label.click()
+print(hasattr(row_widget, "site_button"))
+print(hasattr(row_widget, "domain_label"))
+print(hasattr(row_widget, "open_source_button"))
+print(row_widget.source_link_button.text())
+row_widget.source_link_button.click()
 print(opened)
 '''
         result = run_qt_script(script)
@@ -639,7 +720,7 @@ print(opened)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["False", "False", "False", "True", "True", "False", "True", "true", "['https://media.test/video', 'https://media.test/video']"],
+            ["False", "False", "False", "True", "True", "False", "True", "true", "False", "False", "False", "media.test", "['https://media.test/video']"],
         )
 
     def test_clipflow_qt_row_sets_thumbnail_url_on_placeholder(self):
@@ -712,7 +793,7 @@ print(f"{fresh.width()}x{fresh.height()}")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["0", "True", "84,92,184", "560x420", "True", "720x760"],
+            ["0", "True", "84,92,148", "560x420", "True", "720x760"],
         )
 
     def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
@@ -961,9 +1042,9 @@ def drive():
         return
     if window.rows:
         row_widget = window.rows[0]["widget"]
-        row_widget.site_button.click()
+        row_widget.source_link_button.click()
         print(opened[0])
-        print("media.test" in row_widget.site_button.toolTip())
+        print("media.test" in row_widget.source_link_button.toolTip())
         print(row_widget.delete_file_button.isEnabled())
         print(row_widget.remove_button.isEnabled())
         app.quit()

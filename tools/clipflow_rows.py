@@ -1,6 +1,5 @@
 # Auto-split from clipflow_qt.py; keep behavior changes in focused commits.
 from pathlib import Path
-from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -9,7 +8,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -25,7 +23,7 @@ try:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import ThumbnailPlaceholder
+    from tools.clipflow_widgets import SourceLinkButton, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
     from clipflow_icons import LucideIconButton, LucideIconWidget
@@ -37,19 +35,12 @@ except ImportError:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import ThumbnailPlaceholder
+    from clipflow_widgets import SourceLinkButton, ThumbnailPlaceholder
 
 
 ACTIVE_STATUSES = {"분석 중", "다운로드 중"}
 COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
-
-
-def source_domain(url):
-    host = urlparse(url or "").netloc.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host or "source"
 
 
 def row_source_url(analysis, candidate):
@@ -182,17 +173,9 @@ class DownloadRowWidget(QFrame):
 
         source_line = QHBoxLayout()
         source_line.setSpacing(6)
-        self.site_button = LucideIconButton("play", size=18, icon_size=12)
-        self.site_button.setObjectName("SourceButton")
-        self.site_button.setFixedSize(18, 18)
-        self.site_button.clicked.connect(self._open_source)
-        source_line.addWidget(self.site_button)
-
-        self.domain_label = QToolButton()
-        self.domain_label.setObjectName("SourceTextButton")
-        self.domain_label.setCursor(Qt.PointingHandCursor)
-        self.domain_label.clicked.connect(self._open_source)
-        source_line.addWidget(self.domain_label)
+        self.source_link_button = SourceLinkButton()
+        self.source_link_button.clicked.connect(self._open_source)
+        source_line.addWidget(self.source_link_button)
         source_line.addStretch(1)
         item_area.addLayout(source_line)
 
@@ -243,16 +226,11 @@ class DownloadRowWidget(QFrame):
 
         self.actions_widget = QFrame(self)
         self.actions_widget.setObjectName("ActionOverlay")
-        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 68)
+        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 32)
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(8, 0, 8, 0)
         actions.setSpacing(4)
         actions.setAlignment(Qt.AlignCenter)
-
-        self.open_source_button = LucideIconButton("link")
-        self.open_source_button.setToolTip("원본 열기")
-        self.open_source_button.clicked.connect(self._open_source)
-        actions.addWidget(self.open_source_button)
 
         self.open_folder_button = LucideIconButton("folder")
         self.open_folder_button.setToolTip("폴더 열기")
@@ -305,21 +283,13 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_source_button(self):
         source_url = self.row.get("source_url") or ""
-        domain = source_domain(source_url)
-        tooltip = f"{domain}\n원본 링크 열기"
-        self.domain_label.setText(domain)
-        self.domain_label.setToolTip(tooltip)
-        self.site_button.setToolTip(tooltip)
-        self.site_button.setEnabled(bool(source_url))
-        self.domain_label.setEnabled(bool(source_url))
-        self.open_source_button.setEnabled(bool(source_url))
+        self.source_link_button.set_source_url(source_url)
 
     def _refresh_actions(self):
         active = self.row.get("status") in ACTIVE_STATUSES
         completed = self.row.get("status") == COMPLETED_STATUS
         output_path = Path(self.row.get("output_path") or "")
         has_output = bool(self.row.get("output_path")) and output_path.exists()
-        self.open_source_button.setEnabled(completed and bool(self.row.get("source_url")))
         self.open_folder_button.setEnabled(completed and not active)
         self.remove_button.setEnabled(completed and not active)
         self.delete_file_button.setEnabled(completed and has_output and not active)

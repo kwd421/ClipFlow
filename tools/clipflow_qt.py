@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -48,6 +49,8 @@ except ImportError:
 SETTINGS_ORG = "ClipFlow"
 SETTINGS_APP = "ClipFlow"
 SAVE_FOLDER_SETTING = "save_folder"
+COOKIE_SOURCE_SETTING = "cookie_source"
+DOWNLOAD_HISTORY_SETTING = "download_history"
 PREF_QUALITY_SETTING = "download_quality"
 PREF_FORMAT_SETTING = "download_format"
 PREF_CODEC_SETTING = "download_codec"
@@ -251,6 +254,7 @@ class ClipFlowWindow(QMainWindow):
         self.setMinimumSize(560, 420)
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
+        self._load_completed_history()
         self._refresh_primary_action()
 
     def _build_ui(self):
@@ -274,7 +278,7 @@ class ClipFlowWindow(QMainWindow):
         frame.setObjectName("FieldBox")
         frame.setFixedHeight(TOP_FIELD_HEIGHT)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setContentsMargins(12, 0, 6 if trailing_widget else 12, 0)
         layout.setSpacing(10)
         icon = LucideIconWidget(icon_kind)
         line_edit.setObjectName("BareInput")
@@ -306,7 +310,7 @@ class ClipFlowWindow(QMainWindow):
         self.folder_input = PathDisplayInput(self._initial_save_folder())
         self.folder_button = QPushButton("찾아보기")
         self.folder_button.setObjectName("SecondaryButton")
-        self.folder_button.setFixedSize(92, TOP_FIELD_HEIGHT - 8)
+        self.folder_button.setFixedSize(100, TOP_FIELD_HEIGHT - 8)
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
         folder_field = self._field_box("folder", self.folder_input, self.folder_button)
@@ -321,6 +325,8 @@ class ClipFlowWindow(QMainWindow):
             "선택한 브라우저의 로그인 세션을 읽어 접근 가능한 항목인지 확인합니다.\n"
             "비밀번호는 저장하지 않으며 권한 우회 기능은 제공하지 않습니다."
         )
+        self._restore_cookie_source()
+        self.cookie_combo.currentIndexChanged.connect(self._save_cookie_source)
 
         url_row = QHBoxLayout()
         url_row.setContentsMargins(0, 0, 0, 0)
@@ -475,6 +481,84 @@ class ClipFlowWindow(QMainWindow):
         self.folder_input.setText(folder_text)
         self.settings.setValue(SAVE_FOLDER_SETTING, folder_text)
 
+    def _restore_cookie_source(self):
+        saved = self.settings.value(COOKIE_SOURCE_SETTING, COOKIE_CHOICES[0], str) or COOKIE_CHOICES[0]
+        display = f"쿠키: {saved}" if saved in COOKIE_CHOICES else COOKIE_DISPLAY_CHOICES[0]
+        index = self.cookie_combo.findText(display)
+        self.cookie_combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _save_cookie_source(self, *_args):
+        self.settings.setValue(COOKIE_SOURCE_SETTING, cookie_source_from_display(self.cookie_combo.currentText()))
+        self.settings.sync()
+
+    def _json_ready(self, value):
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+    def _completed_history_payload(self):
+        payload = []
+        for row in self.rows:
+            if row.get("status") != "완료":
+                continue
+            candidate = row.get("candidate") or {}
+            payload.append(
+                {
+                    "candidate": self._json_ready(candidate),
+                    "source_url": row.get("source_url") or "",
+                    "analysis_source_url": row.get("analysis_source_url") or "",
+                    "output_path": row.get("output_path") or "",
+                    "created_order": int(row.get("created_order") or 0),
+                    "messages": self._json_ready(row.get("messages") or []),
+                }
+            )
+        return payload
+
+    def _save_completed_history(self):
+        self.settings.setValue(
+            DOWNLOAD_HISTORY_SETTING,
+            json.dumps(self._completed_history_payload(), ensure_ascii=False, default=str),
+        )
+        self.settings.sync()
+
+    def _load_completed_history(self):
+        raw = self.settings.value(DOWNLOAD_HISTORY_SETTING, "", str) or ""
+        if not raw:
+            return
+        try:
+            items = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        restored = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or not isinstance(item.get("candidate"), dict):
+                continue
+            candidate = item["candidate"]
+            created_order = engine.safe_int(item.get("created_order")) or self._next_row_sequence()
+            self._row_sequence = max(self._row_sequence, created_order)
+            source_url = item.get("source_url") or item.get("analysis_source_url") or candidate.get("source") or candidate.get("url") or ""
+            restored.append(
+                {
+                    "id": candidate.get("id") or f"history-{created_order}",
+                    "kind": row_kind(candidate),
+                    "candidate": candidate,
+                    "qualities": [candidate],
+                    "quality_options": build_quality_options([candidate]),
+                    "selected_index": 0,
+                    "selected_format_index": 0,
+                    "analysis_source_url": item.get("analysis_source_url") or source_url,
+                    "source_url": source_url,
+                    "status": "완료",
+                    "status_detail": "",
+                    "progress": 100,
+                    "progress_text": "",
+                    "output_path": item.get("output_path") or "",
+                    "messages": item.get("messages") or [],
+                    "created_order": created_order,
+                }
+            )
+        if restored:
+            self.rows = restored + self.rows
+            self._render_rows()
+
     def _handle_primary_action(self):
         if not self.url_input.text().strip():
             text = QApplication.clipboard().text().strip()
@@ -547,7 +631,7 @@ class ClipFlowWindow(QMainWindow):
         preserved_rows = [
             row
             for row in self.rows
-            if row.get("status") == "완료" and row.get("analysis_source_url") != source_url
+            if row.get("status") == "완료"
         ]
         new_rows = []
         for grouped_row in grouped_rows:
@@ -688,6 +772,8 @@ class ClipFlowWindow(QMainWindow):
         return options[selected_index]
 
     def selected_candidate_for_row_ref(self, row):
+        if row and row.get("status") == "완료":
+            return row.get("candidate")
         selected = presenter.select_candidate_for_preferences(row.get("qualities") or [], self.current_preferences())
         if selected:
             return selected
@@ -749,12 +835,18 @@ class ClipFlowWindow(QMainWindow):
     @Slot(dict)
     def _download_finished(self, result):
         if self.active_download_row:
+            selected = self.selected_candidate_for_row_ref(self.active_download_row)
+            if selected:
+                self.active_download_row["candidate"] = selected
+                self.active_download_row["qualities"] = [selected]
+                self.active_download_row["quality_options"] = build_quality_options([selected])
             self._resolve_finished_output_path(self.active_download_row, result)
             widget = self.active_download_row.get("widget")
             if widget:
                 widget.set_status("완료")
                 widget.set_progress(100, "완료")
                 widget._refresh_actions()
+            self._save_completed_history()
         self._set_status("완료")
         output_dir = result.get("output_dir") if isinstance(result, dict) else None
         if output_dir:
@@ -876,6 +968,7 @@ class ClipFlowWindow(QMainWindow):
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
+            self._save_completed_history()
 
     def delete_file_for_row(self, row):
         output_path = Path(row.get("output_path") or "")
@@ -897,6 +990,7 @@ class ClipFlowWindow(QMainWindow):
         widget = row.get("widget")
         if widget:
             widget._refresh_actions()
+        self._save_completed_history()
 
     def _confirm_file_delete(self, output_path):
         dialog = QMessageBox(self)

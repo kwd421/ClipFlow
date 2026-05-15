@@ -63,25 +63,14 @@ QFrame#ThumbBox {
     border: 1px solid #d8e2ef;
     border-radius: 6px;
 }
-QToolButton#SourceButton {
-    background: #ef4444;
-    color: #ffffff;
-    border-radius: 4px;
-    font-size: 9px;
-    font-weight: 700;
-    padding: 0px;
-}
-QToolButton#SourceButton:hover {
-    background: #dc2626;
-}
-QToolButton#SourceTextButton {
+QToolButton#SourceLinkButton {
     background: transparent;
     border: none;
     color: #52627a;
     font-size: 12px;
-    padding: 0px;
+    padding: 0px 2px;
 }
-QToolButton#SourceTextButton:hover {
+QToolButton#SourceLinkButton:hover {
     color: #2563eb;
     background: transparent;
 }

@@ -1,7 +1,9 @@
-from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from urllib.parse import urlparse
+
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QPushButton
+from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QPushButton, QToolButton
 
 try:
     from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
@@ -40,6 +42,91 @@ class PathDisplayInput(QLineEdit):
 
     def keyPressEvent(self, event):
         event.ignore()
+
+
+def source_domain(url):
+    parsed = urlparse(str(url or ""))
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+class SourceLinkButton(QToolButton):
+    _network_manager = None
+    _icon_cache = {}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.source_url = ""
+        self.favicon_url = ""
+        self._reply = None
+        self.setObjectName("SourceLinkButton")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setIconSize(QSize(16, 16))
+        self.setAutoRaise(True)
+        self._set_fallback_icon()
+
+    @classmethod
+    def network_manager(cls):
+        if cls._network_manager is None:
+            cls._network_manager = QNetworkAccessManager()
+        return cls._network_manager
+
+    def set_source_url(self, url):
+        url = str(url or "").strip()
+        if url == self.source_url:
+            return
+        self.source_url = url
+        domain = source_domain(url)
+        self.setText(domain)
+        self.setToolTip(f"{domain}\n원본 링크 열기" if domain else "")
+        self.setEnabled(bool(url))
+        self._set_fallback_icon()
+        if self._reply:
+            self._reply.abort()
+            self._reply = None
+        if not domain:
+            self.favicon_url = ""
+            return
+        cached = self._icon_cache.get(domain)
+        if cached:
+            self.setIcon(cached)
+            return
+        parsed = urlparse(url)
+        scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+        netloc = parsed.netloc
+        if not netloc:
+            self.favicon_url = ""
+            return
+        self.favicon_url = f"{scheme}://{netloc}/favicon.ico"
+        request = QNetworkRequest(QUrl(self.favicon_url))
+        request.setRawHeader(b"User-Agent", b"Mozilla/5.0")
+        self._reply = self.network_manager().get(request)
+        self._reply.finished.connect(lambda domain=domain, favicon_url=self.favicon_url: self._favicon_finished(domain, favicon_url))
+
+    def _set_fallback_icon(self):
+        self.setIcon(QIcon(lucide_pixmap("globe-2", 16, ICON_COLOR)))
+
+    def _favicon_finished(self, domain, favicon_url):
+        reply = self._reply
+        self._reply = None
+        if not reply:
+            return
+        try:
+            if favicon_url != self.favicon_url:
+                return
+            if reply.error() != QNetworkReply.NoError:
+                return
+            pixmap = QPixmap()
+            if pixmap.loadFromData(reply.readAll()) and not pixmap.isNull():
+                icon = QIcon(pixmap)
+                self._icon_cache[domain] = icon
+                if domain == source_domain(self.source_url):
+                    self.setIcon(icon)
+        finally:
+            reply.deleteLater()
 
 
 class CleanComboBox(QComboBox):

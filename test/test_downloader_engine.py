@@ -144,6 +144,14 @@ class DownloaderEngineTests(unittest.TestCase):
 
         self.assertEqual(candidates[0]["display_title"], "첫 문장입니다. 둘째 문장입니다.")
 
+    def test_display_title_prefixes_uploader_when_available(self):
+        info = dict(SAMPLE_INFO)
+        info["uploader"] = "Sample Channel"
+
+        candidates = engine.candidates_from_info(info)
+
+        self.assertEqual(candidates[0]["display_title"], "Sample Channel - Sample Video")
+
     def test_candidates_can_be_filtered_by_requested_extension(self):
         mp4 = engine.candidates_from_info(SAMPLE_INFO, output_ext="MP4")
         webm = engine.candidates_from_info(SAMPLE_INFO, output_ext="WEBM")

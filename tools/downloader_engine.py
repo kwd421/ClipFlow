@@ -245,11 +245,34 @@ def caption_title_from_info(*infos):
     return ""
 
 
+def uploader_name_from_info(*infos):
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+        for key in ("uploader", "channel", "creator", "artist", "author"):
+            name = clean_video_title(info.get(key))
+            if name:
+                return name
+    return ""
+
+
+def prefix_title_with_uploader(title, uploader):
+    title = str(title or "").strip()
+    uploader = str(uploader or "").strip()
+    if not title or not uploader:
+        return title or uploader
+    title_folded = title.casefold()
+    uploader_folded = uploader.casefold()
+    if title_folded.startswith(uploader_folded):
+        return title
+    return f"{uploader} - {title}"
+
+
 def display_title_for(video_info, root_info):
     raw_title = clean_video_title(video_info.get("title") or root_info.get("title")) or "video"
     if GENERIC_TITLE_RE.match(raw_title or ""):
-        return caption_title_from_info(video_info, root_info) or raw_title
-    return raw_title
+        raw_title = caption_title_from_info(video_info, root_info) or raw_title
+    return prefix_title_with_uploader(raw_title, uploader_name_from_info(video_info, root_info))
 
 
 def thumbnail_from_info(info):
