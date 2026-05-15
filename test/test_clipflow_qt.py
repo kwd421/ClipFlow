@@ -16,6 +16,41 @@ def run_qt_script(script, timeout=10):
 
 
 class ClipFlowQtTests(unittest.TestCase):
+    def test_clipflow_qt_split_modules_import(self):
+        script = r'''
+from tools.clipflow_theme import APP_NAME, APP_STYLE, configure_app_font, create_app_icon
+from tools.clipflow_widgets import CleanComboBox, PathDisplayInput
+from tools.clipflow_rows import DownloadRowWidget, build_quality_options
+from tools.clipflow_qt import ClipFlowWindow
+
+print(APP_NAME)
+print(bool(APP_STYLE))
+print(callable(configure_app_font))
+print(callable(create_app_icon))
+print(CleanComboBox.__name__)
+print(PathDisplayInput.__name__)
+print(DownloadRowWidget.__name__)
+print(callable(build_quality_options))
+print(ClipFlowWindow.__name__)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "ClipFlow",
+                "True",
+                "True",
+                "True",
+                "CleanComboBox",
+                "PathDisplayInput",
+                "DownloadRowWidget",
+                "True",
+                "ClipFlowWindow",
+            ],
+        )
+
     def test_clipflow_qt_smoke_launches_offscreen(self):
         env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "CLIPFLOW_QT_SMOKE": "1"}
         result = subprocess.run(
