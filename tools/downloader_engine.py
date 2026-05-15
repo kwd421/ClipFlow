@@ -160,8 +160,6 @@ def classify_error(message):
         return "브라우저 지문/TLS 차단 가능성"
     if any(token in lower for token in ["login", "private", "forbidden", "unauthorized", "401", "403"]):
         return "로그인/권한 필요"
-    if "captcha" in lower or "bot" in lower:
-        return "봇 차단/CAPTCHA"
     if "unsupported" in lower or "no video" in lower or "no suitable" in lower:
         return "지원되지 않는 스트림"
     return "네트워크/추출 오류"
@@ -1076,17 +1074,6 @@ def thumbnail_from_browser_dom(dom):
     )
 
 
-def is_browser_challenge_dom(dom):
-    lower = str(dom or "").lower()
-    return (
-        "just a moment" in lower
-        or "challenges.cloudflare.com" in lower
-        or "cf-chl" in lower
-        or "turnstile" in lower
-        or "captcha" in lower
-    )
-
-
 def duration_from_browser_dom(dom):
     text = compact_text(html_lib.unescape(str(dom or "")), limit=20000)
     patterns = [
@@ -1170,8 +1157,6 @@ def generic_video_media_from_html(dom, base_url):
 
 
 def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
-    if is_browser_challenge_dom(dom):
-        raise RuntimeError("봇 차단/CAPTCHA: 브라우저 확인 페이지가 표시되었습니다.")
     requested_ext = normalized_output_ext(output_ext)
     if requested_ext in AUDIO_OUTPUT_EXTENSIONS:
         raise RuntimeError("Browser DOM fallback does not expose audio-only candidates.")
@@ -1332,8 +1317,6 @@ def analyze_url(
                 warning = "브라우저 DOM fallback 실패: " + str(browser_exc)
                 warnings.append(warning)
                 emit_event(on_event, "log", message=warning)
-                if classify_error(str(browser_exc)) == "봇 차단/CAPTCHA":
-                    raise browser_exc
         if pending_error:
             raise pending_error
         raise RuntimeError("URL analysis failed.")

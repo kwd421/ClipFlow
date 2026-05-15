@@ -459,32 +459,6 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(candidate["sort_bytes"], 1_117_645_701)
         self.assertEqual(candidate["size_source"], "metadata")
 
-    def test_browser_dom_challenge_page_reports_bot_block(self):
-        html = """
-        <html><head><title>Just a moment...</title></head>
-        <body><script src="https://challenges.example.test/turnstile/v0/api.js"></script></body></html>
-        """
-
-        with self.assertRaisesRegex(RuntimeError, "봇 차단/CAPTCHA"):
-            engine.analyze_browser_dom_media("https://media.example.test/watch", html)
-
-    def test_analyze_prefers_browser_challenge_error_after_tls_reset(self):
-        class ResetYoutubeDL(FakeYoutubeDL):
-            def extract_info(self, url, download=False):
-                raise RuntimeError("ConnectionResetError forcibly closed")
-
-        html = """
-        <html><head><title>Just a moment...</title></head>
-        <body><script src="https://challenges.example.test/turnstile/v0/api.js"></script></body></html>
-        """
-
-        with self.assertRaisesRegex(RuntimeError, "봇 차단/CAPTCHA"):
-            engine.analyze_url(
-                "https://media.example.test/watch",
-                ydl_factory=ResetYoutubeDL,
-                browser_dom_fetcher=lambda url, on_event=None: html,
-            )
-
     def test_analyze_uses_browser_dom_fallback_after_tls_reset(self):
         class ResetYoutubeDL(FakeYoutubeDL):
             def extract_info(self, url, download=False):
@@ -520,7 +494,7 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(engine.classify_error("DRM encrypted stream"), "DRM 가능성")
         self.assertEqual(engine.classify_error("ConnectionResetError forcibly closed"), "브라우저 지문/TLS 차단 가능성")
         self.assertEqual(engine.classify_error("HTTP Error 403 Forbidden"), "로그인/권한 필요")
-        self.assertEqual(engine.classify_error("captcha required"), "봇 차단/CAPTCHA")
+        self.assertEqual(engine.classify_error("captcha required"), "네트워크/추출 오류")
         self.assertEqual(engine.classify_error("unsupported url"), "지원되지 않는 스트림")
         self.assertEqual(engine.classify_error("connection reset"), "네트워크/추출 오류")
 
