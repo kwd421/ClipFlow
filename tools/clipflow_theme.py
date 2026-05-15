@@ -1,6 +1,3 @@
-# Auto-split from clipflow_qt.py; keep behavior changes in focused commits.
-from pathlib import Path
-
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPixmap
 
@@ -19,16 +16,13 @@ SIZE_WIDTH = 92
 STATUS_WIDTH = 112
 ACTIONS_WIDTH = 116
 ROW_COLUMN_SPACING = 10
-FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\NotoSansKR-Regular.ttf",
-    r"C:\Windows\Fonts\malgun.ttf",
-]
+FONT_FALLBACKS = ["Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Helvetica Neue", "Segoe UI"]
 _FONT_CONFIGURED = False
 
 APP_STYLE = """
 QMainWindow {
     background: #f5f9ff;
-    font-family: "Noto Sans KR", "Malgun Gothic", "NanumGothic", "Segoe UI";
+    font-family: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Helvetica Neue", "Segoe UI";
 }
 QFrame#Panel {
     background: #ffffff;
@@ -220,19 +214,19 @@ STATUS_STYLES = {
 }
 
 
+def preferred_font_family(default_family=""):
+    available = set(QFontDatabase.families())
+    for family in FONT_FALLBACKS:
+        if family in available:
+            return family
+    return default_family
+
+
 def configure_app_font(app):
     global _FONT_CONFIGURED
     if _FONT_CONFIGURED:
         return
-    selected_family = ""
-    for font_path in FONT_CANDIDATES:
-        if Path(font_path).exists():
-            font_id = QFontDatabase.addApplicationFont(font_path)
-            families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
-            if families and not selected_family:
-                selected_family = families[0]
-    if not selected_family:
-        selected_family = "Malgun Gothic"
+    selected_family = preferred_font_family(app.font().family())
     app.setFont(QFont(selected_family, 10))
     _FONT_CONFIGURED = True
 
@@ -252,7 +246,7 @@ def create_app_icon(size=64):
     painter.drawRoundedRect(rect, 14, 14)
 
     painter.setPen(QColor("#ffffff"))
-    painter.setFont(QFont("Noto Sans KR", max(12, int(size * 0.34)), QFont.Bold))
+    painter.setFont(QFont(preferred_font_family(), max(12, int(size * 0.34)), QFont.Bold))
     painter.drawText(rect, Qt.AlignCenter, "Cf")
     painter.end()
     return QIcon(pixmap)

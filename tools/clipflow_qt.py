@@ -58,7 +58,7 @@ def default_save_folder():
         base_path = QStandardPaths.writableLocation(location)
         if base_path:
             return Path(base_path) / APP_NAME
-    return Path.home() / APP_NAME
+    return Path(".").resolve() / APP_NAME
 
 
 def local_file_url(path):

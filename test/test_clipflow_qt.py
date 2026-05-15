@@ -129,16 +129,43 @@ print(window.windowIcon().isNull())
         script = r'''
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import FONT_FALLBACKS
 
 app = QApplication([])
 window = ClipFlowWindow()
-print("Noto Sans KR" in QApplication.font().family() or "Malgun" in QApplication.font().family())
+print(" > ".join(FONT_FALLBACKS))
+print("Apple SD Gothic Neo" in window.styleSheet())
+print("Helvetica Neue" in window.styleSheet())
+print(bool(QApplication.font().family()))
 print(window.font().family())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[0], "True")
+        self.assertEqual(
+            result.stdout.splitlines()[:4],
+            [
+                "Noto Sans KR > Apple SD Gothic Neo > Malgun Gothic > Helvetica Neue > Segoe UI",
+                "True",
+                "True",
+                "True",
+            ],
+        )
+
+    def test_clipflow_qt_theme_has_no_windows_only_font_paths(self):
+        script = r'''
+import inspect
+from tools import clipflow_theme
+
+source = inspect.getsource(clipflow_theme)
+print(("C:" + "\\Windows") in source)
+print(hasattr(clipflow_theme, "FONT_CANDIDATES"))
+print(hasattr(clipflow_theme, "FONT_FALLBACKS"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "False", "True"])
 
     def test_clipflow_qt_analysis_replaces_pending_rows_but_keeps_completed_rows(self):
         script = r'''
@@ -590,12 +617,13 @@ print("QDesktopServices.openUrl" in inspect.getsource(clipflow_qt.ClipFlowWindow
 print(("os." + "startfile") in source)
 print(("xdg" + "-open") in source)
 print(("explorer" + ".exe") in source)
+print(("Path." + "home(") in source)
 tempdir.cleanup()
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "False", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "False", "False", "False"])
 
     def test_clipflow_qt_delete_file_confirms_and_deletes_resolved_download_output(self):
         script = r'''
