@@ -30,7 +30,8 @@ try:
         APP_NAME, APP_STYLE, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT, PRIMARY_BUTTON_WIDTH,
         TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
     )
-    from tools.clipflow_widgets import ActionIconButton, CleanComboBox, ClearingUrlInput, LineIcon, PathDisplayInput
+    from tools.clipflow_icons import LucideIconButton, LucideIconWidget
+    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -39,7 +40,8 @@ except ImportError:
         APP_NAME, APP_STYLE, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT, PRIMARY_BUTTON_WIDTH,
         TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
     )
-    from clipflow_widgets import ActionIconButton, CleanComboBox, ClearingUrlInput, LineIcon, PathDisplayInput
+    from clipflow_icons import LucideIconButton, LucideIconWidget
+    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput
 
 
 def cookie_source_from_display(display_text):
@@ -160,7 +162,7 @@ class ClipFlowWindow(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(10)
-        icon = LineIcon(icon_kind)
+        icon = LucideIconWidget(icon_kind)
         line_edit.setObjectName("BareInput")
         layout.addWidget(icon)
         layout.addWidget(line_edit, 1)
@@ -185,7 +187,7 @@ class ClipFlowWindow(QMainWindow):
         self.primary_button.clicked.connect(self._handle_primary_action)
 
         self.folder_input = PathDisplayInput(str(Path.home() / "Videos" / APP_NAME))
-        self.folder_button = ActionIconButton("folder")
+        self.folder_button = LucideIconButton("folder")
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
         folder_field = self._field_box("folder", self.folder_input, self.folder_button)

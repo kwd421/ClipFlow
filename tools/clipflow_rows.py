@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
 try:
     from tools import downloader_engine as engine
@@ -11,14 +11,16 @@ try:
         ACTIONS_WIDTH, DURATION_WIDTH, FORMAT_WIDTH, MEDIA_MIN_WIDTH, QUALITY_WIDTH, ROW_COLUMN_SPACING,
         SIZE_WIDTH, STATUS_STYLES, STATUS_WIDTH, THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import ActionIconButton, CleanComboBox, LineIcon, ThumbnailBox
+    from tools.clipflow_icons import LucideIconButton, LucideIconWidget
+    from tools.clipflow_widgets import CleanComboBox, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
     from clipflow_theme import (
         ACTIONS_WIDTH, DURATION_WIDTH, FORMAT_WIDTH, MEDIA_MIN_WIDTH, QUALITY_WIDTH, ROW_COLUMN_SPACING,
         SIZE_WIDTH, STATUS_STYLES, STATUS_WIDTH, THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import ActionIconButton, CleanComboBox, LineIcon, ThumbnailBox
+    from clipflow_icons import LucideIconButton, LucideIconWidget
+    from clipflow_widgets import CleanComboBox, ThumbnailPlaceholder
 
 def source_domain(url):
     host = urlparse(url or "").netloc.lower()
@@ -140,7 +142,7 @@ class DownloadRowWidget(QFrame):
         outer.setContentsMargins(12, 5, 12, 5)
         outer.setSpacing(ROW_COLUMN_SPACING)
 
-        self.thumbnail = ThumbnailBox()
+        self.thumbnail = ThumbnailPlaceholder()
         outer.addWidget(self.thumbnail)
 
         self.item_widget = QWidget()
@@ -157,9 +159,8 @@ class DownloadRowWidget(QFrame):
 
         source_line = QHBoxLayout()
         source_line.setSpacing(6)
-        self.site_button = QToolButton()
+        self.site_button = LucideIconButton("play", size=18, icon_size=12)
         self.site_button.setObjectName("SourceButton")
-        self.site_button.setText("▶")
         self.site_button.setFixedSize(18, 18)
         self.site_button.clicked.connect(self._open_source)
         source_line.addWidget(self.site_button)
@@ -202,7 +203,7 @@ class DownloadRowWidget(QFrame):
         info_layout.setContentsMargins(0, 0, 0, 0)
         info_layout.setSpacing(4)
         info_layout.setAlignment(Qt.AlignCenter)
-        self.info_icon = LineIcon("clock")
+        self.info_icon = LucideIconWidget("clock", size=18)
         self.info_icon.setFixedSize(18, 18)
         info_layout.addWidget(self.info_icon)
         self.info_label = QLabel()
@@ -217,7 +218,7 @@ class DownloadRowWidget(QFrame):
         size_layout.setContentsMargins(0, 0, 0, 0)
         size_layout.setSpacing(4)
         size_layout.setAlignment(Qt.AlignCenter)
-        self.size_icon = LineIcon("file")
+        self.size_icon = LucideIconWidget("file-text", size=18)
         self.size_icon.setFixedSize(18, 18)
         size_layout.addWidget(self.size_icon)
         self.size_label = QLabel()
@@ -267,22 +268,22 @@ class DownloadRowWidget(QFrame):
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(4)
         actions.setAlignment(Qt.AlignCenter)
-        self.open_folder_button = ActionIconButton("folder")
+        self.open_folder_button = LucideIconButton("folder")
         self.open_folder_button.setToolTip("폴더 열기")
         self.open_folder_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_folder_button)
 
-        self.remove_button = ActionIconButton("remove")
+        self.remove_button = LucideIconButton("x")
         self.remove_button.setToolTip("목록에서 삭제")
         self.remove_button.clicked.connect(self._remove_row)
         actions.addWidget(self.remove_button)
 
-        self.delete_file_button = ActionIconButton("trash")
+        self.delete_file_button = LucideIconButton("trash-2")
         self.delete_file_button.setToolTip("파일 삭제")
         self.delete_file_button.clicked.connect(self._delete_file)
         actions.addWidget(self.delete_file_button)
 
-        self.more_button = ActionIconButton("more")
+        self.more_button = LucideIconButton("more-vertical")
         self.more_button.setToolTip("더보기")
         actions.addWidget(self.more_button)
         outer.addWidget(self.actions_widget)

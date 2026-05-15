@@ -51,6 +51,30 @@ print(ClipFlowWindow.__name__)
             ],
         )
 
+    def test_clipflow_qt_uses_bundled_lucide_icons(self):
+        script = r'''
+import tools.clipflow_widgets as widgets
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_icons import LUCIDE_ICON_DIR, LucideIconButton, LucideIconWidget, icon_path
+
+app = QApplication([])
+required = ["link", "folder", "x", "trash-2", "more-vertical", "clock", "file-text", "circle-help", "chevron-down", "play", "video", "cookie"]
+print(LUCIDE_ICON_DIR.name)
+print(all(icon_path(name).is_file() for name in required))
+print(hasattr(widgets, "LineIcon"))
+print(hasattr(widgets, "ActionIconButton"))
+print(hasattr(widgets, "ThumbnailBox"))
+print(LucideIconWidget("folder").icon_name)
+print(LucideIconButton("folder").icon_name)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["lucide", "True", "False", "False", "False", "folder", "folder"],
+        )
+
     def test_clipflow_qt_smoke_launches_offscreen(self):
         env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "CLIPFLOW_QT_SMOKE": "1"}
         result = subprocess.run(
