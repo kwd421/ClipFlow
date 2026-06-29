@@ -9,12 +9,12 @@ try:
     from tools import candidate_presenter as presenter
     from tools import downloader_engine as engine
     from tools.clipflow_rows import build_quality_options
-    from tools.clipflow_constants import ERROR_STATUS
+    from tools.clipflow_theme import ERROR_STATUS
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
     from clipflow_rows import build_quality_options
-    from clipflow_constants import ERROR_STATUS
+    from clipflow_theme import ERROR_STATUS
 
 
 class PlaylistMixin:
