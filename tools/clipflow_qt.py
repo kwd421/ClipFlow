@@ -239,9 +239,9 @@ class PreferencesDialog(QDialog):
 
 
 class DeleteConfirmDialog(QDialog):
-    def __init__(self, output_path, parent=None, title_text=None, detail_text=None):
+    def __init__(self, output_path, parent=None, title_text=None, detail_text=None, window_title=None):
         super().__init__(parent)
-        self.setWindowTitle("파일 삭제")
+        self.setWindowTitle(window_title or "파일 삭제")
         self.setModal(True)
         self.setMinimumWidth(420)
 
@@ -1367,6 +1367,28 @@ class ClipFlowWindow(QMainWindow):
             "ext": self._preferred_output_ext(),
         }
 
+    def _refresh_playlist_parent_metadata(self, parent):
+        if not parent or parent.get("kind") != "playlist":
+            return
+        candidate = parent.get("candidate") or {}
+        children = [
+            row
+            for row in self._playlist_children_for_parent(parent)
+            if not row.get("child_loading")
+        ]
+        count = len(children)
+        if parent.get("analysis_loading"):
+            expected = engine.safe_int(candidate.get("playlist_count") or candidate.get("item_count"))
+            count = max(count, expected)
+        candidate["duration"] = sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children)
+        candidate["sort_bytes"] = sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children)
+        candidate["item_count"] = count
+        candidate["playlist_count"] = count
+        parent["playlist_entries"] = [
+            {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
+            for child in children
+        ]
+
     def _preferred_output_ext(self):
         output_ext = self.current_preferences().output_format
         if str(output_ext).casefold() == AUTO_LABEL.casefold():
@@ -1822,7 +1844,12 @@ class ClipFlowWindow(QMainWindow):
     def _refresh_playlist_parent_status(self, parent):
         children = self._playlist_children_for_parent(parent)
         if not children:
+            self._refresh_playlist_parent_metadata(parent)
+            widget = parent.get("widget")
+            if widget:
+                widget.refresh()
             return
+        self._refresh_playlist_parent_metadata(parent)
         total = len(children)
         completed = sum(1 for row in children if row.get("status") == COMPLETED_STATUS)
         active = sum(1 for row in children if row.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS})
@@ -2126,8 +2153,11 @@ class ClipFlowWindow(QMainWindow):
             self._render_rows()
             return
         if event_type == "playlist_entry":
-            self._replace_playlist_loading_with_entry(parent, event)
+            entry_rows = self._replace_playlist_loading_with_entry(parent, event)
             self._render_rows()
+            if self._analysis_auto_download:
+                for entry_row in entry_rows or []:
+                    self.start_download_for_row(entry_row)
             return
         if event_type == "playlist_failed_entry":
             self._replace_playlist_loading_with_failed_entry(parent, event)
@@ -2140,11 +2170,8 @@ class ClipFlowWindow(QMainWindow):
                 if not (row.get("parent_playlist_id") == parent.get("id") and row.get("child_loading"))
             ]
             parent["analysis_loading"] = False
-            parent["playlist_entries"] = [
-                {"candidate": row.get("candidate") or {}, "qualities": row.get("qualities") or []}
-                for row in self._playlist_children_for_parent(parent)
-                if not row.get("child_loading")
-            ]
+            self._analysis_auto_download = False
+            self._refresh_playlist_parent_metadata(parent)
             self._refresh_playlist_parent_status(parent)
             self._render_rows()
             return
@@ -2215,7 +2242,7 @@ class ClipFlowWindow(QMainWindow):
             candidates = [candidate] if candidate else []
         candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
         if not candidates:
-            return
+            return []
         self._playlist_event_candidates.extend(candidates)
         analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
         source_url = event.get("source_url") or event.get("url") or analysis.get("webpage_url") or parent.get("analysis_source_url") or parent.get("source_url") or self.url_input.text().strip()
@@ -2227,7 +2254,9 @@ class ClipFlowWindow(QMainWindow):
             child["id"] = f"{parent['id']}-child-{index}"
             child["playlist_child_index"] = index
         self._replace_playlist_loading_rows(parent, child_index, children)
+        self._refresh_playlist_parent_metadata(parent)
         self._ensure_next_playlist_loading(parent, child_index)
+        return children
 
     def _replace_playlist_loading_with_failed_entry(self, parent, event):
         child_index = engine.safe_int(event.get("index")) or self._next_playlist_child_index(parent)
@@ -2259,6 +2288,7 @@ class ClipFlowWindow(QMainWindow):
             "playlist_key": parent.get("playlist_key"),
         }
         self._replace_playlist_loading_rows(parent, child_index, [failed])
+        self._refresh_playlist_parent_metadata(parent)
         self._ensure_next_playlist_loading(parent, child_index)
 
     def _next_playlist_child_index(self, parent):
@@ -2530,7 +2560,7 @@ class ClipFlowWindow(QMainWindow):
         confirmed = (
             self.confirm_delete_func(output_path)
             if self.confirm_delete_func
-            else self._confirm_file_delete(output_path)
+            else self._confirm_file_delete(output_path, row)
         )
         if not confirmed:
             return
@@ -2602,11 +2632,24 @@ class ClipFlowWindow(QMainWindow):
             self.selected_row_index = len(self.rows) - 1
         self._render_rows()
 
-    def _create_delete_confirm_dialog(self, output_path):
+    def _create_delete_confirm_dialog(self, output_path, row=None):
+        if row and row.get("kind") == "playlist":
+            child_count = len([
+                child
+                for child in self._playlist_children_for_parent(row)
+                if not child.get("child_loading")
+            ])
+            return DeleteConfirmDialog(
+                output_path,
+                self,
+                title_text="재생목록을 삭제하시겠습니까?",
+                detail_text=f"{output_path}\n하위 파일 {child_count}개도 함께 삭제됩니다.",
+                window_title="재생목록 삭제",
+            )
         return DeleteConfirmDialog(output_path, self)
 
-    def _confirm_file_delete(self, output_path):
-        dialog = self._create_delete_confirm_dialog(output_path)
+    def _confirm_file_delete(self, output_path, row=None):
+        dialog = self._create_delete_confirm_dialog(output_path, row)
         return dialog.exec() == QDialog.Accepted
 
     def _refresh_primary_action(self):

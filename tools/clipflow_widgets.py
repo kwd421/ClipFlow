@@ -644,9 +644,11 @@ class ThumbnailPlaceholder(QFrame):
         if self._preview is None:
             self._preview = QFrame(None, Qt.ToolTip | Qt.FramelessWindowHint)
             self._preview.setAttribute(Qt.WA_TranslucentBackground, True)
+            self._preview.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             preview_layout = QVBoxLayout(self._preview)
             preview_layout.setContentsMargins(0, 0, 0, 0)
             self._preview_label = QLabel(self._preview)
+            self._preview_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             preview_layout.addWidget(self._preview_label)
         self._preview_label.setFixedSize(width, height)
         self._preview_label.setPixmap(_rounded_pixmap(self._pixmap, width, height, 12))

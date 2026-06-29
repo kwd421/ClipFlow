@@ -74,9 +74,6 @@ def row_info_text(candidate):
         return f"{count}장" if count else "이미지 묶음"
     if kind == "image":
         return "1장"
-    if kind == "playlist":
-        count = engine.safe_int(candidate.get("item_count") or candidate.get("playlist_count"))
-        return f"재생목록 {count}개" if count else "재생목록"
     seconds = engine.safe_int(candidate.get("duration"))
     if seconds:
         hours = seconds // 3600
@@ -398,6 +395,10 @@ class DownloadRowWidget(QFrame):
     def _refresh_playlist_detail(self):
         is_playlist = self.row.get("kind") == "playlist"
         self.playlist_toggle_button.hide()
+        if is_playlist:
+            candidate = self.row.get("candidate") or {}
+            count = engine.safe_int(candidate.get("item_count") or candidate.get("playlist_count"))
+            self.playlist_pill.setText(f"재생목록 · {count}개" if count else "재생목록")
         self.playlist_pill.setVisible(is_playlist)
         self.playlist_detail_label.hide()
         self.playlist_detail_label.setText("")
