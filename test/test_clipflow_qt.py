@@ -3230,6 +3230,51 @@ print(ERROR_STATUS in [row.get("status") for row in window.rows])
             ],
         )
 
+    def test_clipflow_qt_playlist_float_button_stays_hidden_when_parent_visible(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/visible-parent"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+app.processEvents()
+window.url_input.setText(url)
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Visible Mix",
+    "playlist_title": "Visible Mix",
+    "is_playlist": True,
+    "playlist_count": 8,
+    "candidates": [
+        {"id": str(index), "source": f"https://media.test/watch/{index}", "url": f"https://media.test/watch/{index}", "title": f"Video {index}", "display_title": f"Video {index}", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10}
+        for index in range(8)
+    ],
+    "warnings": [],
+})
+app.processEvents()
+parent = window.rows[0]
+parent["expanded"] = False
+window.playlist_expansion_changed(parent)
+app.processEvents()
+parent["expanded"] = True
+window.playlist_expansion_changed(parent)
+app.processEvents()
+parent_top = parent["widget"].mapTo(window.scroll_area.viewport(), parent["widget"].rect().topLeft()).y()
+parent_bottom = parent_top + parent["widget"].height()
+print(parent_top >= 0)
+print(parent_bottom > 0)
+print(window.playlist_float_button.isVisible())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "False"])
+
     def test_clipflow_qt_playlist_float_button_collapses_and_returns_to_row(self):
         script = r'''
 from PySide6.QtCore import QPoint

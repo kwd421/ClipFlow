@@ -1569,7 +1569,8 @@ class ClipFlowWindow(QMainWindow):
         visible = False
         if widget:
             top = widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
-            bottom = top + widget.height()
+            parent_bottom = top + widget.height()
+            bottom = parent_bottom
             child_widgets = [
                 child.get("widget")
                 for child in self.rows
@@ -1578,7 +1579,7 @@ class ClipFlowWindow(QMainWindow):
             for child_widget in child_widgets:
                 child_top = child_widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
                 bottom = max(bottom, child_top + child_widget.height())
-            visible = top < 4 and bottom > 0
+            visible = parent_bottom <= 0 and bottom > 0
         self.playlist_float_button.setVisible(visible)
         if visible:
             self._position_playlist_float_button()
