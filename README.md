@@ -11,31 +11,36 @@ URL을 붙여넣으면 yt-dlp로 영상 후보를 분석하고, 원하는 품질
 - 다운로드 파일명은 UI에 보이는 영상 제목을 기준으로 만들고, trailing 도메인 꼬리는 제거합니다.
 - DRM, CAPTCHA, 유료/비공개 권한 우회는 하지 않습니다.
 
+## 실행
+
+- ClipFlow (PySide6, 패키징되는 기본 앱): `python tools/clipflow_qt.py`
+- 레거시 Tkinter 앱 (개발용): `python tools/url_downloader_gui.py`
+
 ## Windows 빌드
 
 ```powershell
-cd C:\Users\Fleurdelys\Downloads\nothing
+cd path\to\universal-mp4-browser-downloader
 powershell -ExecutionPolicy Bypass -File build-helper\build_windows.ps1
 ```
 
 빌드 결과:
 
-- `UniversalMP4BrowserDownloader.exe`
-- `dist\UniversalMP4BrowserDownloader.exe`
+- `ClipFlow.exe`
+- `dist\ClipFlow.exe`
 
 ## macOS 빌드
 
 PyInstaller는 Windows에서 macOS 앱을 cross-build하지 못합니다. Mac에서 이 저장소를 클론한 뒤 빌드해야 합니다.
 
 ```bash
-cd /path/to/nothing
+cd /path/to/universal-mp4-browser-downloader
 bash build-helper/build_macos.sh
 ```
 
 빌드 결과는 환경에 따라 다음 중 하나입니다.
 
-- `dist/UniversalMP4BrowserDownloader`
-- `dist/UniversalMP4BrowserDownloader.app`
+- `dist/ClipFlow`
+- `dist/ClipFlow.app`
 
 macOS에서 TLS/브라우저 지문 fallback까지 쓰려면 Chrome, Edge, 또는 Chromium 중 하나가 설치되어 있어야 합니다. 직접 경로를 지정하려면 `UMP4_BROWSER_PATH` 환경변수를 사용하세요.
 

@@ -37,7 +37,16 @@ COOKIE_SOURCES = {
 }
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text):
+    return ANSI_ESCAPE_RE.sub("", str(text or ""))
+
+
 def emit_event(callback, event_type, **payload):
+    if "message" in payload:
+        payload["message"] = strip_ansi(payload["message"])
     event = {"type": event_type, **payload}
     if callback:
         callback(event)
@@ -861,6 +870,7 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             "format": candidate.get("format_selector") or "bestvideo*+bestaudio/best",
             "outtmpl": str(output_dir / output_name),
             "windowsfilenames": True,
+            "overwrites": True,
             "continuedl": True,
             "retries": 10,
             "fragment_retries": 10,

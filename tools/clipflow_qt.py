@@ -1,16 +1,18 @@
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QPoint, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -26,23 +28,25 @@ from PySide6.QtWidgets import (
 try:
     from tools import candidate_presenter as presenter
     from tools import downloader_engine as engine
+    from tools import clipflow_theme as theme
     from tools.clipflow_rows import DownloadRowWidget, build_quality_options, row_kind, row_source_url
     from tools.clipflow_theme import (
         APP_NAME, APP_STYLE, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT, PRIMARY_BUTTON_WIDTH,
-        TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
+        TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, create_app_icon,
     )
-    from tools.clipflow_icons import LucideIconButton, LucideIconWidget
-    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
+    from tools.clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
+    import clipflow_theme as theme
     from clipflow_rows import DownloadRowWidget, build_quality_options, row_kind, row_source_url
     from clipflow_theme import (
         APP_NAME, APP_STYLE, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT, PRIMARY_BUTTON_WIDTH,
-        TOP_FIELD_HEIGHT, configure_app_font, create_app_icon,
+        TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, create_app_icon,
     )
-    from clipflow_icons import LucideIconButton, LucideIconWidget
-    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
+    from clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
 
 
 SETTINGS_ORG = os.environ.get("CLIPFLOW_SETTINGS_ORG", "ClipFlow")
@@ -267,6 +271,11 @@ class ClipFlowWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             configure_app_font(app)
+            app.setStyleSheet(APP_STYLE)
+            if not getattr(app, "_clipflow_tooltip_manager", None):
+                manager = TooltipManager(app)
+                app.installEventFilter(manager)
+                app._clipflow_tooltip_manager = manager
         self.analyze_func = analyze_func
         self.download_func = download_func
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
@@ -285,6 +294,7 @@ class ClipFlowWindow(QMainWindow):
         self.download_worker = None
         self.active_download_row = None
         self.selected_row_index = -1
+        self.select_mode = False
         self.event_messages = []
         self._clear_url_on_next_click = False
         self._row_sequence = 0
@@ -300,24 +310,54 @@ class ClipFlowWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 18, 18, 12)
+        layout.setContentsMargins(18, 16, 18, 12)
         layout.setSpacing(14)
 
+        layout.addWidget(self._build_header())
         layout.addWidget(self._build_input_panel())
         layout.addWidget(self._build_list_panel(), 1)
         layout.addWidget(self._build_footer())
         self.setCentralWidget(root)
 
+    def _build_header(self):
+        header = QWidget()
+        row = QHBoxLayout(header)
+        row.setContentsMargins(2, 2, 2, 0)
+        row.setSpacing(10)
+
+        glyph = QLabel()
+        glyph.setPixmap(create_app_icon(26).pixmap(26, 26))
+        glyph.setFixedSize(26, 26)
+
+        wordmark = QLabel(APP_NAME)
+        wordmark.setObjectName("WindowTitle")
+        apply_tracking(wordmark, 0.2)
+
+        row.addWidget(glyph, 0, Qt.AlignVCenter)
+        row.addWidget(wordmark, 0, Qt.AlignVCenter)
+        row.addStretch(1)
+        return header
+
     def eventFilter(self, obj, event):
         if hasattr(self, "scroll_area") and obj is self.scroll_area.viewport() and event.type() == event.Type.Resize:
             self._position_playlist_float_button()
             self._refresh_playlist_float_button()
+            if hasattr(self, "empty_state"):
+                self.empty_state.setGeometry(self.scroll_area.viewport().rect())
         return super().eventFilter(obj, event)
 
     def _panel(self):
         frame = QFrame()
         frame.setObjectName("Panel")
         return frame
+
+    def _apply_panel_shadow(self, widget, blur=28, y_offset=8, alpha=26):
+        shadow = QGraphicsDropShadowEffect(widget)
+        shadow.setBlurRadius(blur)
+        shadow.setXOffset(0)
+        shadow.setYOffset(y_offset)
+        shadow.setColor(QColor(20, 22, 30, alpha))
+        widget.setGraphicsEffect(shadow)
 
     def _field_box(self, icon_kind, line_edit, trailing_widget=None):
         frame = QFrame()
@@ -344,22 +384,39 @@ class ClipFlowWindow(QMainWindow):
         self.url_input.setPlaceholderText("URL을 입력하세요")
         self.url_input.textChanged.connect(self._refresh_primary_action)
         self.url_input.clicked_for_edit.connect(self._prepare_url_edit)
+        self.url_input.pasted.connect(self._on_url_pasted)
+        self.url_input.returnPressed.connect(self._start_analysis)
+
+        self.paste_button = LucideIconButton("clipboard", size=30, icon_size=16)
+        self.paste_button.setToolTip("붙여넣기")
+        self.paste_button.clicked.connect(self._paste_and_analyze)
         self.clear_url_button = LucideIconButton("circle-x", size=30, icon_size=16)
         self.clear_url_button.setToolTip("URL 지우기")
         self.clear_url_button.clicked.connect(self._clear_url)
-        url_field = self._field_box("link", self.url_input, self.clear_url_button)
+        url_trailing = QWidget()
+        url_trailing_layout = QHBoxLayout(url_trailing)
+        url_trailing_layout.setContentsMargins(0, 0, 0, 0)
+        url_trailing_layout.setSpacing(0)
+        url_trailing_layout.addWidget(self.paste_button)
+        url_trailing_layout.addWidget(self.clear_url_button)
+        url_field = self._field_box("link", self.url_input, url_trailing)
 
         self.primary_button = PrimaryActionButton()
-        self.primary_button.setFixedSize(PRIMARY_BUTTON_WIDTH, TOP_FIELD_HEIGHT)
+        self.primary_button.setFixedSize(64, TOP_FIELD_HEIGHT)
+        self.primary_button.setCursor(Qt.PointingHandCursor)
+        self.primary_button.setToolTip("다운로드")
+        self.primary_button.setIcon(QIcon(lucide_pixmap("download", 18, theme.ON_ACCENT)))
+        self.primary_button.setIconSize(QSize(18, 18))
         self.primary_button.clicked.connect(self._handle_primary_action)
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
         self.folder_button = QPushButton("저장 위치")
         self.folder_button.setObjectName("SecondaryButton")
-        self.folder_button.setFixedSize(104, TOP_FIELD_HEIGHT - 8)
+        self.folder_button.setFixedSize(96, TOP_FIELD_HEIGHT)
+        self.folder_button.setCursor(Qt.PointingHandCursor)
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
-        folder_field = self._field_box("folder", self.folder_input, self.folder_button)
+        folder_field = self._field_box("folder", self.folder_input)
 
         self.cookie_combo = CleanComboBox("cookie")
         self.cookie_combo.addItems(COOKIE_DISPLAY_CHOICES)
@@ -384,6 +441,7 @@ class ClipFlowWindow(QMainWindow):
         options_row.setContentsMargins(0, 0, 0, 0)
         options_row.setSpacing(12)
         options_row.addWidget(folder_field, 1)
+        options_row.addWidget(self.folder_button)
         options_row.addWidget(self.cookie_combo)
 
         layout.addLayout(url_row)
@@ -391,16 +449,44 @@ class ClipFlowWindow(QMainWindow):
         return panel
 
     def _build_list_panel(self):
-        panel = self._panel()
+        panel = QFrame()
+        panel.setObjectName("ListPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setContentsMargins(2, 4, 2, 4)
         layout.setSpacing(10)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         title = QLabel("다운로드 목록")
         title.setObjectName("SectionTitle")
+        apply_tracking(title, -0.2)
         self.count_label = QLabel("0개")
-        self.count_label.setObjectName("MetaText")
+        self.count_label.setObjectName("CountChip")
+        self.count_label.setAlignment(Qt.AlignCenter)
+
+        self.select_checkbox = CleanCheckBox()
+        self.select_checkbox.setObjectName("SelectToggle")
+        self.select_checkbox.setCursor(Qt.PointingHandCursor)
+        self.select_checkbox.setToolTip("선택 모드")
+        self.select_checkbox.toggled.connect(self._toggle_select_mode)
+
+        self.select_actions = QWidget()
+        select_actions_layout = QHBoxLayout(self.select_actions)
+        select_actions_layout.setContentsMargins(0, 0, 0, 0)
+        select_actions_layout.setSpacing(2)
+        self.select_all_button = LucideIconButton("check-check", size=34, icon_size=20)
+        self.select_all_button.setToolTip("전체 선택")
+        self.select_all_button.clicked.connect(self._select_all_rows)
+        self.remove_list_button = LucideIconButton("x", size=34, icon_size=20)
+        self.remove_list_button.setToolTip("목록에서 삭제")
+        self.remove_list_button.clicked.connect(self._delete_selected_from_list)
+        self.remove_file_button = LucideIconButton("trash-2", size=34, icon_size=20, danger=True)
+        self.remove_file_button.setToolTip("파일 삭제")
+        self.remove_file_button.clicked.connect(self._delete_selected_files)
+        select_actions_layout.addWidget(self.select_all_button)
+        select_actions_layout.addWidget(self.remove_list_button)
+        select_actions_layout.addWidget(self.remove_file_button)
+        self.select_actions.hide()
         self.sort_label = QLabel("정렬:")
         self.sort_label.setObjectName("MetaText")
         self.sort_label.setFixedHeight(TOP_FIELD_HEIGHT - 2)
@@ -416,9 +502,12 @@ class ClipFlowWindow(QMainWindow):
         self.preference_button = QPushButton("품질")
         self.preference_button.setObjectName("SecondaryButton")
         self.preference_button.setFixedSize(74, TOP_FIELD_HEIGHT - 2)
+        self.preference_button.setCursor(Qt.PointingHandCursor)
         self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
         self.preference_button.clicked.connect(self._open_preferences_dialog)
         header.addWidget(title)
+        header.addWidget(self.select_checkbox, 0, Qt.AlignVCenter)
+        header.addWidget(self.select_actions, 0, Qt.AlignVCenter)
         header.addStretch(1)
         header.addWidget(self.sort_label, 0, Qt.AlignVCenter)
         header.addWidget(self.sort_order_combo, 0, Qt.AlignVCenter)
@@ -435,8 +524,8 @@ class ClipFlowWindow(QMainWindow):
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
-        self.row_layout.setContentsMargins(0, 0, 0, 0)
-        self.row_layout.setSpacing(0)
+        self.row_layout.setContentsMargins(2, 2, 2, 2)
+        self.row_layout.setSpacing(10)
         self.row_layout.addStretch(1)
         self.scroll_area.setWidget(self.row_container)
         self.scroll_area.viewport().installEventFilter(self)
@@ -445,25 +534,58 @@ class ClipFlowWindow(QMainWindow):
         self.playlist_float_button.setFixedSize(62, 30)
         self.playlist_float_button.clicked.connect(self._collapse_floating_playlist)
         self.playlist_float_button.hide()
+
+        self.empty_state = QWidget(self.scroll_area.viewport())
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setAlignment(Qt.AlignCenter)
+        empty_layout.setSpacing(10)
+        empty_glyph = LucideIconWidget("play", size=42, color=theme.BORDER_STRONG)
+        empty_title = QLabel("아직 담긴 영상이 없어요")
+        empty_title.setObjectName("SectionTitle")
+        empty_title.setAlignment(Qt.AlignCenter)
+        empty_sub = QLabel("위에 URL을 붙여넣으면 분석해서 카드로 보여줄게요")
+        empty_sub.setObjectName("MetaText")
+        empty_sub.setAlignment(Qt.AlignCenter)
+        apply_tracking(empty_sub, 0.2)
+        empty_layout.addWidget(empty_glyph, 0, Qt.AlignHCenter)
+        empty_layout.addWidget(empty_title, 0, Qt.AlignHCenter)
+        empty_layout.addWidget(empty_sub, 0, Qt.AlignHCenter)
+
         layout.addWidget(self.scroll_area, 1)
         return panel
 
     def _build_footer(self):
         footer = QWidget()
-        layout = QHBoxLayout(footer)
-        layout.setContentsMargins(4, 0, 4, 0)
+        outer = QVBoxLayout(footer)
+        outer.setContentsMargins(4, 0, 4, 0)
+        outer.setSpacing(9)
+        divider = QFrame()
+        divider.setObjectName("FooterDivider")
+        outer.addWidget(divider)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.status_label = QLabel("준비됨")
         self.total_label = QLabel("총 항목: 0")
         self.concurrent_label = QLabel("동시 다운로드: 0/1")
+        self.total_label.setObjectName("MetaText")
+        self.concurrent_label.setObjectName("MetaText")
+        apply_tracking(self.total_label, 0.2)
+        apply_tracking(self.concurrent_label, 0.2)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
         layout.addWidget(self.total_label)
-        layout.addSpacing(24)
-        layout.addWidget(self.concurrent_label)
+        outer.addLayout(layout)
         return footer
 
     def _prepare_url_edit(self):
         return
+
+    def _on_url_pasted(self):
+        # Pasting a URL kicks off analysis automatically; the user only needs
+        # to press Download on the resulting row afterwards.
+        if self.url_input.text().strip():
+            QTimer.singleShot(0, self._start_analysis)
 
     def _clear_url(self):
         self.url_input.clear()
@@ -613,15 +735,20 @@ class ClipFlowWindow(QMainWindow):
             self._render_rows()
 
     def _handle_primary_action(self):
-        if not self.url_input.text().strip():
-            text = QApplication.clipboard().text().strip()
-            if text:
-                self.url_input.setText(text)
-            return
-        if self._selected_row_matches_current_url():
-            self._start_download()
-            return
-        self._start_analysis()
+        # Right-side button is download-only; analysis is triggered by paste /
+        # Enter in the URL field.
+        self._start_download()
+
+    def _paste_and_analyze(self):
+        text = QApplication.clipboard().text().strip()
+        if text:
+            self.url_input.setText(text)
+            self._start_analysis()
+
+    def _refresh_url_trailing(self):
+        has_text = bool(self.url_input.text().strip())
+        self.paste_button.setVisible(not has_text)
+        self.clear_url_button.setVisible(has_text)
 
     def _start_analysis(self):
         if self.analysis_thread and self.analysis_thread.isRunning():
@@ -634,9 +761,39 @@ class ClipFlowWindow(QMainWindow):
         self.analysis = None
         self.selected_row_index = -1
         self.primary_button.setEnabled(False)
-        self.primary_button.setText("분석 중")
         self.primary_button.set_loading(True)
         self._set_status("분석 중")
+
+        self._analyzing_row = {
+            "id": "__analyzing__",
+            "kind": "video",
+            "candidate": {
+                "display_title": url,
+                "title": url,
+                "thumbnail": "",
+                "duration": 0,
+                "sort_bytes": 0,
+                "output_ext": "mp4",
+                "ext": "mp4",
+                "resolution": "",
+            },
+            "qualities": [],
+            "quality_options": [],
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": "분석 중",
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "분석 중",
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+        }
+        self.rows = [self._analyzing_row] + self.rows
+        self._render_rows()
 
         self.analysis_thread = QThread(self)
         self.analysis_worker = AnalyzeWorker(
@@ -670,14 +827,19 @@ class ClipFlowWindow(QMainWindow):
 
     @Slot(str)
     def _analysis_failed(self, message):
+        message = engine.strip_ansi(message)
         self._set_status(f"{engine.classify_error(message)}: {message}")
 
     @Slot()
     def _analysis_thread_finished(self):
-        self.primary_button.setEnabled(True)
         self.primary_button.set_loading(False)
         self.analysis_thread = None
         self.analysis_worker = None
+        if any(row.get("id") == "__analyzing__" for row in self.rows):
+            self.rows = [row for row in self.rows if row.get("id") != "__analyzing__"]
+            if self.selected_row_index >= len(self.rows):
+                self.selected_row_index = len(self.rows) - 1
+            self._render_rows()
         self._refresh_primary_action()
 
     def _prepend_analysis_rows(self, analysis, grouped_rows, source_url):
@@ -699,6 +861,7 @@ class ClipFlowWindow(QMainWindow):
                     "selected_format_index": 0,
                     "analysis_source_url": source_url,
                     "source_url": source_url,
+                    "input_url": analysis.get("url") or source_url,
                     "status": "준비",
                     "status_detail": "",
                     "progress": 0,
@@ -727,6 +890,7 @@ class ClipFlowWindow(QMainWindow):
                 "selected_format_index": 0,
                 "analysis_source_url": source_url,
                 "source_url": source_url or row_source_url(analysis, candidate),
+                "input_url": analysis.get("url") or source_url,
                 "status": "준비",
                 "status_detail": "",
                 "progress": 0,
@@ -779,8 +943,14 @@ class ClipFlowWindow(QMainWindow):
         for row in self.rows:
             widget = DownloadRowWidget(self, row)
             row["widget"] = widget
+            widget.set_select_mode(self.select_mode)
             self.row_layout.insertWidget(self.row_layout.count() - 1, widget)
         self.count_label.setText(f"{len(self.rows)}개")
+        if hasattr(self, "empty_state"):
+            self.empty_state.setGeometry(self.scroll_area.viewport().rect())
+            self.empty_state.setVisible(not self.rows)
+            if not self.rows:
+                self.empty_state.raise_()
         self._refresh_footer()
         self._refresh_row_selection()
         self._refresh_primary_action()
@@ -971,13 +1141,66 @@ class ClipFlowWindow(QMainWindow):
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
             self._set_status("다운로드할 항목을 선택하세요")
             return
+        self.start_download_for_row(self.rows[self.selected_row_index])
 
-        row = self.rows[self.selected_row_index]
+    def _expected_output_path(self, candidate):
+        if str((candidate or {}).get("media_type") or "").lower() == "playlist":
+            return None
+        try:
+            out_dir = engine.output_dir_for_candidate(candidate, self.folder_input.text())
+            stem = engine.filename_stem_for_candidate(candidate)
+            ext = engine.normalized_output_ext(candidate.get("output_ext")) or "mp4"
+            return Path(out_dir) / f"{stem}.{ext}"
+        except Exception:
+            return None
+
+    def _confirm_overwrite(self, path):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("이미 있는 파일")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(380)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+        title = QLabel("이미 같은 파일이 있어요. 덮어쓸까요?")
+        title.setObjectName("SectionTitle")
+        title.setWordWrap(True)
+        detail = QLabel(str(path))
+        detail.setObjectName("MetaText")
+        detail.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setObjectName("SecondaryButton")
+        confirm = QPushButton("덮어쓰기")
+        cancel.clicked.connect(dialog.reject)
+        confirm.clicked.connect(dialog.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        layout.addLayout(buttons)
+        return dialog.exec() == QDialog.Accepted
+
+    def start_download_for_row(self, row):
+        if self.download_thread and self.download_thread.isRunning():
+            self._set_status("다른 항목을 다운로드하는 중입니다")
+            return
+        if row not in self.rows:
+            return
         candidate = self.selected_candidate_for_row_ref(row)
         if not candidate:
             self._set_status("다운로드할 항목을 선택하세요")
             return
 
+        expected = self._expected_output_path(candidate)
+        if expected is not None and expected.exists():
+            if not self._confirm_overwrite(expected):
+                self._set_status("취소됨 · 이미 같은 파일이 있어요")
+                return
+
+        self.selected_row_index = self.rows.index(row)
+        self._refresh_row_selection()
         self.active_download_row = row
         row["download_started_at"] = time.time()
         row["widget"].set_status("다운로드 중")
@@ -1061,6 +1284,7 @@ class ClipFlowWindow(QMainWindow):
 
     @Slot(str)
     def _download_failed(self, message):
+        message = engine.strip_ansi(message)
         if self.active_download_row:
             widget = self.active_download_row.get("widget")
             self.active_download_row["messages"].append(message)
@@ -1123,11 +1347,21 @@ class ClipFlowWindow(QMainWindow):
     def open_folder_for_row(self, row):
         output_path = Path(row.get("output_path") or "")
         if output_path.exists():
-            target = output_path.parent
-        else:
-            target = Path(self.folder_input.text()).expanduser()
+            self._reveal_in_file_manager(output_path)
+            return
+        target = Path(self.folder_input.text()).expanduser()
         target.mkdir(parents=True, exist_ok=True)
         self._open_path(target)
+
+    def _reveal_in_file_manager(self, path):
+        path = Path(path)
+        if sys.platform == "darwin":
+            try:
+                subprocess.run(["open", "-R", str(path)], check=False)
+                return
+            except Exception:
+                pass
+        self._open_path(path.parent if path.is_file() else path)
 
     def _open_path(self, path):
         return QDesktopServices.openUrl(local_file_url(path))
@@ -1142,6 +1376,94 @@ class ClipFlowWindow(QMainWindow):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
             self._save_completed_history()
+
+    def _toggle_select_mode(self, checked):
+        self.select_mode = bool(checked)
+        self.select_actions.setVisible(self.select_mode)
+        if not self.select_mode:
+            for row in self.rows:
+                row["checked"] = False
+        for row in self.rows:
+            widget = row.get("widget")
+            if widget:
+                widget.set_select_mode(self.select_mode)
+
+    def on_row_check_changed(self):
+        return
+
+    def _select_all_rows(self):
+        for row in self.rows:
+            row["checked"] = True
+            widget = row.get("widget")
+            if widget:
+                widget.set_select_mode(True)
+
+    def _delete_selected_from_list(self):
+        self._remove_selected(delete_files=False)
+
+    def _delete_selected_files(self):
+        self._remove_selected(delete_files=True)
+
+    def _remove_selected(self, delete_files):
+        removable = [
+            row
+            for row in self.rows
+            if row.get("checked") and row.get("status") not in {"분석 중", "다운로드 중"}
+        ]
+        if not removable:
+            self._set_status("선택된 항목이 없습니다")
+            return
+        if not self._confirm_selected(len(removable), delete_files):
+            return
+        if delete_files:
+            for row in removable:
+                output_path = Path(row.get("output_path") or "")
+                if output_path.exists() and output_path.is_file():
+                    try:
+                        output_path.unlink()
+                    except OSError:
+                        pass
+        keep = [row for row in self.rows if row not in removable]
+        self.rows = keep
+        if self.selected_row_index >= len(self.rows):
+            self.selected_row_index = len(self.rows) - 1
+        self._render_rows()
+        self._save_completed_history()
+
+    def _confirm_selected(self, count, delete_files):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("파일 삭제" if delete_files else "목록에서 삭제")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+        if delete_files:
+            message = f"선택한 {count}개 항목의 파일을 삭제할까요?"
+            detail = "다운로드된 파일이 실제로 삭제되고 목록에서도 제거됩니다."
+        else:
+            message = f"선택한 {count}개 항목을 목록에서 삭제할까요?"
+            detail = "파일은 삭제되지 않고 목록에서만 제거됩니다."
+        title = QLabel(message)
+        title.setObjectName("SectionTitle")
+        title.setWordWrap(True)
+        detail_label = QLabel(detail)
+        detail_label.setObjectName("MetaText")
+        detail_label.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail_label)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setObjectName("SecondaryButton")
+        confirm = QPushButton("삭제")
+        confirm.setObjectName("DangerButton" if delete_files else "")
+        cancel.clicked.connect(dialog.reject)
+        confirm.clicked.connect(dialog.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        layout.addLayout(buttons)
+        return dialog.exec() == QDialog.Accepted
 
     def delete_file_for_row(self, row):
         output_path = Path(row.get("output_path") or "")
@@ -1173,13 +1495,12 @@ class ClipFlowWindow(QMainWindow):
         return dialog.exec() == QDialog.Accepted
 
     def _refresh_primary_action(self):
-        has_url = bool(self.url_input.text().strip())
-        if not has_url:
-            self.primary_button.setText("붙여넣기")
-        elif self._selected_row_matches_current_url():
-            self.primary_button.setText("다운로드")
-        else:
-            self.primary_button.setText("분석")
+        self._refresh_url_trailing()
+        downloading = bool(self.download_thread and self.download_thread.isRunning())
+        has_target = 0 <= self.selected_row_index < len(self.rows)
+        if has_target:
+            has_target = self.rows[self.selected_row_index].get("status") not in {"분석 중", "다운로드 중"}
+        self.primary_button.setEnabled(has_target and not downloading)
 
     def _selected_row_matches_current_url(self):
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
@@ -1191,6 +1512,7 @@ class ClipFlowWindow(QMainWindow):
         row_urls = {
             str(row.get("analysis_source_url") or "").strip(),
             str(row.get("source_url") or "").strip(),
+            str(row.get("input_url") or "").strip(),
         }
         return current_url in row_urls
 

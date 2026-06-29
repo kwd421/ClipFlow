@@ -3,24 +3,126 @@ import re
 from urllib.parse import urljoin, urlparse
 
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QToolTip
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 try:
     from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
     from tools.clipflow_theme import THUMBNAIL_WIDTH
+    from tools import clipflow_theme as theme
 except ImportError:
     from clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
     from clipflow_theme import THUMBNAIL_WIDTH
+    import clipflow_theme as theme
+
+
+class Spinner(QWidget):
+    """A small indeterminate loading spinner (rotating accent arc)."""
+
+    def __init__(self, size=20, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self.setFixedSize(size, size)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(70)
+        self._timer.timeout.connect(self._advance)
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _advance(self):
+        self._angle = (self._angle - 30) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(theme.ACCENT), 2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        margin = 2
+        rect = QRectF(margin, margin, self.width() - 2 * margin, self.height() - 2 * margin)
+        painter.drawArc(rect, int(self._angle * 16), int(270 * 16))
+
+
+class CleanCheckBox(QCheckBox):
+    """A self-painted checkbox: rounded square, accent fill with a white check
+    when checked. Replaces the platform indicator for a clean, consistent look."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(20, 20)
+
+    def sizeHint(self):
+        return QSize(20, 20)
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        size = 18
+        x = (self.width() - size) // 2
+        y = (self.height() - size) // 2
+        rect = QRectF(x, y, size, size)
+        if self.isChecked():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.ACCENT))
+            painter.drawRoundedRect(rect, 5, 5)
+            painter.drawPixmap(x + 2, y + 2, 14, 14, lucide_pixmap("check", 14, "#FFFFFF"))
+        else:
+            border = theme.ACCENT if self.underMouse() else theme.FIELD_BORDER_HOVER
+            painter.setPen(QPen(QColor(border), 1.4))
+            painter.setBrush(QColor(theme.SURFACE))
+            painter.drawRoundedRect(rect, 5, 5)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
 
 
 class ClearingUrlInput(QLineEdit):
     clicked_for_edit = Signal()
+    pasted = Signal()
 
     def mousePressEvent(self, event):
         self.clicked_for_edit.emit()
         super().mousePressEvent(event)
+
+    def insertFromMimeData(self, source):
+        super().insertFromMimeData(source)
+        self.pasted.emit()
+
+    def _set_field_focus(self, focused):
+        box = self.parent()
+        if box is not None and box.objectName() == "FieldBox":
+            box.setProperty("focused", "true" if focused else "false")
+            box.style().unpolish(box)
+            box.style().polish(box)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self._set_field_focus(True)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._set_field_focus(False)
 
 
 class PathDisplayInput(QLineEdit):
@@ -44,6 +146,23 @@ class PathDisplayInput(QLineEdit):
 
     def keyPressEvent(self, event):
         event.ignore()
+
+
+def _rounded_pixmap(pixmap, width, height, radius):
+    scaled = pixmap.scaled(width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    result = QPixmap(width, height)
+    result.fill(Qt.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+    painter.setClipPath(path)
+    x = (width - scaled.width()) // 2
+    y = (height - scaled.height()) // 2
+    painter.drawPixmap(x, y, scaled)
+    painter.end()
+    return result
 
 
 def source_domain(url):
@@ -101,12 +220,6 @@ class AboveTooltipMixin:
     def tooltip_position(self):
         return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
 
-    def event(self, event):
-        if event.type() == event.Type.ToolTip and self.toolTip():
-            QToolTip.showText(self.tooltip_position(), self.toolTip(), self)
-            return True
-        return super().event(event)
-
 
 class MarqueeLabel(QLabel):
     def __init__(self, parent=None):
@@ -145,7 +258,7 @@ class MarqueeLabel(QLabel):
             super().paintEvent(event)
             return
         painter = QPainter(self)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(QColor(theme.INK))
         text_width = self.fontMetrics().horizontalAdvance(self.text())
         y = (self.height() + self.fontMetrics().ascent() - self.fontMetrics().descent()) // 2
         x = -self._marquee_offset
@@ -278,12 +391,35 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             reply.deleteLater()
 
 
+class ComboPopup(QFrame):
+    """Self-painted dropdown surface.
+
+    macOS dark-mode does not propagate the app stylesheet to Qt.Popup
+    top-level windows, so the background is painted directly here to guarantee
+    a light surface regardless of OS appearance or stylesheet cascade.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(QColor(theme.BORDER), 1))
+        painter.setBrush(QColor(theme.SURFACE))
+        painter.drawRoundedRect(rect, 10, 10)
+
+
 class CleanComboBox(QComboBox):
     def __init__(self, icon_kind=None, parent=None):
         super().__init__(parent)
         self.icon_kind = icon_kind
         self.setMinimumHeight(28)
         self.setMaximumHeight(30)
+        self.setCursor(Qt.PointingHandCursor)
 
     def paintEvent(self, event):
         del event
@@ -293,13 +429,13 @@ class CleanComboBox(QComboBox):
         rect = QRectF(self.rect()).adjusted(0.5, 1.0, -0.5, -1.0)
         enabled = self.isEnabled()
         hovered = self.underMouse()
-        border_color = "#BFD0E6" if enabled and hovered else "#DCE6F2"
-        text_color = "#111827" if enabled else "#98A2B3"
-        background = "#FBFDFF" if enabled and hovered else ("#FFFFFF" if enabled else "#F8FAFC")
+        border_color = theme.FIELD_BORDER_HOVER if enabled and hovered else theme.FIELD_BORDER
+        text_color = theme.INK if enabled else theme.MUTED_SOFT
+        background = theme.SURFACE_SOFT if enabled and hovered else (theme.SURFACE if enabled else theme.SURFACE_SUNKEN)
 
-        painter.setPen(QPen(QColor(border_color if enabled else "#E2E8F0"), 1))
+        painter.setPen(QPen(QColor(border_color if enabled else theme.BORDER), 1))
         painter.setBrush(QColor(background))
-        painter.drawRoundedRect(rect, 6, 6)
+        painter.drawRoundedRect(rect, 8, 8)
 
         text_left = 38 if self.icon_kind else 11
         if self.icon_kind:
@@ -325,6 +461,44 @@ class CleanComboBox(QComboBox):
         self.update()
         super().changeEvent(event)
 
+    def showPopup(self):
+        # Self-painted popup (see ComboPopup) + explicit per-popup stylesheet,
+        # because Qt.Popup windows do not inherit the app stylesheet on macOS.
+        popup = ComboPopup(self)
+        popup.setStyleSheet(
+            f"QPushButton#ComboOption {{"
+            f" background: transparent; border: none; border-radius: 7px;"
+            f" padding: 9px 14px 9px 14px; color: {theme.INK};"
+            f" font-size: 13px; font-weight: 500; text-align: left; }}"
+            f"QPushButton#ComboOption:hover {{ background: {theme.SURFACE_SOFT}; }}"
+            f"QPushButton#ComboOption[selected=\"true\"] {{ color: {theme.ACCENT}; font-weight: 700; }}"
+        )
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        current = self.currentIndex()
+        for index in range(self.count()):
+            option = QPushButton(self.itemText(index), popup)
+            option.setObjectName("ComboOption")
+            option.setProperty("selected", "true" if index == current else "false")
+            option.setCursor(Qt.PointingHandCursor)
+            option.setFlat(True)
+            option.clicked.connect(lambda _checked=False, idx=index, pop=popup: self._choose_option(idx, pop))
+            layout.addWidget(option)
+        popup.adjustSize()
+        popup.setFixedWidth(max(self.width(), popup.sizeHint().width(), 160))
+        popup.move(self.mapToGlobal(QPoint(0, self.height() + 6)))
+        self._active_popup = popup
+        popup.show()
+
+    def _choose_option(self, index, popup):
+        popup.close()
+        popup.deleteLater()
+        self.setCurrentIndex(index)
+
+    def hidePopup(self):
+        super().hidePopup()
+
 
 class ThumbnailPlaceholder(QFrame):
     _network_manager = None
@@ -333,10 +507,12 @@ class ThumbnailPlaceholder(QFrame):
         super().__init__(parent)
         self.setObjectName("ThumbBox")
         self.setFixedSize(THUMBNAIL_WIDTH, 54)
-        self.icon = LucideIconWidget("video", size=24, color="#94A3B8", parent=self)
+        self.icon = LucideIconWidget("play", size=22, color=theme.MUTED, parent=self)
         self.thumbnail_url = ""
         self._pixmap = QPixmap()
         self._reply = None
+        self._preview = None
+        self._preview_label = None
 
     @classmethod
     def network_manager(cls):
@@ -401,11 +577,50 @@ class ThumbnailPlaceholder(QFrame):
         if self._pixmap.isNull():
             return
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 7, 7)
+        painter.setClipPath(path)
         scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         x = (self.width() - scaled.width()) // 2
         y = (self.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
+
+    def enterEvent(self, event):
+        self._show_preview()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hide_preview()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        self._hide_preview()
+        super().hideEvent(event)
+
+    def _show_preview(self):
+        if self._pixmap.isNull():
+            return
+        width, height = THUMBNAIL_WIDTH * 2, 54 * 2
+        if self._preview is None:
+            self._preview = QFrame(None, Qt.ToolTip | Qt.FramelessWindowHint)
+            self._preview.setAttribute(Qt.WA_TranslucentBackground, True)
+            preview_layout = QVBoxLayout(self._preview)
+            preview_layout.setContentsMargins(0, 0, 0, 0)
+            self._preview_label = QLabel(self._preview)
+            preview_layout.addWidget(self._preview_label)
+        self._preview_label.setFixedSize(width, height)
+        self._preview_label.setPixmap(_rounded_pixmap(self._pixmap, width, height, 12))
+        self._preview.adjustSize()
+        anchor = self.mapToGlobal(QPoint((self.width() - width) // 2, -height - 10))
+        self._preview.move(anchor)
+        self._preview.show()
+        self._preview.raise_()
+
+    def _hide_preview(self):
+        if self._preview is not None:
+            self._preview.hide()
 
 
 class PrimaryActionButton(QPushButton):
@@ -442,7 +657,7 @@ class PrimaryActionButton(QPushButton):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor("#FFFFFF"), 2)
+        pen = QPen(QColor(theme.ON_ACCENT), 2)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         size = 14

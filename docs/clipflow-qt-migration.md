@@ -8,7 +8,7 @@ This branch keeps the existing downloader behavior intact while adding a PySide6
 - PySide6 ClipFlow MVP: `python tools/clipflow_qt.py`
 - Headless verification helper: `tools/headless_verification.py`
 
-The existing Windows PyInstaller spec still targets the legacy Tkinter entrypoint. PySide6 packaging is intentionally left for a later PR.
+The existing legacy Tkinter app remains runnable for development, but the packaged PyInstaller build now targets the PySide6 ClipFlow entrypoint (`build-helper/ClipFlow.spec`). Both `build_windows.ps1` and `build_macos.sh` build ClipFlow.
 
 ## Shared Core
 
@@ -41,8 +41,7 @@ Implemented:
 
 - Real thumbnail and site-icon loading are not implemented in the PySide6 UI yet.
 - PySide6 UI polish is improved but still not the final visual design.
-- PySide6 PyInstaller packaging is not added in this pass.
-- The legacy Tkinter Windows build path is preserved as the packaged app path.
+- The legacy Tkinter entrypoint is kept for development only and is no longer the packaged app.
 - No DRM, CAPTCHA, paid/private content, age-restricted-content, login bypass, or new site-specific circumvention behavior was added.
 
 ## Recommended Next PR
@@ -53,5 +52,4 @@ Suggested scope:
 
 - Add safe async thumbnail and site-icon loading with placeholders and timeouts.
 - Add playlist/gallery row expansion only through generic shared models.
-- Add a PySide6-specific PyInstaller spec after launch and workflow tests are stable.
 - Add a small manual QA checklist for Windows and macOS.

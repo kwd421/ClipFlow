@@ -1,20 +1,25 @@
 from pathlib import Path
 from functools import lru_cache
 
-from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QToolButton, QToolTip, QWidget
+from PySide6.QtWidgets import QLabel, QToolButton, QWidget
+
+try:
+    from tools import clipflow_theme as theme
+except ImportError:
+    import clipflow_theme as theme
 
 
 LUCIDE_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "icons" / "lucide"
-ICON_COLOR = "#64748B"
-ICON_HOVER_COLOR = "#2563EB"
-ICON_ACTIVE_COLOR = "#1D4ED8"
-ICON_DISABLED_COLOR = "#CBD5E1"
-ICON_DANGER_COLOR = "#EF4444"
-ICON_DANGER_HOVER_COLOR = "#DC2626"
-ICON_DANGER_ACTIVE_COLOR = "#B91C1C"
+ICON_COLOR = theme.ICON
+ICON_HOVER_COLOR = theme.ICON_HOVER
+ICON_ACTIVE_COLOR = theme.ICON_ACTIVE
+ICON_DISABLED_COLOR = theme.ICON_DISABLED
+ICON_DANGER_COLOR = theme.DANGER
+ICON_DANGER_HOVER_COLOR = theme.DANGER_HOVER
+ICON_DANGER_ACTIVE_COLOR = theme.DANGER_PRESSED
 
 
 def icon_path(name):
@@ -87,12 +92,6 @@ class LucideIconButton(QToolButton):
     def tooltip_position(self):
         return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
 
-    def event(self, event):
-        if event.type() == event.Type.ToolTip and self.toolTip():
-            QToolTip.showText(self.tooltip_position(), self.toolTip(), self)
-            return True
-        return super().event(event)
-
     def _icon_color(self):
         if not self.isEnabled():
             return ICON_DISABLED_COLOR
@@ -123,9 +122,9 @@ class LucideIconButton(QToolButton):
         elif self.underMouse() and self.isEnabled():
             painter.setPen(Qt.NoPen)
             if self.danger:
-                painter.setBrush(QColor("#FEE2E2" if not self.isDown() else "#FECACA"))
+                painter.setBrush(QColor(theme.DANGER_TINT_STRONG if self.isDown() else theme.DANGER_TINT))
             else:
-                painter.setBrush(QColor("#EAF2FF" if not self.isDown() else "#DBEAFE"))
+                painter.setBrush(QColor(theme.ACCENT_TINT_STRONG if self.isDown() else theme.ACCENT_TINT))
             painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 6, 6)
 
         pixmap = lucide_pixmap(self.icon_name, self.icon_size, self._icon_color())
@@ -152,3 +151,70 @@ class LucideIconButton(QToolButton):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         self.update()
+
+
+class CustomTooltip(QLabel):
+    """A single, app-wide tooltip popup.
+
+    It is transparent to mouse events and shown above the hovered widget, which
+    avoids the native-tooltip flicker (the cursor never lands on the tooltip)
+    and the platform dark-mode background leaking through.
+    """
+
+    _instance = None
+
+    def __init__(self):
+        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setObjectName("CustomTooltip")
+        self.setWordWrap(False)
+        self.setStyleSheet(
+            "QLabel#CustomTooltip {"
+            f" background: {theme.INK}; color: {theme.SURFACE};"
+            " border-radius: 7px; padding: 7px 10px; font-size: 12px;"
+            " }"
+        )
+
+    @classmethod
+    def instance(cls):
+        if cls._instance is None:
+            cls._instance = CustomTooltip()
+        return cls._instance
+
+
+def show_tooltip_above(widget, text):
+    text = str(text or "").strip()
+    if not text:
+        hide_tooltip()
+        return
+    tip = CustomTooltip.instance()
+    tip.setText(text)
+    tip.adjustSize()
+    origin = widget.mapToGlobal(QPoint(0, 0))
+    x = origin.x() + (widget.width() - tip.width()) // 2
+    y = origin.y() - tip.height() - 8
+    tip.move(x, y)
+    tip.show()
+    tip.raise_()
+
+
+def hide_tooltip():
+    if CustomTooltip._instance is not None:
+        CustomTooltip._instance.hide()
+
+
+class TooltipManager(QObject):
+    """App-wide event filter that replaces native tooltips with CustomTooltip."""
+
+    def eventFilter(self, obj, event):
+        event_type = event.type()
+        if event_type == QEvent.ToolTip:
+            if isinstance(obj, QWidget) and obj.toolTip():
+                show_tooltip_above(obj, obj.toolTip())
+                return True
+            hide_tooltip()
+            return False
+        if event_type in (QEvent.Leave, QEvent.HoverLeave, QEvent.WindowDeactivate, QEvent.MouseButtonPress):
+            hide_tooltip()
+        return False

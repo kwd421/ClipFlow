@@ -155,7 +155,7 @@ print(window.windowIcon().isNull())
                 "False",
                 "False",
                 "False",
-                "붙여넣기",
+                "",
                 "쿠키 미사용",
                 "False",
                 "True",
@@ -758,7 +758,7 @@ print(opened)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["False", "False", "False", "True", "True", "False", "True", "true", "False", "False", "False", "media.test", "['https://media.test/video']"],
+            ["False", "False", "False", "True", "False", "False", "True", "true", "False", "False", "False", "media.test", "['https://media.test/video']"],
         )
 
     def test_clipflow_qt_row_sets_thumbnail_url_on_placeholder(self):
@@ -831,7 +831,7 @@ print(f"{fresh.width()}x{fresh.height()}")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["0", "True", "84,92,148", "560x420", "True", "720x760"],
+            ["0", "True", "84,92,200", "560x420", "True", "720x760"],
         )
 
     def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
@@ -892,7 +892,7 @@ print(hasattr(window, "cookie_help_button"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["42", "42", "저장 위치", "True", "True", "150", "False"],
+            ["42", "42", "저장 위치", "True", "True", "64", "False"],
         )
 
     def test_clipflow_qt_folder_path_is_display_only(self):
@@ -1096,7 +1096,7 @@ app.exec()
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["https://media.test/watch/1", "True", "False", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["https://media.test/watch/1", "True", "False", "True"])
 
     def test_clipflow_qt_url_click_keeps_input_and_clear_button_clears_it(self):
         script = r'''
@@ -1147,7 +1147,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["https://media.test/watch/1", "1", "다운로드", "", "1", "붙여넣기"],
+            ["https://media.test/watch/1", "1", "", "", "1", ""],
         )
 
 
@@ -1183,8 +1183,8 @@ window._analysis_finished(fake_analyze("https://media.test/watch/1"))
 window.select_row(0)
 window.url_input.setText("https://media.test/watch/2")
 window._refresh_primary_action()
-print(window.primary_button.text() == "분석")
-window._handle_primary_action()
+print("분석" not in window.primary_button.text())
+window._start_analysis()
 
 def drive():
     if window.analysis_thread or window.download_thread:

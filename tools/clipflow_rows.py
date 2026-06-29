@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 try:
     from tools import downloader_engine as engine
+    from tools import clipflow_theme as theme
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget
     from tools.clipflow_theme import (
         ACTIONS_WIDTH,
@@ -24,9 +25,10 @@ try:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import MarqueeLabel, SourceLinkButton, ThumbnailPlaceholder
+    from tools.clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
+    import clipflow_theme as theme
     from clipflow_icons import LucideIconButton, LucideIconWidget
     from clipflow_theme import (
         ACTIONS_WIDTH,
@@ -36,7 +38,7 @@ except ImportError:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import MarqueeLabel, SourceLinkButton, ThumbnailPlaceholder
+    from clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
 
 
 ACTIVE_STATUSES = {"분석 중", "다운로드 중"}
@@ -136,6 +138,28 @@ def build_quality_options(qualities):
     return options
 
 
+class RowActionOverlay(QFrame):
+    """Hover action strip on the right of a row.
+
+    Painted with a solid fill that exactly matches the row's current
+    background (selected vs hovered), so it covers the meta columns with no
+    visible seam or colour shift, leaving only the action icons on top.
+    """
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect())
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, 10.0, 10.0)
+        painter.setClipPath(clip)
+        parent = self.parentWidget()
+        selected = parent is not None and parent.property("selected") == "true"
+        color = theme.SURFACE if selected else theme.SURFACE_SOFT
+        painter.fillRect(rect, QColor(color))
+
+
 class DownloadRowWidget(QFrame):
     def __init__(self, owner, row):
         super().__init__()
@@ -153,8 +177,15 @@ class DownloadRowWidget(QFrame):
 
     def _build(self):
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(12, 6, 12, 6)
+        outer.setContentsMargins(9, 9, 44, 9)
         outer.setSpacing(ROW_COLUMN_SPACING)
+
+        self.select_checkbox = CleanCheckBox()
+        self.select_checkbox.setObjectName("RowCheck")
+        self.select_checkbox.setCursor(Qt.PointingHandCursor)
+        self.select_checkbox.hide()
+        self.select_checkbox.toggled.connect(self._on_check_toggled)
+        outer.addWidget(self.select_checkbox, 0, Qt.AlignVCenter)
 
         self.thumbnail = ThumbnailPlaceholder()
         outer.addWidget(self.thumbnail, 0, Qt.AlignVCenter)
@@ -177,6 +208,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.setObjectName("RowTitle")
         self.title_label.setWordWrap(False)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        theme.apply_tracking(self.title_label, 0.1)
         title_line.addWidget(self.title_label, 1)
         item_area.addLayout(title_line)
 
@@ -185,6 +217,9 @@ class DownloadRowWidget(QFrame):
         self.source_link_button = SourceLinkButton()
         self.source_link_button.clicked.connect(self._open_source)
         source_line.addWidget(self.source_link_button)
+        self.row_quality_label = QLabel()
+        self.row_quality_label.setObjectName("MetaText")
+        source_line.addWidget(self.row_quality_label, 0, Qt.AlignVCenter)
         source_line.addStretch(1)
         item_area.addLayout(source_line)
 
@@ -240,36 +275,42 @@ class DownloadRowWidget(QFrame):
         size_layout.addWidget(self.size_label)
         outer.addWidget(self.size_widget, 0, Qt.AlignVCenter)
 
-        self.actions_widget = QFrame(self)
+        self.actions_widget = RowActionOverlay(self)
         self.actions_widget.setObjectName("ActionOverlay")
-        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 32)
+        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 84)
         actions = QHBoxLayout(self.actions_widget)
-        actions.setContentsMargins(8, 0, 8, 0)
+        actions.setContentsMargins(24, 0, 16, 0)
         actions.setSpacing(4)
-        actions.setAlignment(Qt.AlignCenter)
+        actions.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        self.open_folder_button = LucideIconButton("folder")
+        self.open_folder_button = LucideIconButton("folder", size=34, icon_size=20)
         self.open_folder_button.setToolTip("폴더 열기")
         self.open_folder_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_folder_button)
 
-        self.remove_button = LucideIconButton("x")
+        self.remove_button = LucideIconButton("x", size=34, icon_size=20)
         self.remove_button.setToolTip("목록에서 삭제")
         self.remove_button.clicked.connect(self._remove_row)
         actions.addWidget(self.remove_button)
 
-        self.delete_file_button = LucideIconButton("trash-2", danger=True)
+        self.delete_file_button = LucideIconButton("trash-2", size=34, icon_size=20, danger=True)
         self.delete_file_button.setToolTip("파일 삭제")
         self.delete_file_button.clicked.connect(self._delete_file)
         actions.addWidget(self.delete_file_button)
 
-        self.more_button = LucideIconButton("more-vertical")
+        self.more_button = LucideIconButton("more-vertical", size=34, icon_size=20)
         self.more_button.setToolTip("더보기")
         actions.addWidget(self.more_button)
         self.actions_widget.hide()
 
+        self.spinner = Spinner(30, parent=self)
+        self.spinner.hide()
+
     def mousePressEvent(self, event):
-        self.owner.select_row_for_widget(self)
+        if getattr(self.owner, "select_mode", False):
+            self.select_checkbox.setChecked(not self.select_checkbox.isChecked())
+        else:
+            self.owner.select_row_for_widget(self)
         super().mousePressEvent(event)
 
     def enterEvent(self, event):
@@ -282,7 +323,12 @@ class DownloadRowWidget(QFrame):
 
     def resizeEvent(self, event):
         self._position_actions()
+        self._position_spinner()
         super().resizeEvent(event)
+
+    def _position_spinner(self):
+        size = self.spinner.width()
+        self.spinner.move((self.width() - size) // 2, (self.height() - size) // 2)
 
     def refresh(self):
         candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
@@ -292,6 +338,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.start_marquee_if_needed()
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
+        self.row_quality_label.setText(f"· {quality_display_label(candidate)} · {format_display_label(candidate)}")
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
         self._refresh_source_button()
         self._refresh_playlist_detail()
@@ -308,8 +355,14 @@ class DownloadRowWidget(QFrame):
         completed = self.row.get("status") == COMPLETED_STATUS
         output_path = Path(self.row.get("output_path") or "")
         has_output = bool(self.row.get("output_path")) and output_path.exists()
+        # Finder + file delete only make sense once a file exists (completed).
+        # Analysed / error rows expose only "remove from list".
+        self.open_folder_button.setVisible(completed)
+        self.delete_file_button.setVisible(completed)
+        self.more_button.setVisible(completed)
+        self.remove_button.setVisible(not active)
         self.open_folder_button.setEnabled(completed and not active)
-        self.remove_button.setEnabled(completed and not active)
+        self.remove_button.setEnabled(not active)
         self.delete_file_button.setEnabled(completed and has_output and not active)
         self.more_button.setEnabled(completed)
 
@@ -339,13 +392,17 @@ class DownloadRowWidget(QFrame):
         self.owner.playlist_expansion_changed(self.row)
 
     def _position_actions(self):
+        inset = 1
         width = self.actions_widget.width()
-        self.actions_widget.setGeometry(max(0, self.width() - width - 6), 0, width, self.height())
+        self.actions_widget.setGeometry(
+            max(0, self.width() - width - inset), inset, width, self.height() - 2 * inset
+        )
         self.actions_widget.raise_()
 
     def _set_hovered(self, hovered):
         self.setProperty("hovered", "true" if hovered else "false")
-        show_actions = hovered and self.row.get("status") == COMPLETED_STATUS
+        active = self.row.get("status") in ACTIVE_STATUSES
+        show_actions = hovered and not active
         self.actions_widget.setVisible(show_actions)
         if show_actions:
             self._position_actions()
@@ -354,6 +411,16 @@ class DownloadRowWidget(QFrame):
 
     def _open_source(self):
         self.owner.open_source_for_row(self.row)
+
+    def _on_check_toggled(self, checked):
+        self.row["checked"] = bool(checked)
+        self.owner.on_row_check_changed()
+
+    def set_select_mode(self, enabled):
+        self.select_checkbox.setVisible(bool(enabled))
+        self.select_checkbox.blockSignals(True)
+        self.select_checkbox.setChecked(bool(enabled) and bool(self.row.get("checked")))
+        self.select_checkbox.blockSignals(False)
 
     def _open_folder(self):
         self.owner.open_folder_for_row(self.row)
@@ -376,6 +443,16 @@ class DownloadRowWidget(QFrame):
     def set_status(self, status, detail=""):
         self.row["status"] = status
         self.row["status_detail"] = detail
+        analyzing = status == "분석 중"
+        if analyzing:
+            self._position_spinner()
+            self.spinner.raise_()
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+        self.row_quality_label.setVisible(not analyzing)
+        self.info_widget.setVisible(not analyzing)
+        self.size_widget.setVisible(not analyzing)
         self._refresh_actions()
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
 
@@ -403,39 +480,20 @@ class DownloadRowWidget(QFrame):
         if progress <= 0:
             return
         rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
-        width = rect.width()
-        height = rect.height()
-        perimeter = max(1.0, 2 * (width + height))
-        remaining = perimeter * progress / 100.0
-        points = [
-            (rect.left(), rect.top(), rect.right(), rect.top(), width),
-            (rect.right(), rect.top(), rect.right(), rect.bottom(), height),
-            (rect.right(), rect.bottom(), rect.left(), rect.bottom(), width),
-            (rect.left(), rect.bottom(), rect.left(), rect.top(), height),
-        ]
-        path = QPainterPath()
-        path.moveTo(rect.left(), rect.top())
-        current_x = rect.left()
-        current_y = rect.top()
-        for x1, y1, x2, y2, length in points:
-            if remaining <= 0:
-                break
-            draw = min(remaining, length)
-            ratio = draw / length if length else 0
-            next_x = x1 + (x2 - x1) * ratio
-            next_y = y1 + (y2 - y1) * ratio
-            if current_x != x1 or current_y != y1:
-                path.moveTo(x1, y1)
-            path.lineTo(next_x, next_y)
-            current_x, current_y = next_x, next_y
-            remaining -= draw
+        radius = 10.0
+        full = QPainterPath()
+        full.addRoundedRect(rect, radius, radius)
+        fraction = progress / 100.0
+        samples = 220
+        partial = QPainterPath()
+        partial.moveTo(full.pointAtPercent(0.0))
+        for index in range(1, samples + 1):
+            partial.lineTo(full.pointAtPercent(fraction * index / samples))
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         gradient = QLinearGradient(rect.topLeft(), rect.topRight())
-        gradient.setColorAt(0.0, QColor("#2563EB"))
-        gradient.setColorAt(0.45, QColor("#06B6D4"))
-        gradient.setColorAt(0.75, QColor("#22C55E"))
-        gradient.setColorAt(1.0, QColor("#A855F7"))
+        gradient.setColorAt(0.0, QColor(theme.ACCENT))
+        gradient.setColorAt(1.0, QColor(theme.ACCENT_SOFT))
         painter.setPen(QPen(QBrush(gradient), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(path)
+        painter.drawPath(partial)
