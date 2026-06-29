@@ -88,6 +88,52 @@ print(LucideIconButton("folder").icon_name)
             ["lucide", "True", "False", "False", "False", "folder", "folder"],
         )
 
+    def test_clipflow_qt_clean_combo_toggles_popup_closed(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import CleanComboBox
+
+app = QApplication([])
+combo = CleanComboBox()
+combo.addItems(["최신순", "이름순"])
+combo.show()
+combo.showPopup()
+first_popup = combo._active_popup
+print(first_popup.isVisible())
+combo.showPopup()
+print(combo._active_popup is None)
+print(not first_popup.isVisible())
+QTest.qWait(250)
+combo.showPopup()
+second_popup = combo._active_popup
+QTest.mouseClick(combo, Qt.LeftButton)
+print(combo._active_popup is None)
+print(not second_popup.isVisible())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True"])
+
+    def test_clipflow_qt_sort_combo_hides_inline_arrow(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+print(window.sort_order_combo.show_arrow)
+print(window.sort_order_combo.text_alignment == Qt.AlignCenter)
+print(window.cookie_combo.show_arrow)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "True", "True"])
+
     def test_clipflow_qt_discovers_favicon_links_from_html(self):
         script = r'''
 from tools.clipflow_widgets import default_favicon_urls, favicon_urls_from_html
@@ -211,7 +257,7 @@ window.url_input.setText("https://media.test/video")
 window._start_analysis()
 
 def drive():
-    if window.analysis_thread or window.download_thread:
+    if window.analysis_thread or window.download_thread or window.active_downloads or window.queued_download_rows:
         return
     if window.rows and not started_download:
         started_download.append(True)
@@ -242,6 +288,37 @@ app.exec()
             result.stdout.splitlines(),
             ["자동", "자동", "자동", "자동", "['all']", "WEBM", "webm-1080", "40 B", "00:02:00", "webm-1080"],
         )
+
+    def test_clipflow_qt_quality_button_opens_dropdown_preferences(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
+from tools.clipflow_widgets import CleanComboBox
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 520)
+window.show()
+window._create_preferences_dialog = lambda: (_ for _ in ()).throw(RuntimeError("dialog should not open"))
+window.preference_button.click()
+popup = window.preferences_popup
+combos = popup.findChildren(CleanComboBox)
+print(bool(popup and popup.isVisible()))
+print(len(combos))
+button_right = window.preference_button.mapToGlobal(QPoint(window.preference_button.width(), 0)).x()
+print(abs(popup.geometry().right() - button_right) <= 1)
+combos[0].setCurrentText("720p")
+combos[1].setCurrentText("WEBM")
+print(window.current_preferences().quality)
+print(window.current_preferences().output_format)
+window.preference_button.click()
+print(window.preferences_popup is None)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "4", "True", "720p", "WEBM", "True"])
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
         script = r'''
@@ -372,6 +449,141 @@ download_dir.cleanup()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["1", "Video", "Saved.mp4", "0"])
 
+    def test_clipflow_qt_playlist_history_restores_child_rows_under_parent(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+download_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
+
+url = "https://media.test/watch?v=one&list=PLROAD"
+app = QApplication([])
+window = ClipFlowWindow()
+window._set_save_folder(download_dir.name)
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Road Mix",
+    "playlist_title": "Road Mix",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+    ],
+    "warnings": [],
+})
+for index, row in enumerate(window.rows):
+    row["status"] = COMPLETED_STATUS
+    if row.get("is_playlist_child"):
+        output = Path(download_dir.name) / f"{index}.mp4"
+        output.write_bytes(b"mp4")
+        row["output_path"] = str(output)
+window._save_completed_history()
+
+second = ClipFlowWindow()
+print([row["candidate"].get("display_title") for row in second.rows])
+print([bool(row.get("is_playlist_child")) for row in second.rows])
+print([row.get("parent_playlist_id") == second.rows[0]["id"] for row in second.rows[1:]])
+print([row.get("render_widget").isHidden() for row in second.rows[1:]])
+
+settings_dir.cleanup()
+download_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "['Road Mix', 'One', 'Two']",
+                "[False, True, True]",
+                "[True, True]",
+                "[False, False]",
+            ],
+        )
+
+    def test_clipflow_qt_playlist_history_migrates_legacy_keyed_children(self):
+        script = r'''
+import json
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_HISTORY_SETTING, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+settings.clear()
+key = "media.test:list:PLROAD"
+settings.setValue(DOWNLOAD_HISTORY_SETTING, json.dumps([
+    {"candidate": {"id": "playlist-1", "media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "url": "https://media.test/watch?v=one&list=PLROAD"}, "source_url": "https://media.test/watch?v=one&list=PLROAD", "analysis_source_url": "https://media.test/watch?v=one&list=PLROAD", "playlist_key": key, "created_order": 1},
+    {"candidate": {"id": "one", "title": "One", "display_title": "One", "url": "https://media.test/watch/1", "source": "https://media.test/watch/1", "ext": "mp4", "output_ext": "mp4"}, "source_url": "https://media.test/watch/1", "playlist_key": key, "created_order": 2},
+    {"candidate": {"id": "two", "title": "Two", "display_title": "Two", "url": "https://media.test/watch/2", "source": "https://media.test/watch/2", "ext": "mp4", "output_ext": "mp4"}, "source_url": "https://media.test/watch/2", "playlist_key": key, "created_order": 3},
+], ensure_ascii=False))
+settings.sync()
+
+app = QApplication([])
+window = ClipFlowWindow()
+print([row["candidate"].get("display_title") for row in window.rows])
+print([bool(row.get("is_playlist_child")) for row in window.rows])
+print([row.get("parent_playlist_id") == window.rows[0]["id"] for row in window.rows[1:]])
+
+settings_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "['Road Mix', 'One', 'Two']",
+                "[False, True, True]",
+                "[True, True]",
+            ],
+        )
+
+    def test_clipflow_qt_playlist_history_deduplicates_restored_parent_rows(self):
+        script = r'''
+import json
+import tempfile
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_HISTORY_SETTING, SETTINGS_APP, SETTINGS_ORG
+
+settings_dir = tempfile.TemporaryDirectory()
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+settings.clear()
+url = "https://www.youtube.com/playlist?list=PLDUPLICATE"
+settings.setValue(DOWNLOAD_HISTORY_SETTING, json.dumps([
+    {"candidate": {"id": "playlist-old", "media_type": "playlist", "title": "Mix", "display_title": "Mix", "source": url, "url": url, "webpage_url": url}, "source_url": url, "analysis_source_url": url, "created_order": 1},
+    {"candidate": {"id": "playlist-new", "media_type": "playlist", "title": "Mix", "display_title": "Mix", "source": url, "url": url, "webpage_url": url}, "source_url": url, "analysis_source_url": url, "created_order": 2},
+], ensure_ascii=False))
+settings.sync()
+
+app = QApplication([])
+window = ClipFlowWindow()
+playlist_rows = [row for row in window.rows if row.get("kind") == "playlist"]
+print(len(playlist_rows))
+print(playlist_rows[0]["id"])
+
+settings_dir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["1", "playlist-new"])
+
     def test_clipflow_qt_analyze_button_shows_loading_spinner(self):
         script = r'''
 import time
@@ -412,7 +624,7 @@ app.exec()
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["False", "False"])
 
     def test_clipflow_qt_window_configures_korean_font_when_created_directly(self):
         script = r'''
@@ -667,7 +879,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["webm-1080", "40 B", "webm-1080", "40 B", "webm-1080"],
+            ["mp4-1080", "30 B", "webm-1080", "40 B", "webm-1080"],
         )
 
     def test_clipflow_qt_status_column_has_no_done_check_and_shows_error_detail(self):
@@ -872,7 +1084,7 @@ print(f"{fresh.width()}x{fresh.height()}")
         script = r'''
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
-from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
 
 app = QApplication([])
 window = ClipFlowWindow()
@@ -1066,8 +1278,7 @@ def drive():
         row_widget.delete_file_button.click()
         print(confirmed)
         print(Path(downloaded[0]).exists())
-        print(row["output_path"])
-        print(row_widget.delete_file_button.isEnabled())
+        print(len(window.rows))
         tempdir.cleanup()
         app.quit()
 
@@ -1082,8 +1293,137 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "True", "['Video.mp4']", "False", "", "False"],
+            ["True", "True", "['Video.mp4']", "False", "0"],
         )
+
+    def test_clipflow_qt_child_file_delete_removes_child_row_with_explicit_output(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, READY_STATUS
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow(confirm_delete_func=lambda path: True)
+window._set_save_folder(tempdir.name)
+playlist_dir = Path(tempdir.name) / "Road Mix"
+playlist_dir.mkdir()
+output = playlist_dir / "One.mp4"
+output.write_bytes(b"video")
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": READY_STATUS,
+    "status_detail": "",
+    "progress": 0,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+    "expanded": True,
+    "playlist_entries": [],
+}
+child = {
+    "id": "playlist-1-child-1",
+    "kind": "video",
+    "candidate": {"id": "one", "title": "One", "display_title": "One", "source": "https://media.test/one", "url": "https://media.test/one", "ext": "mp4", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": str(output),
+    "messages": [],
+    "created_order": 2,
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "playlist_child_index": 1,
+}
+window.rows = [parent, child]
+window._render_rows()
+window.delete_file_for_row(child)
+print(output.exists())
+print([row["id"] for row in window.rows])
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "['playlist-1']"])
+
+    def test_clipflow_qt_child_file_delete_removes_child_row_with_exact_expected_output(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, READY_STATUS
+from tools import downloader_engine as engine
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow(confirm_delete_func=lambda path: True)
+window._set_save_folder(tempdir.name)
+playlist_dir = Path(tempdir.name) / "Road Mix"
+playlist_dir.mkdir()
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": READY_STATUS,
+    "status_detail": "",
+    "progress": 0,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+    "expanded": True,
+    "playlist_entries": [],
+}
+child = {
+    "id": "playlist-1-child-1",
+    "kind": "video",
+    "candidate": {"id": "one", "title": "Episode One", "display_title": "Episode One", "source": "https://media.test/one", "url": "https://media.test/one", "ext": "mp4", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 2,
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "playlist_child_index": 1,
+}
+output = engine.final_output_path_for_candidate(child["candidate"], playlist_dir)
+output.write_bytes(b"video")
+window.rows = [parent, child]
+window._render_rows()
+window.delete_file_for_row(child)
+print(output.exists())
+print([row["id"] for row in window.rows])
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "['playlist-1']"])
 
     def test_clipflow_qt_site_button_and_safe_actions(self):
         script = r'''
@@ -1182,6 +1522,114 @@ app.exec()
         self.assertEqual(
             result.stdout.splitlines(),
             ["https://media.test/watch/1", "1", "", "", "1", ""],
+        )
+
+    def test_clipflow_qt_paste_only_fills_url_without_analysis(self):
+        script = r'''
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/watch/paste"
+analyzed = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    analyzed.append(url)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Paste",
+        "candidates": [
+            {"id": "auto", "source": url, "url": url, "title": "Paste", "display_title": "Paste", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+QApplication.clipboard().setText(url)
+window._paste_and_analyze()
+
+def drive():
+    if window.analysis_thread:
+        return
+    print(window.url_input.text())
+    print(analyzed)
+    print(len(window.rows))
+    print(window.analysis_thread is None)
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["https://media.test/watch/paste", "[]", "0", "True"],
+        )
+
+    def test_clipflow_qt_download_button_analyzes_then_downloads_single_video(self):
+        script = r'''
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/watch/download"
+analyzed = []
+downloaded = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    analyzed.append(url)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Download",
+        "candidates": [
+            {"id": "auto", "source": url, "url": url, "title": "Download", "display_title": "Download", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append([page_url, candidate.get("id")])
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window.url_input.setText(url)
+window._handle_primary_action()
+
+def drive():
+    if window.analysis_thread or window.download_thread:
+        return
+    print(analyzed)
+    print([row["candidate"].get("id") for row in window.rows])
+    print(window.selected_row_index)
+    print(downloaded)
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "['https://media.test/watch/download']",
+                "['auto']",
+                "0",
+                "[['https://media.test/watch/download', 'auto']]",
+            ],
         )
 
 
@@ -1313,6 +1761,81 @@ print(row_widget.progress_text.isHidden())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "true", "42", "False"])
+
+    def test_clipflow_qt_download_button_does_not_show_loading_spinner_for_analysis(self):
+        script = r'''
+import time
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/watch/loading-button"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    time.sleep(0.2)
+    return {"webpage_url": url, "url": url, "title": "Video", "candidates": [], "warnings": []}
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window.url_input.setText(url)
+window._start_analysis(auto_download=True)
+app.processEvents()
+print(window.primary_button.is_loading())
+if window.analysis_thread:
+    window.analysis_thread.quit()
+    window.analysis_thread.wait(1000)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False"])
+
+    def test_clipflow_qt_active_row_progress_border_is_visible_from_zero_percent(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": "https://media.test/watch/progress",
+    "url": "https://media.test/watch/progress",
+    "title": "Progress",
+    "candidates": [{"id": "progress", "source": "https://media.test/watch/progress", "url": "https://media.test/watch/progress", "title": "Progress", "display_title": "Progress", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1}],
+    "warnings": [],
+})
+row_widget = window.rows[0]["widget"]
+row_widget.set_status(DOWNLOAD_STATUS)
+row_widget.set_progress(0, "0%")
+print(row_widget.property("progressActive"))
+print(row_widget.property("progressValue"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["true", "0"])
+
+    def test_clipflow_qt_row_action_overlay_has_square_left_edge(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication, QWidget
+from tools import clipflow_theme as theme
+from tools.clipflow_rows import RowActionOverlay
+
+app = QApplication([])
+parent = QWidget()
+parent.setProperty("selected", "false")
+overlay = RowActionOverlay(parent)
+overlay.resize(160, 70)
+pixmap = QPixmap(160, 70)
+pixmap.fill(QColor(0, 0, 0, 0))
+overlay.render(pixmap, QPoint(0, 0))
+print(QColor(pixmap.toImage().pixelColor(0, 0)).name().upper() == theme.SURFACE_SOFT)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True"])
 
     def test_clipflow_qt_download_button_stays_enabled_while_download_runs(self):
         script = r'''
@@ -1468,6 +1991,7 @@ from pathlib import Path
 import tempfile
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
+from tools import downloader_engine as engine
 
 url = "https://media.test/watch/existing"
 
@@ -1601,6 +2125,7 @@ from pathlib import Path
 import tempfile
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
+from tools import downloader_engine as engine
 
 app = QApplication([])
 tempdir = tempfile.TemporaryDirectory()
@@ -1639,6 +2164,7 @@ seen = []
 window = ClipFlowWindow()
 window._set_save_folder(tempdir.name)
 row = {
+    "id": "playlist-1",
     "kind": "playlist",
     "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"},
     "playlist_entries": [],
@@ -1650,6 +2176,17 @@ playlist_folder = Path(tempdir.name) / "Road Mix"
 playlist_folder.mkdir()
 video = playlist_folder / "01 - One.mp4"
 video.write_bytes(b"video")
+child = {
+    "id": "playlist-1-child-1",
+    "kind": "video",
+    "candidate": {"title": "One", "display_title": "One", "ext": "mp4", "output_ext": "mp4"},
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "status": "?꾨즺",
+    "output_path": str(video),
+    "messages": [],
+}
+window.rows = [row, child]
 
 def confirm(path):
     dialog = window._create_delete_confirm_dialog(path)
@@ -1668,6 +2205,69 @@ tempdir.cleanup()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["[[True, 'No', 'Yes', 'Road Mix']]", "False", "False"])
 
+    def test_clipflow_qt_playlist_folder_delete_removes_parent_and_children_from_list(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow(confirm_delete_func=lambda path: True)
+window._set_save_folder(tempdir.name)
+playlist_folder = Path(tempdir.name) / "Road Mix"
+playlist_folder.mkdir()
+(playlist_folder / "One.mp4").write_bytes(b"one")
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+    "expanded": True,
+    "playlist_entries": [],
+}
+child = {
+    "id": "playlist-1-child-1",
+    "kind": "video",
+    "candidate": {"id": "one", "title": "One", "display_title": "One", "source": "https://media.test/one", "url": "https://media.test/one", "ext": "mp4", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": str(playlist_folder / "One.mp4"),
+    "messages": [],
+    "created_order": 2,
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "playlist_child_index": 1,
+}
+window.rows = [parent, child]
+window._render_rows()
+window.delete_file_for_row(parent)
+print(playlist_folder.exists())
+print(window.rows)
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "[]"])
+
     def test_clipflow_qt_playlist_info_text_is_single_label_with_count(self):
         script = r'''
 from tools.clipflow_rows import row_info_text
@@ -1679,11 +2279,12 @@ print(row_info_text({"media_type": "playlist", "item_count": 7}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["재생목록 7개"])
 
-    def test_clipflow_qt_playlist_analysis_uses_single_disclosure_row_and_playlist_folder(self):
+    def test_clipflow_qt_playlist_analysis_uses_parent_and_indented_child_rows(self):
         script = r'''
 from pathlib import Path
 import tempfile
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
@@ -1707,25 +2308,38 @@ def fake_analysis():
     }
 
 def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
-    downloaded.append([page_url, candidate.get("media_type"), Path(output_dir).name])
+    downloaded.append([page_url, candidate.get("media_type")])
     return {"ok": True, "output_dir": output_dir}
 
 app = QApplication([])
 window = ClipFlowWindow(download_func=fake_download)
+window.resize(720, 420)
+window.show()
+app.processEvents()
 window.folder_input.setText(tempdir.name)
 window.url_input.setText(url)
 window._analysis_finished(fake_analysis())
-row = window.rows[0]
-row_widget = row["widget"]
+app.processEvents()
+parent = window.rows[0]
+parent_widget = parent["widget"]
+child = window.rows[1] if len(window.rows) > 1 else {}
+child_widget = child.get("widget") if isinstance(child, dict) else None
 
 print(len(window.rows))
-print(row["kind"])
-print(row["candidate"]["media_type"])
-print(row["candidate"]["item_count"])
-print(row_widget.playlist_detail_label.isHidden())
-row_widget.playlist_toggle_button.click()
-print(row_widget.playlist_detail_label.isHidden())
-print("One" in row_widget.playlist_detail_label.text())
+print([row["kind"] for row in window.rows])
+print([bool(row.get("is_playlist_child")) for row in window.rows])
+print([row.get("parent_playlist_id") == parent["id"] for row in window.rows[1:]])
+print(parent["candidate"]["media_type"])
+print(parent["candidate"]["item_count"])
+print(parent_widget.playlist_detail_label.isHidden())
+print(parent_widget.playlist_pill.isVisible())
+print(parent_widget.playlist_toggle_button.isHidden())
+QTest.mouseClick(parent_widget, Qt.LeftButton, pos=QPoint(180, parent_widget.height() // 2))
+app.processEvents()
+print([row.get("render_widget").isHidden() for row in window.rows[1:]])
+QTest.mouseClick(parent["widget"], Qt.LeftButton, pos=QPoint(180, parent["widget"].height() // 2))
+app.processEvents()
+print([not row.get("render_widget").isHidden() for row in window.rows[1:]])
 window.select_row(0)
 window._handle_primary_action()
 
@@ -1749,14 +2363,870 @@ app.exec()
         self.assertEqual(
             result.stdout.splitlines(),
             [
-                "1",
-                "playlist",
+                "3",
+                "['playlist', 'video', 'video']",
+                "[False, True, True]",
+                "[True, True]",
                 "playlist",
                 "2",
                 "True",
-                "False",
                 "True",
-                "[['https://media.test/playlist/road', 'playlist', 'Road Trip Mix']]",
+                "True",
+                "[True, True]",
+                "[True, True]",
+                "[['https://media.test/watch/1', None], ['https://media.test/watch/2', None]]",
+            ],
+        )
+
+    def test_clipflow_qt_playlist_parent_hides_quality_and_format_label(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/meta"
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Meta Mix",
+    "playlist_title": "Meta Mix",
+    "is_playlist": True,
+    "playlist_count": 1,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+parent_widget = window.rows[0]["widget"]
+child_widget = window.rows[1]["widget"]
+parent_widget._set_hovered(True)
+print(parent_widget.row_quality_label.isHidden())
+print(parent_widget.row_quality_label.text())
+print(child_widget.row_quality_label.isVisible())
+print(parent_widget.actions_widget.isVisible())
+print(parent_widget.remove_button.isVisible())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "", "True", "True", "True"])
+
+    def test_clipflow_qt_playlist_analysis_shows_loading_child_row_while_running(self):
+        script = r'''
+import time
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/loading"
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    time.sleep(0.25)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Loading Mix",
+        "playlist_title": "Loading Mix",
+        "is_playlist": True,
+        "playlist_count": 1,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze)
+window.url_input.setText(url)
+window._start_analysis()
+app.processEvents()
+parent_id = window.rows[0].get("id") if window.rows else ""
+print(len(window.rows))
+print(window.rows[0].get("kind") if window.rows else "")
+print(bool(len(window.rows) > 1 and window.rows[1].get("child_loading")))
+print(bool(len(window.rows) > 1 and window.rows[1].get("parent_playlist_id") == parent_id))
+
+def drive():
+    if window.analysis_thread:
+        return
+    print([bool(row.get("child_loading")) for row in window.rows])
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["2", "playlist", "True", "True", "[False, False]"],
+        )
+
+    def test_clipflow_qt_playlist_child_row_downloads_individual_video(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+downloaded = []
+url = "https://media.test/playlist/road"
+
+def fake_analysis():
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Road Trip Mix",
+        "playlist_title": "Road Trip Mix",
+        "is_playlist": True,
+        "playlist_count": 2,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+            {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+
+def begin(row, candidate=None):
+    candidate = candidate or window.selected_candidate_for_row_ref(row)
+    downloaded.append([row.get("source_url"), candidate.get("id"), candidate.get("media_type", "video")])
+
+window._begin_download = begin
+window.select_row(1)
+window._handle_primary_action()
+print(downloaded)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["[['https://media.test/watch/1', 'one', 'video']]"],
+        )
+
+    def test_clipflow_qt_playlist_parent_queues_child_rows_not_parent_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+started = []
+url = "https://media.test/playlist/road"
+
+def fake_analysis():
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Road Trip Mix",
+        "playlist_title": "Road Trip Mix",
+        "is_playlist": True,
+        "playlist_count": 2,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+            {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+
+def begin(row, candidate=None):
+    candidate = candidate or window.selected_candidate_for_row_ref(row)
+    started.append([row.get("id"), row.get("parent_playlist_id"), candidate.get("id"), candidate.get("media_type", "video")])
+
+window._begin_download = begin
+window.select_row(0)
+window._handle_primary_action()
+print(started)
+print(window.rows[0]["status"])
+print([row["status"] for row in window.rows[1:]])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[['playlist-1-child-1', 'playlist-1', 'one', 'video'], ['playlist-1-child-2', 'playlist-1', 'two', 'video']]",
+                "다운로드 중",
+                "['다운로드 중', '다운로드 중']",
+            ],
+        )
+
+    def test_clipflow_qt_playlist_parent_reflects_child_errors(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, ERROR_STATUS
+
+url = "https://media.test/playlist/road"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Road Trip Mix",
+    "playlist_title": "Road Trip Mix",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+    ],
+    "warnings": [],
+})
+parent = window.rows[0]
+window.rows[1]["status"] = COMPLETED_STATUS
+window.rows[1]["progress"] = 100
+window.rows[2]["status"] = ERROR_STATUS
+window.rows[2]["progress"] = 0
+window._refresh_playlist_parent_status(parent)
+print(parent["status"])
+print(parent["status_detail"])
+print(parent["progress"])
+print(parent["progress_text"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["오류", "1/2", "50", "1/2"],
+        )
+
+    def test_clipflow_qt_download_thread_finish_refreshes_all_playlist_parents(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, DOWNLOAD_STATUS
+
+url = "https://media.test/playlist/road"
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Road Trip Mix",
+    "playlist_title": "Road Trip Mix",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+    ],
+    "warnings": [],
+})
+parent = window.rows[0]
+for child in window.rows[1:]:
+    child["status"] = COMPLETED_STATUS
+    child["progress"] = 100
+parent["status"] = DOWNLOAD_STATUS
+parent["progress"] = 25
+parent["progress_text"] = "25%"
+parent["widget"].set_status(DOWNLOAD_STATUS)
+parent["widget"].set_progress(25, "25%")
+window.active_downloads = []
+window.queued_download_rows = []
+window._download_thread_finished_for(None, None)
+print(parent["status"])
+print(parent["progress"])
+print(parent["progress_text"])
+print(parent["widget"].progress_text.text())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["완료", "100", "", ""])
+
+    def test_clipflow_qt_playlist_child_uses_parent_folder_existing_file(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools import downloader_engine as engine
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow()
+window.folder_input.setText(tempdir.name)
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix"},
+}
+child = {
+    "id": "child-1",
+    "kind": "video",
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "candidate": {
+        "title": "Channel - Episode One",
+        "display_title": "Channel - Episode One",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "sort_bytes": 10,
+    },
+    "status": "준비",
+}
+window.rows = [parent, child]
+playlist_dir = Path(tempdir.name) / "Road Mix"
+playlist_dir.mkdir()
+existing = engine.final_output_path_for_candidate(child["candidate"], playlist_dir)
+existing.write_bytes(b"x" * 100)
+print(window._output_dir_for_row(child, child["candidate"]))
+print(window._existing_output_path_for_row(child, child["candidate"]))
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[0].endswith("Road Mix"))
+        self.assertTrue(lines[1].endswith("Channel - Episode One.mp4"))
+
+    def test_clipflow_qt_playlist_child_rejects_smaller_title_matched_partial_file(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow()
+window.folder_input.setText(tempdir.name)
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix"},
+}
+child = {
+    "id": "child-1",
+    "kind": "video",
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "candidate": {
+        "title": "Channel - Episode One",
+        "display_title": "Channel - Episode One",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "sort_bytes": 200 * 1024 * 1024,
+    },
+    "status": "준비",
+}
+window.rows = [parent, child]
+playlist_dir = Path(tempdir.name) / "Road Mix"
+playlist_dir.mkdir()
+existing = playlist_dir / "Episode One.mp4"
+existing.write_bytes(b"x" * 1024)
+print(window._existing_output_path_for_row(child, child["candidate"]))
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "None")
+
+    def test_clipflow_qt_streaming_playlist_events_keep_collapsed_parent_collapsed(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+source_url = "https://media.test/playlist/events"
+window.url_input.setText(source_url)
+window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 2, "source_url": source_url})
+window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "source_url": source_url})
+parent = window.rows[0]
+parent["expanded"] = False
+window.playlist_expansion_changed(parent)
+print(parent["expanded"])
+print([row["render_widget"].isHidden() for row in window.rows[1:]])
+window._handle_analysis_event({
+    "type": "playlist_entry",
+    "index": 1,
+    "source_url": source_url,
+    "candidates": [{
+        "id": "one",
+        "source": "https://media.test/watch/1",
+        "url": "https://media.test/watch/1",
+        "title": "One",
+        "display_title": "One",
+        "thumbnail": "",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "resolution": "1080p",
+        "height": 1080,
+        "duration": 60,
+        "sort_bytes": 10,
+    }],
+})
+print(parent["expanded"])
+print([row["render_widget"].isHidden() for row in window.rows[1:]])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "[True]", "False", "[True, True]"])
+
+    def test_clipflow_qt_remove_playlist_parent_removes_child_rows_from_list(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+parent = {"id": "playlist-1", "kind": "playlist", "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix"}, "status": READY_STATUS, "messages": [], "expanded": True}
+child = {"id": "child-1", "kind": "video", "parent_playlist_id": "playlist-1", "is_playlist_child": True, "candidate": {"title": "One", "display_title": "One"}, "status": READY_STATUS, "messages": []}
+window.rows = [parent, child]
+window._render_rows()
+window.remove_row(parent)
+print(window.rows)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "[]")
+
+    def test_clipflow_qt_playlist_parent_delete_does_not_delete_save_folder_when_names_match(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+app = QApplication([])
+outer = tempfile.TemporaryDirectory()
+save_folder = Path(outer.name) / "Road Mix"
+save_folder.mkdir()
+output = save_folder / "One.mp4"
+output.write_bytes(b"one")
+unrelated = save_folder / "Unrelated"
+unrelated.mkdir()
+(unrelated / "keep.txt").write_text("keep", encoding="utf-8")
+window = ClipFlowWindow(confirm_delete_func=lambda path: True)
+window._set_save_folder(str(save_folder))
+parent = {"id": "playlist-1", "kind": "playlist", "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"}, "status": COMPLETED_STATUS, "messages": [], "expanded": True, "playlist_entries": []}
+child = {"id": "child-1", "kind": "video", "parent_playlist_id": "playlist-1", "is_playlist_child": True, "candidate": {"title": "One", "display_title": "One", "ext": "mp4", "output_ext": "mp4"}, "status": COMPLETED_STATUS, "output_path": str(output), "messages": []}
+window.rows = [parent, child]
+window._render_rows()
+window.delete_file_for_row(parent)
+print(save_folder.exists())
+print(output.exists())
+print((unrelated / "keep.txt").exists())
+print(window.rows)
+outer.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "True", "[]"])
+
+    def test_clipflow_qt_playlist_parent_reuses_existing_playlist_rows(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/watch?v=one&list=PLROAD"
+downloaded = []
+
+def analysis(title):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": title,
+        "playlist_title": title,
+        "is_playlist": True,
+        "playlist_count": 2,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+            {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.url_input.setText(url)
+window._analysis_finished(analysis("Road Mix"))
+first_ids = [row["id"] for row in window.rows]
+window._analysis_finished(analysis("Road Mix"))
+print(len(window.rows))
+print([row["id"] for row in window.rows] == first_ids)
+print([row["candidate"].get("display_title") for row in window.rows])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["3", "True", "['Road Mix', 'One', 'Two']"],
+        )
+
+    def test_clipflow_qt_playlist_dedupe_matches_legacy_rows_without_key(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/watch?v=one&list=PLROAD"
+same_playlist_url = "https://media.test/watch?v=two&list=PLROAD"
+
+app = QApplication([])
+window = ClipFlowWindow()
+legacy_parent = {
+    "id": "legacy-playlist",
+    "kind": "playlist",
+    "candidate": {"url": url, "source": url, "display_title": "Road Mix", "media_type": "playlist"},
+    "analysis_source_url": url,
+    "source_url": url,
+    "status": "완료",
+    "created_order": 1,
+    "expanded": True,
+}
+window.rows = [legacy_parent]
+print(window._first_visible_analyzed_row_index_for_url(same_playlist_url))
+print(window._find_playlist_parent_for_analysis({"url": same_playlist_url, "is_playlist": True}, same_playlist_url)["id"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["0", "legacy-playlist"],
+        )
+
+    def test_clipflow_qt_playlist_child_card_frame_is_indented(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/road"
+
+def fake_analysis():
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Road Trip Mix",
+        "playlist_title": "Road Trip Mix",
+        "is_playlist": True,
+        "playlist_count": 1,
+        "candidates": [
+            {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        ],
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+app.processEvents()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+app.processEvents()
+parent_widget = window.rows[0]["widget"]
+child_widget = window.rows[1]["widget"]
+parent_x = parent_widget.mapTo(window.row_container, QPoint(0, 0)).x()
+child_x = child_widget.mapTo(window.row_container, QPoint(0, 0)).x()
+print(child_x > parent_x)
+print(18 <= child_x - parent_x <= 40)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+
+    def test_clipflow_qt_playlist_expand_collapse_reuses_child_widgets(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/road"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Road Trip Mix",
+    "playlist_title": "Road Trip Mix",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "https://img.test/one.jpg", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "https://img.test/two.jpg", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+    ],
+    "warnings": [],
+})
+first_child_widget = window.rows[1]["widget"]
+first_child_render_widget = window.rows[1]["render_widget"]
+window.rows[0]["expanded"] = False
+window.playlist_expansion_changed(window.rows[0])
+print(window.rows[1]["widget"] is first_child_widget)
+print(window.rows[1]["render_widget"] is first_child_render_widget)
+print(first_child_render_widget.isHidden())
+window.rows[0]["expanded"] = True
+window.playlist_expansion_changed(window.rows[0])
+print(window.rows[1]["widget"] is first_child_widget)
+print(window.rows[1]["render_widget"] is first_child_render_widget)
+print(not first_child_render_widget.isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True"])
+
+    def test_clipflow_qt_playlist_render_keeps_collapsed_children_in_layout(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/road"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Road Trip Mix",
+    "playlist_title": "Road Trip Mix",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "https://img.test/one.jpg", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "title": "Two", "display_title": "Two", "thumbnail": "https://img.test/two.jpg", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 20},
+    ],
+    "warnings": [],
+})
+child_render_widgets = [row["render_widget"] for row in window.rows[1:]]
+window.rows[0]["expanded"] = False
+window._render_rows()
+print([window.row_layout.indexOf(widget) >= 0 for widget in child_render_widgets])
+print([widget.isHidden() for widget in child_render_widgets])
+render_calls = []
+original_render = window._render_rows
+def counted_render():
+    render_calls.append(True)
+    original_render()
+window._render_rows = counted_render
+window.rows[0]["expanded"] = True
+window.playlist_expansion_changed(window.rows[0])
+print(len(render_calls))
+print([window.row_layout.indexOf(widget) >= 0 for widget in child_render_widgets])
+print([not widget.isHidden() for widget in child_render_widgets])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["[True, True]", "[True, True]", "0", "[True, True]", "[True, True]"],
+        )
+
+    def test_clipflow_qt_active_playlist_parent_hover_shows_safe_action_overlay(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+row = window._playlist_parent_loading_row("https://media.test/playlist/hover")
+row["analysis_loading"] = False
+row["status"] = DOWNLOAD_STATUS
+row["candidate"]["title"] = "Hover Mix"
+row["candidate"]["display_title"] = "Hover Mix"
+window.rows = [row]
+window._render_rows()
+window.show()
+app.processEvents()
+widget = row["widget"]
+widget._set_hovered(True)
+print(widget.actions_widget.isVisible())
+print(widget.remove_button.isEnabled())
+print(widget.delete_file_button.isEnabled())
+print(widget.open_folder_button.isEnabled())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "False", "False"])
+
+    def test_clipflow_qt_playlist_title_click_toggles_children(self):
+        script = r'''
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/title-click"
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Click Mix",
+    "playlist_title": "Click Mix",
+    "is_playlist": True,
+    "playlist_count": 1,
+    "candidates": [
+        {"id": "one", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 60, "sort_bytes": 10},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+parent = window.rows[0]
+child = window.rows[1]
+QTest.mouseClick(parent["widget"].title_label, Qt.LeftButton, pos=QPoint(10, parent["widget"].title_label.height() // 2))
+app.processEvents()
+print(parent["expanded"])
+print(child["render_widget"].isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "True"])
+
+    def test_clipflow_qt_legacy_playlist_parent_click_starts_analysis(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+url = "https://www.youtube.com/playlist?list=PLLEGACY"
+app = QApplication([])
+window = ClipFlowWindow()
+candidate = {
+    "id": "playlist-old",
+    "media_type": "playlist",
+    "title": "Legacy Mix",
+    "display_title": "Legacy Mix",
+    "source": url,
+    "url": url,
+    "webpage_url": url,
+    "playlist_count": 3,
+    "item_count": 3,
+}
+parent = {
+    "id": "playlist-old",
+    "kind": "playlist",
+    "candidate": candidate,
+    "qualities": [candidate],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": url,
+    "source_url": url,
+    "playlist_key": "youtube.com:list:PLLEGACY",
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+    "expanded": True,
+}
+calls = []
+window.rows = [parent]
+window._render_rows()
+window._start_analysis = lambda auto_download=False: calls.append([window.url_input.text(), auto_download])
+parent["expanded"] = False
+window.playlist_expansion_changed(parent)
+print(calls)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["[['https://www.youtube.com/playlist?list=PLLEGACY', False]]"],
+        )
+
+    def test_clipflow_qt_playlist_entry_events_render_children_before_complete(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, ERROR_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.url_input.setText("https://media.test/playlist/events")
+window._start_analysis = lambda *args, **kwargs: None
+source_url = "https://media.test/playlist/events"
+window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 3, "source_url": source_url})
+window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "title": "Video 1", "source_url": source_url})
+window._handle_analysis_event({
+    "type": "playlist_entry",
+    "index": 1,
+    "source_url": source_url,
+    "candidates": [{
+        "id": "one",
+        "source": "https://media.test/watch/1",
+        "url": "https://media.test/watch/1",
+        "title": "Video 1",
+        "display_title": "Video 1",
+        "thumbnail": "",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "resolution": "1080p",
+        "height": 1080,
+        "duration": 60,
+        "sort_bytes": 10,
+    }],
+})
+print([(row.get("kind"), row.get("child_loading"), row.get("playlist_child_index")) for row in window.rows])
+window._handle_analysis_event({"type": "playlist_failed_entry", "index": 2, "title": "Video 2", "source_url": "https://media.test/watch/2", "message": "HTTP 404"})
+print([(row.get("candidate", {}).get("display_title"), row.get("status")) for row in window.rows if row.get("is_playlist_child") and not row.get("child_loading")])
+window._handle_analysis_event({
+    "type": "playlist_entry",
+    "index": 3,
+    "source_url": source_url,
+    "candidates": [{
+        "id": "three",
+        "source": "https://media.test/watch/3",
+        "url": "https://media.test/watch/3",
+        "title": "Video 3",
+        "display_title": "Video 3",
+        "thumbnail": "",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "resolution": "720p",
+        "height": 720,
+        "duration": 70,
+        "sort_bytes": 12,
+    }],
+})
+window._handle_analysis_event({"type": "playlist_complete", "count": 3, "source_url": source_url})
+print(any(row.get("child_loading") for row in window.rows))
+print([row.get("candidate", {}).get("display_title") for row in window.rows if row.get("is_playlist_child")])
+print(ERROR_STATUS in [row.get("status") for row in window.rows])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[('playlist', None, None), ('video', None, 1), ('video', True, 2)]",
+                "[('Video 1', '준비'), ('Video 2', '오류')]",
+                "False",
+                "['Video 1', 'Video 2', 'Video 3']",
+                "True",
             ],
         )
 
@@ -1805,7 +3275,6 @@ window.url_input.setText(url)
 window._analysis_finished(fake_analysis())
 row = window.rows[0]
 row_widget = row["widget"]
-row_widget.playlist_toggle_button.click()
 app.processEvents()
 bar = window.scroll_area.verticalScrollBar()
 bar.setValue(min(bar.maximum(), 90))
@@ -1816,6 +3285,7 @@ print(bar.maximum() > 0)
 print(window.playlist_float_button.isVisible())
 window.playlist_float_button.click()
 app.processEvents()
+row_widget = row["widget"]
 row_top = row_widget.mapTo(window.row_container, QPoint(0, 0)).y()
 print(row["expanded"])
 print(abs(bar.value() - row_top) <= 2)
@@ -1824,6 +3294,107 @@ print(abs(bar.value() - row_top) <= 2)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "True"])
+
+    def test_clipflow_qt_playlist_toggle_keeps_parent_viewport_position(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
+
+url = "https://media.test/playlist/steady"
+
+def fake_analysis():
+    candidates = []
+    for index in range(12):
+        candidates.append({
+            "id": str(index),
+            "source": f"https://media.test/watch/{index}",
+            "url": f"https://media.test/watch/{index}",
+            "title": f"Video {index}",
+            "display_title": f"Video {index}",
+            "thumbnail": "",
+            "ext": "mp4",
+            "output_ext": "mp4",
+            "resolution": "1080p",
+            "height": 1080,
+            "duration": 60,
+            "sort_bytes": 10,
+        })
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Steady Mix",
+        "playlist_title": "Steady Mix",
+        "is_playlist": True,
+        "playlist_count": len(candidates),
+        "candidates": candidates,
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+app.processEvents()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+app.processEvents()
+for index in range(8):
+    candidate = {
+        "id": f"filler-{index}",
+        "source": f"https://media.test/filler/{index}",
+        "url": f"https://media.test/filler/{index}",
+        "title": f"Filler {index}",
+        "display_title": f"Filler {index}",
+        "thumbnail": "",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "resolution": "1080p",
+        "height": 1080,
+        "duration": 60,
+        "sort_bytes": 10,
+    }
+    window.rows.append({
+        "id": f"filler-{index}",
+        "kind": "video",
+        "candidate": candidate,
+        "qualities": [candidate],
+        "quality_options": [],
+        "selected_index": 0,
+        "selected_format_index": 0,
+        "analysis_source_url": candidate["url"],
+        "source_url": candidate["url"],
+        "status": READY_STATUS,
+        "status_detail": "",
+        "progress": 0,
+        "progress_text": "",
+        "output_path": "",
+        "messages": [],
+        "created_order": 100 + index,
+    })
+window._render_rows()
+app.processEvents()
+row = next(row for row in window.rows if row.get("kind") == "playlist")
+bar = window.scroll_area.verticalScrollBar()
+row_top_in_content = row["render_widget"].mapTo(window.row_container, QPoint(0, 0)).y()
+bar.setValue(max(bar.minimum(), min(bar.maximum(), row_top_in_content - 40)))
+app.processEvents()
+before = row["render_widget"].mapTo(window.scroll_area.viewport(), QPoint(0, 0)).y()
+row["expanded"] = False
+window.playlist_expansion_changed(row)
+app.processEvents()
+after_collapse = row["render_widget"].mapTo(window.scroll_area.viewport(), QPoint(0, 0)).y()
+row["expanded"] = True
+window.playlist_expansion_changed(row)
+app.processEvents()
+after_expand = row["render_widget"].mapTo(window.scroll_area.viewport(), QPoint(0, 0)).y()
+print(abs(after_collapse - before) <= 2)
+print(abs(after_expand - after_collapse) <= 2)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
 
     def test_clipflow_qt_long_titles_use_marquee_label(self):
         script = r'''

@@ -292,6 +292,70 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(options["cookiesfrombrowser"], ("chrome",))
         self.assertEqual(options["proxy"], "http://127.0.0.1:8080")
 
+    def test_download_candidate_retries_progressive_mp4_after_video_data_403(self):
+        calls = []
+
+        class FailingThenOkYDL:
+            def __init__(self, options):
+                self.options = options
+                calls.append(options["format"])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def download(self, urls):
+                if len(calls) == 1:
+                    raise RuntimeError("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+
+        result = engine.download_candidate(
+            "https://youtube.test/watch?v=one",
+            {"format_selector": "137+bestaudio[ext=m4a]/bestaudio/best", "output_ext": "mp4"},
+            "C:/Temp",
+            ydl_factory=FailingThenOkYDL,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["137+bestaudio[ext=m4a]/bestaudio/best", "18/best[ext=mp4]/best"])
+
+    def test_download_candidate_retries_progressive_mp4_without_cookies_after_second_403(self):
+        calls = []
+
+        class FailingTwiceThenOkYDL:
+            def __init__(self, options):
+                self.options = options
+                calls.append((options["format"], options.get("cookiesfrombrowser")))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def download(self, urls):
+                if len(calls) <= 2:
+                    raise RuntimeError("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+
+        result = engine.download_candidate(
+            "https://youtube.test/watch?v=one",
+            {"format_selector": "137+bestaudio[ext=m4a]/bestaudio/best", "output_ext": "mp4"},
+            "C:/Temp",
+            cookie_source="Firefox",
+            ydl_factory=FailingTwiceThenOkYDL,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            calls,
+            [
+                ("137+bestaudio[ext=m4a]/bestaudio/best", ("firefox",)),
+                ("18/best[ext=mp4]/best", ("firefox",)),
+                ("18/best[ext=mp4]/best", None),
+            ],
+        )
+
     def test_download_options_convert_audio_candidates_to_wav(self):
         candidate = {"format_selector": "140", "output_ext": "wav"}
 
@@ -361,6 +425,120 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=RDone&index=1"))
         self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=PL123"))
         self.assertFalse(engine.looks_like_playlist_url("https://video.example/watch?v=one"))
+
+    def test_analyze_url_emits_playlist_analysis_events(self):
+        class PlaylistYoutubeDL(FakeYoutubeDL):
+            requested_urls = []
+
+            def extract_info(self, url, download=False):
+                PlaylistYoutubeDL.requested_urls.append(url)
+                if self.options.get("extract_flat"):
+                    return {
+                        "title": "Road Mix",
+                        "webpage_url": url,
+                        "playlist_count": 2,
+                        "entries": [
+                            {"id": "one", "title": "One", "webpage_url": "https://example.test/watch/one"},
+                            {"id": "two", "title": "Two", "webpage_url": "https://example.test/watch/two"},
+                        ],
+                    }
+                title = "One" if url.endswith("/one") else "Two"
+                height = 1080 if title == "One" else 720
+                return {
+                    "id": title.lower(),
+                    "title": title,
+                    "webpage_url": url,
+                    "duration": 60,
+                    "formats": [
+                        {
+                            "format_id": "18",
+                            "ext": "mp4",
+                            "height": height,
+                            "width": 1920,
+                            "vcodec": "avc1.640028",
+                            "acodec": "mp4a.40.2",
+                            "filesize": 1000,
+                        }
+                    ],
+                }
+
+        events = []
+
+        result = engine.analyze_url(
+            "https://example.test/playlist/road",
+            ydl_factory=PlaylistYoutubeDL,
+            output_ext="mp4",
+            on_event=events.append,
+        )
+
+        playlist_events = [event for event in events if str(event.get("type", "")).startswith("playlist_")]
+        self.assertTrue(result["is_playlist"])
+        self.assertEqual(
+            [event["type"] for event in playlist_events],
+            [
+                "playlist_parent",
+                "playlist_entry_loading",
+                "playlist_entry",
+                "playlist_entry_loading",
+                "playlist_entry",
+                "playlist_complete",
+            ],
+        )
+        self.assertEqual(playlist_events[0]["title"], "Road Mix")
+        self.assertEqual(playlist_events[0]["count"], 2)
+        self.assertEqual([event.get("candidates", [{}])[0].get("display_title") for event in playlist_events if event["type"] == "playlist_entry"], ["One", "Two"])
+        self.assertEqual(
+            PlaylistYoutubeDL.requested_urls,
+            [
+                "https://example.test/playlist/road",
+                "https://example.test/watch/one",
+                "https://example.test/watch/two",
+            ],
+        )
+
+    def test_analyze_youtube_watch_playlist_uses_canonical_playlist_url_for_entries(self):
+        class PlaylistYoutubeDL(FakeYoutubeDL):
+            requested_urls = []
+
+            def extract_info(self, url, download=False):
+                PlaylistYoutubeDL.requested_urls.append(url)
+                if self.options.get("extract_flat"):
+                    return {
+                        "title": "Road Mix",
+                        "webpage_url": url,
+                        "playlist_count": 1,
+                        "entries": [
+                            {"id": "one", "title": "One", "webpage_url": "https://www.youtube.com/watch?v=one"},
+                        ],
+                    }
+                return {
+                    "id": "one",
+                    "title": "One",
+                    "webpage_url": url,
+                    "duration": 60,
+                    "formats": [
+                        {
+                            "format_id": "18",
+                            "ext": "mp4",
+                            "height": 720,
+                            "width": 1280,
+                            "vcodec": "avc1.64001F",
+                            "acodec": "mp4a.40.2",
+                            "filesize": 800,
+                        }
+                    ],
+                }
+
+        result = engine.analyze_url(
+            "https://www.youtube.com/watch?v=one&list=PLROAD&pp=sAgC",
+            ydl_factory=PlaylistYoutubeDL,
+            output_ext="mp4",
+            on_event=lambda event: None,
+        )
+
+        self.assertTrue(result["is_playlist"])
+        self.assertEqual(PlaylistYoutubeDL.requested_urls[0], "https://www.youtube.com/playlist?list=PLROAD")
+        self.assertEqual(PlaylistYoutubeDL.requested_urls[1], "https://www.youtube.com/watch?v=one")
 
     def test_effective_proxy_prefers_explicit_then_environment_then_windows(self):
         self.assertEqual(

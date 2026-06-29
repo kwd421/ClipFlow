@@ -315,6 +315,27 @@ def looks_like_playlist_url(url):
     return "playlist" in path
 
 
+def playlist_identity_key(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    list_values = [str(value or "").strip() for value in query.get("list", [])]
+    playlist_id = next((value for value in list_values if value), "")
+    if playlist_id:
+        host = parsed.netloc.lower().removeprefix("www.")
+        return f"{host}:list:{playlist_id}"
+    normalized = urllib.parse.urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower().removeprefix("www."),
+            parsed.path.rstrip("/").lower(),
+            "",
+            "",
+            "",
+        )
+    )
+    return normalized
+
+
 def caption_title_from_info(*infos):
     for info in infos:
         if not isinstance(info, dict):
@@ -1336,6 +1357,163 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
     }
 
 
+def emit_playlist_analysis_events(result, on_event=None):
+    if not on_event or not result.get("is_playlist"):
+        return
+    source_url = result.get("webpage_url") or result.get("url") or ""
+    parent_id = result.get("playlist_id") or "playlist"
+    count = safe_int(result.get("playlist_count")) or len(result.get("candidates") or [])
+    emit_event(
+        on_event,
+        "playlist_parent",
+        parent_id=parent_id,
+        title=result.get("playlist_title") or result.get("title") or "Playlist",
+        count=count,
+        source_url=source_url,
+        url=source_url,
+    )
+    for index, candidate in enumerate(result.get("candidates") or [], start=1):
+        emit_event(on_event, "playlist_entry_loading", parent_id=parent_id, index=index, source_url=source_url, url=source_url)
+        emit_event(
+            on_event,
+            "playlist_entry",
+            parent_id=parent_id,
+            index=index,
+            candidate=candidate,
+            candidates=[candidate],
+            source_url=source_url,
+            url=source_url,
+        )
+    emit_event(on_event, "playlist_complete", parent_id=parent_id, count=count, source_url=source_url, url=source_url)
+
+
+def playlist_entry_url(entry, playlist_url=""):
+    if not isinstance(entry, dict):
+        return ""
+    for key in ("webpage_url", "original_url", "url"):
+        value = str(entry.get(key) or "").strip()
+        if not value:
+            continue
+        if re.match(r"^https?://", value, re.IGNORECASE):
+            return strip_playlist_query(value)
+    entry_id = str(entry.get("id") or "").strip()
+    parsed = urllib.parse.urlparse(str(playlist_url or ""))
+    if entry_id and "youtube." in parsed.netloc.lower():
+        return f"https://www.youtube.com/watch?v={urllib.parse.quote(entry_id)}"
+    return ""
+
+
+def playlist_extraction_url(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    playlist_id = next((str(value or "").strip() for value in query.get("list", []) if str(value or "").strip()), "")
+    host = parsed.netloc.lower().removeprefix("www.")
+    if playlist_id and host in {"youtube.com", "m.youtube.com"}:
+        return urllib.parse.urlunparse((parsed.scheme or "https", "www.youtube.com", "/playlist", "", urllib.parse.urlencode({"list": playlist_id}), ""))
+    return url
+
+
+def strip_playlist_query(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query = [(key, value) for key, value in query if key.lower() not in {"list", "index", "pp", "start_radio"}]
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+
+
+def analyze_playlist_progressively(
+    url,
+    cookie_source,
+    ydl_factory,
+    on_event=None,
+    proxy_url=None,
+    output_ext=None,
+    browser_dom_fetcher=None,
+    _force_single=False,
+):
+    options = build_ydl_options(
+        cookie_source=cookie_source,
+        on_event=on_event,
+        quiet=True,
+        proxy_url=proxy_url,
+        allow_playlist=True,
+    )
+    options.update({"simulate": True, "skip_download": True, "check_formats": False, "extract_flat": "in_playlist"})
+    emit_event(on_event, "status", message="Analyzing playlist")
+    extract_url = playlist_extraction_url(url)
+    with ydl_factory(options) as ydl:
+        info = ydl.extract_info(extract_url, download=False)
+    entries = [entry for entry in (info.get("entries") if isinstance(info, dict) else []) or [] if entry]
+    if not entries:
+        return None
+
+    source_url = url
+    playlist_title = clean_video_title(info.get("title") or info.get("playlist_title") or "") or "Playlist"
+    count = safe_int(info.get("playlist_count") or info.get("n_entries") or len(entries))
+    parent_id = info.get("id") or playlist_identity_key(url) or "playlist"
+    emit_event(on_event, "playlist_parent", parent_id=parent_id, title=playlist_title, count=count, source_url=source_url, url=source_url)
+
+    candidates = []
+    warnings = []
+    for index, entry in enumerate(entries, start=1):
+        entry_title = clean_video_title(entry.get("title") or "") or f"Video {index}"
+        entry_url = playlist_entry_url(entry, playlist_url=url)
+        emit_event(
+            on_event,
+            "playlist_entry_loading",
+            parent_id=parent_id,
+            index=index,
+            title=entry_title,
+            source_url=entry_url or source_url,
+            url=entry_url or source_url,
+        )
+        if not entry_url:
+            message = f"Playlist entry has no URL: {entry_title}"
+            warnings.append(message)
+            emit_event(on_event, "playlist_failed_entry", parent_id=parent_id, index=index, title=entry_title, source_url=source_url, url=source_url, message=message)
+            continue
+        try:
+            child = analyze_url(
+                entry_url,
+                cookie_source=cookie_source,
+                ydl_factory=ydl_factory,
+                on_event=on_event,
+                proxy_url=proxy_url,
+                output_ext=output_ext,
+                browser_dom_fetcher=browser_dom_fetcher,
+                _force_single=True,
+            )
+            child_candidates = child.get("candidates") or []
+            candidates.extend(child_candidates)
+            emit_event(
+                on_event,
+                "playlist_entry",
+                parent_id=parent_id,
+                index=index,
+                title=entry_title,
+                analysis=child,
+                candidates=child_candidates,
+                candidate=child_candidates[0] if child_candidates else {},
+                source_url=entry_url,
+                url=entry_url,
+            )
+        except Exception as exc:
+            message = strip_ansi(str(exc))
+            warnings.append(f"{entry_title}: {message}")
+            emit_event(on_event, "playlist_failed_entry", parent_id=parent_id, index=index, title=entry_title, source_url=entry_url, url=entry_url, message=message)
+
+    emit_event(on_event, "playlist_complete", parent_id=parent_id, count=count, source_url=source_url, url=source_url)
+    return {
+        "url": url,
+        "webpage_url": source_url,
+        "title": playlist_title,
+        "is_playlist": True,
+        "playlist_title": playlist_title,
+        "playlist_count": count,
+        "candidates": sort_candidates(enrich_missing_sizes(candidates)),
+        "warnings": warnings,
+    }
+
+
 def analyze_url(
     url,
     cookie_source="없음",
@@ -1344,6 +1522,7 @@ def analyze_url(
     proxy_url=None,
     output_ext=None,
     browser_dom_fetcher=None,
+    _force_single=False,
 ):
     if not str(url or "").strip():
         raise ValueError("URL is required.")
@@ -1359,7 +1538,21 @@ def analyze_url(
 
         ydl_factory = YoutubeDL
 
-    allow_playlist = looks_like_playlist_url(url)
+    allow_playlist = looks_like_playlist_url(url) and not _force_single
+
+    if allow_playlist:
+        progressive = analyze_playlist_progressively(
+            url,
+            cookie_source,
+            ydl_factory,
+            on_event=on_event,
+            proxy_url=proxy_url,
+            output_ext=output_ext,
+            browser_dom_fetcher=browser_dom_fetcher,
+        )
+        if progressive:
+            return progressive
+        raise RuntimeError("Playlist analysis returned no entries.")
 
     def extract_with(source, impersonate=False):
         options = build_ydl_options(
@@ -1440,7 +1633,7 @@ def analyze_url(
     entries = info.get("entries") if isinstance(info, dict) else None
     is_playlist = bool(allow_playlist and entries)
     playlist_title = clean_video_title(info.get("title") or info.get("playlist_title") or "") if isinstance(info, dict) else ""
-    return {
+    result = {
         "url": url,
         "webpage_url": info.get("webpage_url") or url,
         "title": clean_video_title(info.get("title") or candidates[0].get("title")) or "video",
@@ -1450,6 +1643,8 @@ def analyze_url(
         "candidates": candidates,
         "warnings": warnings,
     }
+    emit_playlist_analysis_events(result, on_event=on_event)
+    return result
 
 
 def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
@@ -1475,10 +1670,55 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         target_url = candidate["url"]
     options = build_download_options(candidate, output_dir, cookie_source=cookie_source, on_event=on_event, proxy_url=proxy_url)
     emit_event(on_event, "status", message="Starting download")
-    with ydl_factory(options) as ydl:
-        ydl.download([target_url])
+    try:
+        with ydl_factory(options) as ydl:
+            ydl.download([target_url])
+    except Exception as exc:
+        if not should_retry_progressive_mp4(candidate, exc):
+            raise
+        fallback_candidate = dict(candidate)
+        fallback_candidate["format_selector"] = "18/best[ext=mp4]/best"
+        fallback_candidate["output_ext"] = "mp4"
+        fallback_candidate["ext"] = "mp4"
+        emit_event(on_event, "status", message="Retrying with progressive MP4")
+        fallback_options = build_download_options(
+            fallback_candidate,
+            output_dir,
+            cookie_source=cookie_source,
+            on_event=on_event,
+            proxy_url=proxy_url,
+        )
+        try:
+            with ydl_factory(fallback_options) as ydl:
+                ydl.download([target_url])
+        except Exception as fallback_exc:
+            if not (cookie_spec(cookie_source) and should_retry_progressive_mp4(fallback_candidate, fallback_exc, allow_progressive=True)):
+                raise
+            emit_event(on_event, "status", message="Retrying progressive MP4 without cookies")
+            no_cookie_options = build_download_options(
+                fallback_candidate,
+                output_dir,
+                cookie_source="?놁쓬",
+                on_event=on_event,
+                proxy_url=proxy_url,
+            )
+            with ydl_factory(no_cookie_options) as ydl:
+                ydl.download([target_url])
     emit_event(on_event, "done", path=str(output_dir))
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
+
+
+def should_retry_progressive_mp4(candidate, exc, allow_progressive=False):
+    output_ext = normalized_output_ext((candidate or {}).get("output_ext"))
+    if output_ext in AUDIO_OUTPUT_EXTENSIONS:
+        return False
+    selector = str((candidate or {}).get("format_selector") or "")
+    if selector == "18/best[ext=mp4]/best" and not allow_progressive:
+        return False
+    message = str(exc).lower()
+    if "unable to download video data" not in message:
+        return False
+    return "http error 403" in message or "http error 404" in message
 
 
 def legacy_job_to_candidate(job):

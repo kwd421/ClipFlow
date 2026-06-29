@@ -205,6 +205,14 @@ QLabel#MetaText {{
     color: {MUTED};
     font-size: 12px;
 }}
+QLabel#PlaylistPill {{
+    background: {ACCENT_TINT};
+    color: {ACCENT};
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}}
 QLabel#FieldIcon {{
     color: {MUTED};
     font-size: 16px;
@@ -333,7 +341,7 @@ QPushButton:disabled {{
 QPushButton#SecondaryButton {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {FIELD_BORDER};
     font-weight: 600;
 }}
 QPushButton#DangerButton {{
@@ -350,7 +358,7 @@ QPushButton#DangerButton:pressed {{
 }}
 QPushButton#SecondaryButton:hover {{
     background: {SURFACE_SOFT};
-    border-color: {FIELD_BORDER_HOVER};
+    border-color: {BORDER_STRONG};
 }}
 QPushButton#SecondaryButton:pressed {{
     background: {SURFACE_SOFT};

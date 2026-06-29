@@ -41,7 +41,8 @@ except ImportError:
     from clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
 
 
-ACTIVE_STATUSES = {"분석 중", "다운로드 중"}
+ANALYZING_STATUS = "분석 중"
+ACTIVE_STATUSES = {ANALYZING_STATUS, "다운로드 중"}
 COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
 
@@ -151,13 +152,19 @@ class RowActionOverlay(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, 10.0, 10.0)
-        painter.setClipPath(clip)
         parent = self.parentWidget()
         selected = parent is not None and parent.property("selected") == "true"
         color = theme.SURFACE if selected else theme.SURFACE_SOFT
-        painter.fillRect(rect, QColor(color))
+        radius = 10.0
+        path = QPainterPath()
+        path.moveTo(rect.left(), rect.top())
+        path.lineTo(rect.right() - radius, rect.top())
+        path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
+        path.lineTo(rect.right(), rect.bottom() - radius)
+        path.quadTo(rect.right(), rect.bottom(), rect.right() - radius, rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        path.closeSubpath()
+        painter.fillPath(path, QColor(color))
 
 
 class DownloadRowWidget(QFrame):
@@ -204,6 +211,10 @@ class DownloadRowWidget(QFrame):
         self.playlist_toggle_button.setToolTip("펼치기/접기")
         self.playlist_toggle_button.clicked.connect(self._toggle_playlist)
         title_line.addWidget(self.playlist_toggle_button, 0, Qt.AlignVCenter)
+        self.playlist_pill = QLabel("재생목록")
+        self.playlist_pill.setObjectName("PlaylistPill")
+        self.playlist_pill.hide()
+        title_line.addWidget(self.playlist_pill, 0, Qt.AlignVCenter)
         self.title_label = MarqueeLabel()
         self.title_label.setObjectName("RowTitle")
         self.title_label.setWordWrap(False)
@@ -309,6 +320,9 @@ class DownloadRowWidget(QFrame):
     def mousePressEvent(self, event):
         if getattr(self.owner, "select_mode", False):
             self.select_checkbox.setChecked(not self.select_checkbox.isChecked())
+        elif self.row.get("kind") == "playlist":
+            self.owner.select_row_for_widget(self)
+            self._toggle_playlist()
         else:
             self.owner.select_row_for_widget(self)
         super().mousePressEvent(event)
@@ -338,7 +352,10 @@ class DownloadRowWidget(QFrame):
         self.title_label.start_marquee_if_needed()
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
-        self.row_quality_label.setText(f"· {quality_display_label(candidate)} · {format_display_label(candidate)}")
+        if self.row.get("kind") == "playlist":
+            self.row_quality_label.setText("")
+        else:
+            self.row_quality_label.setText(f"· {quality_display_label(candidate)} · {format_display_label(candidate)}")
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
         self._refresh_source_button()
         self._refresh_playlist_detail()
@@ -355,6 +372,7 @@ class DownloadRowWidget(QFrame):
         completed = self.row.get("status") == COMPLETED_STATUS
         output_path = Path(self.row.get("output_path") or "")
         has_output = bool(self.row.get("output_path")) and output_path.exists()
+        can_resolve_output = bool(has_output or self.row.get("kind") == "playlist" or self.row.get("is_playlist_child"))
         # Finder + file delete only make sense once a file exists (completed).
         # Analysed / error rows expose only "remove from list".
         self.open_folder_button.setVisible(completed)
@@ -363,7 +381,7 @@ class DownloadRowWidget(QFrame):
         self.remove_button.setVisible(not active)
         self.open_folder_button.setEnabled(completed and not active)
         self.remove_button.setEnabled(not active)
-        self.delete_file_button.setEnabled(completed and has_output and not active)
+        self.delete_file_button.setEnabled(completed and can_resolve_output and not active)
         self.more_button.setEnabled(completed)
 
     def _playlist_detail_text(self):
@@ -379,9 +397,10 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_playlist_detail(self):
         is_playlist = self.row.get("kind") == "playlist"
-        self.playlist_toggle_button.setVisible(is_playlist)
-        self.playlist_detail_label.setVisible(is_playlist and bool(self.row.get("expanded")))
-        self.playlist_detail_label.setText(self._playlist_detail_text() if is_playlist else "")
+        self.playlist_toggle_button.hide()
+        self.playlist_pill.setVisible(is_playlist)
+        self.playlist_detail_label.hide()
+        self.playlist_detail_label.setText("")
 
     def _toggle_playlist(self):
         if self.row.get("kind") != "playlist":
@@ -403,7 +422,8 @@ class DownloadRowWidget(QFrame):
     def _set_hovered(self, hovered):
         self.setProperty("hovered", "true" if hovered else "false")
         active = self.row.get("status") in ACTIVE_STATUSES
-        show_actions = hovered and not active
+        analyzing = bool(self.row.get("analysis_loading")) or self.row.get("status") == ANALYZING_STATUS
+        show_actions = hovered and (not active or self.row.get("kind") == "playlist") and not analyzing
         self.actions_widget.setVisible(show_actions)
         if show_actions:
             self._position_actions()
@@ -451,7 +471,7 @@ class DownloadRowWidget(QFrame):
             self.spinner.start()
         else:
             self.spinner.stop()
-        self.row_quality_label.setVisible(not analyzing)
+        self.row_quality_label.setVisible(not analyzing and self.row.get("kind") != "playlist")
         self.info_widget.setVisible(not analyzing)
         self.size_widget.setVisible(not analyzing)
         self._refresh_actions()
@@ -467,7 +487,7 @@ class DownloadRowWidget(QFrame):
         self.row["progress_text"] = display_text
         self.progress_bar.setValue(bounded)
         self.progress_bar.hide()
-        self.setProperty("progressActive", "true" if active and bounded > 0 else "false")
+        self.setProperty("progressActive", "true" if active else "false")
         self.setProperty("progressValue", str(bounded if active else 0))
         self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
@@ -478,21 +498,23 @@ class DownloadRowWidget(QFrame):
         if self.property("progressActive") != "true":
             return
         progress = max(0, min(100, int(self.property("progressValue") or 0)))
-        if progress <= 0:
-            return
         rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         radius = 10.0
         full = QPainterPath()
         full.addRoundedRect(rect, radius, radius)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(full)
+        if progress <= 0:
+            return
         fraction = progress / 100.0
         samples = 220
         partial = QPainterPath()
         partial.moveTo(full.pointAtPercent(0.0))
         for index in range(1, samples + 1):
             partial.lineTo(full.pointAtPercent(fraction * index / samples))
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
         gradient = QLinearGradient(rect.topLeft(), rect.topRight())
         gradient.setColorAt(0.0, QColor(theme.ACCENT))
         gradient.setColorAt(1.0, QColor(theme.ACCENT_SOFT))

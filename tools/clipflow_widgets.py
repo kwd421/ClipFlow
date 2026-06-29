@@ -412,11 +412,20 @@ class ComboPopup(QFrame):
         painter.setBrush(QColor(theme.SURFACE))
         painter.drawRoundedRect(rect, 10, 10)
 
+    def closeEvent(self, event):
+        parent = self.parent()
+        if parent is not None:
+            setattr(parent, "_ignore_next_popup", True)
+            QTimer.singleShot(200, lambda owner=parent: setattr(owner, "_ignore_next_popup", False))
+        super().closeEvent(event)
+
 
 class CleanComboBox(QComboBox):
     def __init__(self, icon_kind=None, parent=None):
         super().__init__(parent)
         self.icon_kind = icon_kind
+        self.show_arrow = True
+        self.text_alignment = Qt.AlignLeft
         self.setMinimumHeight(28)
         self.setMaximumHeight(30)
         self.setCursor(Qt.PointingHandCursor)
@@ -442,12 +451,13 @@ class CleanComboBox(QComboBox):
             icon_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
             painter.drawPixmap(14, (self.height() - 16) // 2, 16, 16, lucide_pixmap(self.icon_kind, 16, icon_color))
 
-        text_rect = self.rect().adjusted(text_left, 0, -28, 0)
+        text_rect = self.rect().adjusted(text_left, 0, -28 if self.show_arrow else -11, 0)
         painter.setPen(QColor(text_color))
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.currentText())
+        painter.drawText(text_rect, Qt.AlignVCenter | self.text_alignment, self.currentText())
 
-        arrow_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
-        painter.drawPixmap(self.width() - 22, (self.height() - 14) // 2, 14, 14, lucide_pixmap("chevron-down", 14, arrow_color))
+        if self.show_arrow:
+            arrow_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
+            painter.drawPixmap(self.width() - 22, (self.height() - 14) // 2, 14, 14, lucide_pixmap("chevron-down", 14, arrow_color))
 
     def enterEvent(self, event):
         self.update()
@@ -461,7 +471,34 @@ class CleanComboBox(QComboBox):
         self.update()
         super().changeEvent(event)
 
+    def mousePressEvent(self, event):
+        active_popup = getattr(self, "_active_popup", None)
+        if active_popup and active_popup.isVisible():
+            active_popup.close()
+            active_popup.deleteLater()
+            self._active_popup = None
+            self._suppress_next_release_popup = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if getattr(self, "_suppress_next_release_popup", False):
+            self._suppress_next_release_popup = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def showPopup(self):
+        if getattr(self, "_ignore_next_popup", False):
+            self._ignore_next_popup = False
+            return
+        active_popup = getattr(self, "_active_popup", None)
+        if active_popup and active_popup.isVisible():
+            active_popup.close()
+            active_popup.deleteLater()
+            self._active_popup = None
+            return
         # Self-painted popup (see ComboPopup) + explicit per-popup stylesheet,
         # because Qt.Popup windows do not inherit the app stylesheet on macOS.
         popup = ComboPopup(self)
@@ -494,6 +531,7 @@ class CleanComboBox(QComboBox):
     def _choose_option(self, index, popup):
         popup.close()
         popup.deleteLater()
+        self._active_popup = None
         self.setCurrentIndex(index)
 
     def hidePopup(self):

@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
@@ -35,7 +37,7 @@ try:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from tools.clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from tools.clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -46,7 +48,7 @@ except ImportError:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton
 
 
 SETTINGS_ORG = os.environ.get("CLIPFLOW_SETTINGS_ORG", "ClipFlow")
@@ -72,6 +74,13 @@ SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
 COOKIE_DISPLAY_TO_SOURCE = dict(zip(COOKIE_DISPLAY_CHOICES, COOKIE_CHOICES))
 COOKIE_SOURCE_TO_DISPLAY = dict(zip(COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES))
 DOWNLOAD_CONCURRENCY = 3
+ANALYZING_STATUS = "\ubd84\uc11d \uc911"
+READY_STATUS = "\uc900\ube44"
+WAITING_STATUS = "\ub300\uae30"
+DOWNLOAD_STATUS = "\ub2e4\uc6b4\ub85c\ub4dc \uc911"
+COMPLETED_STATUS = "\uc644\ub8cc"
+ERROR_STATUS = "\uc624\ub958"
+AUTO_LABEL = "\uc790\ub3d9"
 
 
 def default_save_folder():
@@ -301,6 +310,9 @@ class ClipFlowWindow(QMainWindow):
         self.event_messages = []
         self._clear_url_on_next_click = False
         self._row_sequence = 0
+        self._analysis_auto_download = False
+        self._playlist_event_candidates = []
+        self._playlist_event_parent_id = ""
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
         self.resize(720, 760)
@@ -388,7 +400,7 @@ class ClipFlowWindow(QMainWindow):
         self.url_input.textChanged.connect(self._refresh_primary_action)
         self.url_input.clicked_for_edit.connect(self._prepare_url_edit)
         self.url_input.pasted.connect(self._on_url_pasted)
-        self.url_input.returnPressed.connect(self._start_analysis)
+        self.url_input.returnPressed.connect(self._handle_primary_action)
 
         self.paste_button = LucideIconButton("clipboard", size=30, icon_size=16)
         self.paste_button.setToolTip("붙여넣기")
@@ -498,6 +510,8 @@ class ClipFlowWindow(QMainWindow):
         self.sort_order_combo.addItems(["최신순", "이름순"])
         self.sort_order_combo.setCurrentText(SORT_LABELS.get(self.sort_key, "최신순"))
         self.sort_order_combo.currentIndexChanged.connect(self._sort_changed)
+        self.sort_order_combo.show_arrow = False
+        self.sort_order_combo.text_alignment = Qt.AlignCenter
         self.sort_order_combo.setMaximumWidth(120)
         self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=40, icon_size=18)
         self.sort_direction_button.clicked.connect(self._toggle_sort_direction)
@@ -507,7 +521,7 @@ class ClipFlowWindow(QMainWindow):
         self.preference_button.setFixedSize(74, TOP_FIELD_HEIGHT - 2)
         self.preference_button.setCursor(Qt.PointingHandCursor)
         self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
-        self.preference_button.clicked.connect(self._open_preferences_dialog)
+        self.preference_button.clicked.connect(self._toggle_preferences_popup)
         header.addWidget(title)
         header.addWidget(self.select_checkbox, 0, Qt.AlignVCenter)
         header.addWidget(self.select_actions, 0, Qt.AlignVCenter)
@@ -585,10 +599,7 @@ class ClipFlowWindow(QMainWindow):
         return
 
     def _on_url_pasted(self):
-        # Pasting a URL kicks off analysis automatically; the user only needs
-        # to press Download on the resulting row afterwards.
-        if self.url_input.text().strip():
-            QTimer.singleShot(0, self._start_analysis)
+        self._refresh_primary_action()
 
     def _clear_url(self):
         self.url_input.clear()
@@ -648,6 +659,81 @@ class ClipFlowWindow(QMainWindow):
                 frame_rate=preferences.frame_rate,
             )
 
+    def _toggle_preferences_popup(self):
+        popup = getattr(self, "preferences_popup", None)
+        if popup and popup.isVisible():
+            popup.close()
+            popup.deleteLater()
+            self.preferences_popup = None
+            return
+        preferences = self.current_preferences()
+        popup = ComboPopup(self.preference_button)
+        popup.setStyleSheet(
+            f"QLabel#PreferencePopupLabel {{ color: {theme.MUTED}; font-size: 12px; font-weight: 600; }}"
+        )
+        layout = QGridLayout(popup)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
+
+        quality_combo = CleanComboBox()
+        quality_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        format_combo = CleanComboBox()
+        format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
+        codec_combo = CleanComboBox()
+        codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
+        frame_combo = CleanComboBox()
+        frame_combo.addItems(["자동", "60fps", "30fps"])
+        quality_combo.setCurrentText(preferences.quality)
+        format_combo.setCurrentText(preferences.output_format)
+        codec_combo.setCurrentText(preferences.codec)
+        frame_combo.setCurrentText(preferences.frame_rate)
+
+        def refresh_controls():
+            audio_format = format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
+            codec_combo.setEnabled(not audio_format)
+            frame_combo.setEnabled(not audio_format)
+
+        def apply_preferences(*_args):
+            refresh_controls()
+            self._set_preferences(
+                quality=_combo_text(quality_combo),
+                output_format=_combo_text(format_combo),
+                codec=_combo_text(codec_combo),
+                frame_rate=_combo_text(frame_combo),
+            )
+
+        for row, (label_text, combo) in enumerate(
+            (
+                ("품질", quality_combo),
+                ("포맷", format_combo),
+                ("코덱", codec_combo),
+                ("프레임", frame_combo),
+            )
+        ):
+            label = QLabel(label_text)
+            label.setObjectName("PreferencePopupLabel")
+            layout.addWidget(label, row, 0)
+            layout.addWidget(combo, row, 1)
+            combo.currentIndexChanged.connect(apply_preferences)
+
+        refresh_controls()
+        popup.adjustSize()
+        popup.setFixedWidth(max(260, popup.sizeHint().width()))
+        popup.adjustSize()
+        anchor = self.preference_button.mapToGlobal(QPoint(self.preference_button.width(), self.preference_button.height() + 6))
+        x = anchor.x() - popup.width()
+        y = anchor.y()
+        screen = QApplication.screenAt(anchor) or self.screen()
+        if screen:
+            available = screen.availableGeometry()
+            x = max(available.left() + 6, min(x, available.right() - popup.width() + 1))
+            y = max(available.top() + 6, min(y, available.bottom() - popup.height() + 1))
+        popup.move(QPoint(x, y))
+        popup.destroyed.connect(lambda *_args: setattr(self, "preferences_popup", None))
+        self.preferences_popup = popup
+        popup.show()
+
     def _initial_save_folder(self):
         saved = self.settings.value(SAVE_FOLDER_SETTING, "", str)
         if saved:
@@ -674,7 +760,7 @@ class ClipFlowWindow(QMainWindow):
 
     def _completed_history_payload(self):
         payload = []
-        for row in self.rows:
+        for row in self._dedupe_playlist_parent_rows(list(self.rows)):
             if row.get("status") != "완료":
                 continue
             candidate = row.get("candidate") or {}
@@ -683,6 +769,11 @@ class ClipFlowWindow(QMainWindow):
                     "candidate": self._json_ready(candidate),
                     "source_url": row.get("source_url") or "",
                     "analysis_source_url": row.get("analysis_source_url") or "",
+                    "playlist_key": self._playlist_group_key_for_row(row) if row.get("kind") == "playlist" else row.get("playlist_key") or "",
+                    "parent_playlist_id": row.get("parent_playlist_id") or "",
+                    "is_playlist_child": bool(row.get("is_playlist_child")),
+                    "playlist_child_index": int(row.get("playlist_child_index") or 0),
+                    "expanded": bool(row.get("expanded", True)),
                     "output_path": row.get("output_path") or "",
                     "created_order": int(row.get("created_order") or 0),
                     "messages": self._json_ready(row.get("messages") or []),
@@ -713,6 +804,9 @@ class ClipFlowWindow(QMainWindow):
             created_order = engine.safe_int(item.get("created_order")) or self._next_row_sequence()
             self._row_sequence = max(self._row_sequence, created_order)
             source_url = item.get("source_url") or item.get("analysis_source_url") or candidate.get("source") or candidate.get("url") or ""
+            playlist_key = item.get("playlist_key") or self._playlist_key(
+                item.get("analysis_source_url") or source_url
+            )
             restored.append(
                 {
                     "id": candidate.get("id") or f"history-{created_order}",
@@ -724,6 +818,11 @@ class ClipFlowWindow(QMainWindow):
                     "selected_format_index": 0,
                     "analysis_source_url": item.get("analysis_source_url") or source_url,
                     "source_url": source_url,
+                    "playlist_key": playlist_key,
+                    "parent_playlist_id": item.get("parent_playlist_id") or "",
+                    "is_playlist_child": bool(item.get("is_playlist_child")),
+                    "playlist_child_index": engine.safe_int(item.get("playlist_child_index")),
+                    "expanded": bool(item.get("expanded", True)),
                     "status": "완료",
                     "status_detail": "",
                     "progress": 100,
@@ -734,26 +833,64 @@ class ClipFlowWindow(QMainWindow):
                 }
             )
         if restored:
+            restored = self._dedupe_playlist_parent_rows(restored)
+            self._attach_restored_playlist_children(restored)
+            restored = self._dedupe_playlist_parent_rows(restored)
             self.rows = restored + self.rows
             self._render_rows()
 
+    def _attach_restored_playlist_children(self, rows):
+        parents_by_key = {}
+        for row in rows:
+            if row.get("kind") != "playlist":
+                continue
+            key = self._playlist_key_for_row(row)
+            if key and key not in parents_by_key:
+                parents_by_key[key] = row
+        child_counts = {}
+        for row in rows:
+            if row.get("kind") == "playlist" or row.get("is_playlist_child"):
+                continue
+            key = self._playlist_key_for_row(row)
+            parent = parents_by_key.get(key)
+            if not parent:
+                continue
+            parent_id = parent.get("id")
+            child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
+            row["parent_playlist_id"] = parent_id
+            row["is_playlist_child"] = True
+            row["playlist_child_index"] = child_counts[parent_id]
+            row["playlist_key"] = key
+
     def _handle_primary_action(self):
-        # Right-side button is download-only; analysis is triggered by paste /
-        # Enter in the URL field.
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
+        current_url = self.url_input.text().strip()
+        if current_url:
+            row_index = self._first_visible_analyzed_row_index_for_url(current_url)
+            if row_index < 0:
+                self._start_analysis(auto_download=True)
+                return
+            if self._selected_row_can_download():
+                self._start_download()
+                return
+            self.select_row(row_index)
+            self._start_download()
+            return
         self._start_download()
 
     def _paste_and_analyze(self):
         text = QApplication.clipboard().text().strip()
         if text:
             self.url_input.setText(text)
-            self._start_analysis()
+            self._refresh_primary_action()
 
     def _refresh_url_trailing(self):
         has_text = bool(self.url_input.text().strip())
         self.paste_button.setVisible(not has_text)
         self.clear_url_button.setVisible(has_text)
 
-    def _start_analysis(self):
+    def _start_analysis(self, auto_download=False):
         if self.analysis_thread and self.analysis_thread.isRunning():
             return
 
@@ -763,39 +900,15 @@ class ClipFlowWindow(QMainWindow):
 
         self.analysis = None
         self.selected_row_index = -1
+        self._analysis_auto_download = bool(auto_download)
+        self._playlist_event_candidates = []
+        self._playlist_event_parent_id = ""
         self.primary_button.setEnabled(False)
-        self.primary_button.set_loading(True)
-        self._set_status("분석 중")
+        self.primary_button.set_loading(False)
+        self._set_status(ANALYZING_STATUS)
 
-        self._analyzing_row = {
-            "id": "__analyzing__",
-            "kind": "video",
-            "candidate": {
-                "display_title": url,
-                "title": url,
-                "thumbnail": "",
-                "duration": 0,
-                "sort_bytes": 0,
-                "output_ext": "mp4",
-                "ext": "mp4",
-                "resolution": "",
-            },
-            "qualities": [],
-            "quality_options": [],
-            "selected_index": 0,
-            "selected_format_index": 0,
-            "analysis_source_url": url,
-            "source_url": url,
-            "input_url": url,
-            "status": "분석 중",
-            "status_detail": "",
-            "progress": 0,
-            "progress_text": "분석 중",
-            "output_path": "",
-            "messages": [],
-            "created_order": self._next_row_sequence(),
-        }
-        self.rows = [self._analyzing_row] + self.rows
+        loading_rows = self._analysis_loading_rows(url)
+        self.rows = loading_rows + [row for row in self.rows if not self._is_analysis_loading_row(row)]
         self._render_rows()
 
         self.analysis_thread = QThread(self)
@@ -816,6 +929,121 @@ class ClipFlowWindow(QMainWindow):
         self.analysis_thread.finished.connect(self._analysis_thread_finished)
         self.analysis_thread.start()
 
+    def _analysis_loading_rows(self, url):
+        if engine.looks_like_playlist_url(url):
+            parent = self._find_playlist_parent_for_url(url)
+            if parent and not self._playlist_children_for_parent(parent):
+                parent["analysis_loading"] = True
+                parent["expanded"] = True
+                parent["status"] = ANALYZING_STATUS
+                parent["progress_text"] = ANALYZING_STATUS
+            else:
+                parent = self._playlist_parent_loading_row(url)
+            child = self._playlist_child_loading_row(parent["id"], url)
+            self._playlist_event_parent_id = parent["id"]
+            return [parent, child]
+        return [self._single_analysis_loading_row(url)]
+
+    def _single_analysis_loading_row(self, url):
+        return {
+            "id": "__analyzing__",
+            "kind": "video",
+            "candidate": self._placeholder_candidate(url),
+            "qualities": [],
+            "quality_options": [],
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": ANALYZING_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": ANALYZING_STATUS,
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+            "analysis_loading": True,
+        }
+
+    def _playlist_parent_loading_row(self, url):
+        created_order = self._next_row_sequence()
+        parent_id = f"playlist-loading-{created_order}"
+        candidate = self._placeholder_candidate(url)
+        candidate.update(
+            {
+                "id": parent_id,
+                "media_type": "playlist",
+                "format_selector": "bestvideo*+bestaudio/best",
+                "item_count": 0,
+                "playlist_count": 0,
+                "source": url,
+                "webpage_url": url,
+            }
+        )
+        return {
+            "id": parent_id,
+            "kind": "playlist",
+            "candidate": candidate,
+            "qualities": [candidate],
+            "quality_options": build_quality_options([candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "playlist_entries": [],
+            "expanded": True,
+            "analysis_loading": True,
+        }
+
+    def _playlist_child_loading_row(self, parent_id, url):
+        return {
+            "id": f"{parent_id}-loading",
+            "kind": "video",
+            "candidate": self._placeholder_candidate(url),
+            "qualities": [],
+            "quality_options": [],
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": ANALYZING_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": ANALYZING_STATUS,
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+            "parent_playlist_id": parent_id,
+            "is_playlist_child": True,
+            "child_loading": True,
+            "analysis_loading": True,
+            "playlist_child_index": 0,
+        }
+
+    def _placeholder_candidate(self, url):
+        output_ext = self._preferred_output_ext()
+        return {
+            "id": "loading",
+            "display_title": url,
+            "title": url,
+            "thumbnail": "",
+            "duration": 0,
+            "sort_bytes": 0,
+            "output_ext": output_ext,
+            "ext": output_ext,
+            "resolution": "",
+        }
+
     @Slot(dict)
     def _analysis_finished(self, analysis):
         self.analysis = analysis
@@ -827,10 +1055,22 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_footer()
         for warning in analysis.get("warnings") or []:
             self.event_messages.append(str(warning))
+        if self._analysis_auto_download and self.rows:
+            self._analysis_auto_download = False
+            row_index = self._first_visible_analyzed_row_index_for_url(source_url)
+            self.selected_row_index = row_index if row_index >= 0 else 0
+            self._refresh_row_selection()
+            QTimer.singleShot(0, self._start_download)
 
     @Slot(str)
     def _analysis_failed(self, message):
         message = engine.strip_ansi(message)
+        self._analysis_auto_download = False
+        for row in self.rows:
+            if row.get("kind") == "playlist" and row.get("analysis_loading") and not row.get("child_loading"):
+                row["analysis_loading"] = False
+                row["status"] = ERROR_STATUS
+                row["progress_text"] = ""
         self._set_status(f"{engine.classify_error(message)}: {message}")
 
     @Slot()
@@ -838,78 +1078,264 @@ class ClipFlowWindow(QMainWindow):
         self.primary_button.set_loading(False)
         self.analysis_thread = None
         self.analysis_worker = None
-        if any(row.get("id") == "__analyzing__" for row in self.rows):
-            self.rows = [row for row in self.rows if row.get("id") != "__analyzing__"]
+        if any(self._is_analysis_loading_row(row) for row in self.rows):
+            self.rows = [row for row in self.rows if not self._is_analysis_loading_row(row)]
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
         self._refresh_primary_action()
 
+    def _is_analysis_loading_row(self, row):
+        return bool(row.get("analysis_loading")) or row.get("id") == "__analyzing__" or bool(row.get("child_loading"))
+
     def _prepend_analysis_rows(self, analysis, grouped_rows, source_url):
+        self.rows = self._dedupe_playlist_parent_rows(self.rows)
         preserved_rows = [
             row
             for row in self.rows
             if self._should_preserve_existing_row(row)
         ]
         if analysis.get("is_playlist"):
-            playlist_candidate = self._playlist_candidate_from_analysis(analysis, grouped_rows, source_url)
-            self.rows = [
-                {
-                    "id": "playlist",
-                    "kind": "playlist",
-                    "candidate": playlist_candidate,
-                    "qualities": [playlist_candidate],
-                    "quality_options": build_quality_options([playlist_candidate]),
-                    "selected_index": 0,
-                    "selected_format_index": 0,
-                    "analysis_source_url": source_url,
-                    "source_url": source_url,
-                    "input_url": analysis.get("url") or source_url,
-                    "status": "준비",
-                    "status_detail": "",
-                    "progress": 0,
-                    "progress_text": "",
-                    "output_path": "",
-                    "messages": [],
-                    "created_order": self._next_row_sequence(),
-                    "playlist_entries": grouped_rows,
-                    "expanded": False,
-                }
-            ] + preserved_rows
+            existing_parent = self._find_playlist_parent_for_analysis(analysis, source_url)
+            if existing_parent:
+                if any(not child.get("child_loading") for child in self._playlist_children_for_parent(existing_parent)):
+                    self._finalize_progressive_playlist_rows(existing_parent, analysis, grouped_rows, source_url)
+                    self._sort_rows()
+                    self.selected_row_index = self.rows.index(existing_parent)
+                    self._render_rows()
+                    return
+                self._update_playlist_rows(existing_parent, analysis, grouped_rows, source_url)
+                self._sort_rows()
+                self.selected_row_index = self.rows.index(existing_parent)
+                self._render_rows()
+                return
+            parent = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url)
+            children = self._playlist_child_rows_from_grouped(parent, grouped_rows, analysis, source_url)
+            self.rows = [parent] + children + preserved_rows
             self._sort_rows()
             self.selected_row_index = 0 if self.rows else -1
             self._render_rows()
             return
         new_rows = []
         for grouped_row in grouped_rows:
-            candidate = grouped_row["candidate"]
-            row = {
-                "id": grouped_row.get("id"),
-                "kind": row_kind(candidate),
-                "candidate": candidate,
-                "qualities": grouped_row["qualities"],
-                "quality_options": build_quality_options(grouped_row["qualities"]),
-                "selected_index": 0,
-                "selected_format_index": 0,
-                "analysis_source_url": source_url,
-                "source_url": source_url or row_source_url(analysis, candidate),
-                "input_url": analysis.get("url") or source_url,
-                "status": "준비",
-                "status_detail": "",
-                "progress": 0,
-                "progress_text": "",
-                "output_path": "",
-                "messages": [],
-                "created_order": self._next_row_sequence(),
-            }
-            new_rows.append(row)
+            new_rows.append(self._video_row_from_grouped(grouped_row, analysis, source_url))
         self.rows = new_rows + preserved_rows
         self._sort_rows()
         self.selected_row_index = 0 if self.rows else -1
         self._render_rows()
 
+    def _playlist_parent_row_from_analysis(self, analysis, grouped_rows, source_url, parent_id=None):
+        created_order = self._next_row_sequence()
+        parent_id = parent_id or f"playlist-{created_order}"
+        playlist_candidate = self._playlist_candidate_from_analysis(analysis, grouped_rows, source_url)
+        playlist_candidate["id"] = parent_id
+        return {
+            "id": parent_id,
+            "kind": "playlist",
+            "candidate": playlist_candidate,
+            "qualities": [playlist_candidate],
+            "quality_options": build_quality_options([playlist_candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": source_url,
+            "source_url": source_url,
+            "input_url": analysis.get("url") or source_url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "playlist_entries": grouped_rows,
+            "expanded": True,
+            "playlist_key": self._playlist_key(analysis.get("url") or source_url),
+        }
+
+    def _playlist_child_rows_from_grouped(self, parent, grouped_rows, analysis, source_url):
+        children = []
+        for index, grouped_row in enumerate(grouped_rows, start=1):
+            child = self._video_row_from_grouped(grouped_row, analysis, source_url)
+            child["id"] = f"{parent['id']}-child-{index}"
+            child["parent_playlist_id"] = parent["id"]
+            child["is_playlist_child"] = True
+            child["playlist_child_index"] = index
+            child["playlist_key"] = parent.get("playlist_key")
+            child["source_url"] = row_source_url(analysis, child.get("candidate") or {}) or child.get("source_url") or source_url
+            children.append(child)
+        return children
+
+    def _find_playlist_parent_for_analysis(self, analysis, source_url):
+        return self._find_playlist_parent_for_url(analysis.get("url") or source_url)
+
+    def _find_playlist_parent_for_url(self, url):
+        key = self._playlist_key(url)
+        if not key:
+            return None
+        for row in self.rows:
+            if row.get("kind") == "playlist" and self._playlist_key_for_row(row) == key:
+                return row
+        return None
+
+    def _update_playlist_rows(self, parent, analysis, grouped_rows, source_url):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        replacement = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url, parent_id=parent_id)
+        replacement["created_order"] = parent.get("created_order") or replacement.get("created_order")
+        replacement["expanded"] = parent.get("expanded", True)
+        parent.clear()
+        parent.update(replacement)
+        existing_children = {
+            self._row_media_identity(row): row
+            for row in self.rows
+            if row.get("parent_playlist_id") == parent_id
+        }
+        children = []
+        for child in self._playlist_child_rows_from_grouped(parent, grouped_rows, analysis, source_url):
+            existing = existing_children.get(self._row_media_identity(child))
+            if existing:
+                child["id"] = existing.get("id") or child.get("id")
+                child["created_order"] = existing.get("created_order") or child.get("created_order")
+                if existing.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
+                    for key in ("status", "status_detail", "progress", "progress_text", "output_path", "messages", "download_started_at"):
+                        child[key] = existing.get(key, child.get(key))
+                child["widget"] = existing.get("widget")
+            children.append(child)
+        self.rows = [row for row in self.rows if row.get("parent_playlist_id") != parent_id]
+        insert_index = self.rows.index(parent) + 1 if parent in self.rows else 0
+        for child in reversed(children):
+            self.rows.insert(insert_index, child)
+
+    def _finalize_progressive_playlist_rows(self, parent, analysis, grouped_rows, source_url):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        replacement = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url, parent_id=parent_id)
+        replacement["created_order"] = parent.get("created_order") or replacement.get("created_order")
+        replacement["expanded"] = parent.get("expanded", True)
+        replacement["widget"] = parent.get("widget")
+        replacement["render_widget"] = parent.get("render_widget")
+        parent.clear()
+        parent.update(replacement)
+        parent["analysis_loading"] = False
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row.get("parent_playlist_id") == parent_id and row.get("child_loading"))
+        ]
+        self._refresh_playlist_parent_status(parent)
+
+    def _playlist_key(self, url):
+        return engine.playlist_identity_key(url)
+
+    def _playlist_key_for_row(self, row):
+        if not row:
+            return ""
+        candidate = row.get("candidate") or {}
+        return (
+            row.get("playlist_key")
+            or self._playlist_key(row.get("input_url") or "")
+            or self._playlist_key(row.get("analysis_source_url") or "")
+            or self._playlist_key(row.get("source_url") or "")
+            or self._playlist_key(candidate.get("webpage_url") or "")
+            or self._playlist_key(candidate.get("url") or "")
+            or self._playlist_key(candidate.get("source") or "")
+        )
+
+    def _playlist_group_key_for_row(self, row):
+        if not isinstance(row, dict):
+            return ""
+        key = self._playlist_key_for_row(row)
+        if key:
+            return key
+        candidate = row.get("candidate") or {}
+        return str(
+            row.get("analysis_source_url")
+            or row.get("source_url")
+            or row.get("input_url")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or candidate.get("source")
+            or ""
+        ).strip()
+
+    def _dedupe_playlist_parent_rows(self, rows):
+        keep_by_key = {}
+        key_by_parent_id = {}
+        replace_parent_ids = {}
+        duplicate_parent_ids = set()
+        for row in rows:
+            if row.get("kind") != "playlist":
+                continue
+            key = self._playlist_group_key_for_row(row)
+            if not key:
+                continue
+            row["playlist_key"] = key
+            row_id = row.get("id")
+            if row_id:
+                key_by_parent_id[row_id] = key
+            current = keep_by_key.get(key)
+            if current is None or int(row.get("created_order") or 0) >= int(current.get("created_order") or 0):
+                if current and current.get("id"):
+                    duplicate_parent_ids.add(current.get("id"))
+                    replace_parent_ids[current.get("id")] = row_id
+                keep_by_key[key] = row
+            else:
+                if row_id:
+                    duplicate_parent_ids.add(row_id)
+                    replace_parent_ids[row_id] = current.get("id")
+        if not duplicate_parent_ids:
+            return rows
+        deduped = []
+        for row in rows:
+            if row.get("kind") == "playlist" and row.get("id") in duplicate_parent_ids:
+                continue
+            parent_id = row.get("parent_playlist_id")
+            replacement_id = replace_parent_ids.get(parent_id)
+            if replacement_id:
+                row["parent_playlist_id"] = replacement_id
+                row["playlist_key"] = key_by_parent_id.get(replacement_id) or row.get("playlist_key") or ""
+            deduped.append(row)
+        return deduped
+
+    def _row_media_identity(self, row):
+        candidate = row.get("candidate") or {}
+        return (
+            candidate.get("source")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or row.get("source_url")
+            or row.get("id")
+            or ""
+        )
+
+    def _video_row_from_grouped(self, grouped_row, analysis, source_url):
+        candidate = grouped_row["candidate"]
+        return {
+            "id": grouped_row.get("id"),
+            "kind": row_kind(candidate),
+            "candidate": candidate,
+            "qualities": grouped_row["qualities"],
+            "quality_options": build_quality_options(grouped_row["qualities"]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": source_url,
+            "source_url": source_url or row_source_url(analysis, candidate),
+            "input_url": analysis.get("url") or source_url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+        }
+
     def _should_preserve_existing_row(self, row):
-        if row.get("status") in {"완료", "다운로드 중", "대기"}:
+        if self._is_analysis_loading_row(row):
+            return False
+        if row.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
             return True
         return self._row_is_downloading(row) or row in self.queued_download_rows
 
@@ -937,42 +1363,193 @@ class ClipFlowWindow(QMainWindow):
             "source": source_url,
             "url": source_url,
             "webpage_url": source_url,
-            "output_ext": self.current_preferences().output_format if self.current_preferences().output_format != "자동" else DEFAULT_OUTPUT_EXT.lower(),
-            "ext": self.current_preferences().output_format if self.current_preferences().output_format != "자동" else DEFAULT_OUTPUT_EXT.lower(),
+            "output_ext": self._preferred_output_ext(),
+            "ext": self._preferred_output_ext(),
         }
+
+    def _preferred_output_ext(self):
+        output_ext = self.current_preferences().output_format
+        if str(output_ext).casefold() == AUTO_LABEL.casefold():
+            output_ext = DEFAULT_OUTPUT_EXT
+        return str(output_ext or DEFAULT_OUTPUT_EXT).lower()
+
+    def _row_is_visible(self, row):
+        if not row.get("is_playlist_child"):
+            return True
+        parent = self._parent_playlist_for_child(row)
+        return bool(parent and parent.get("expanded"))
+
+    def _parent_playlist_for_child(self, child_row):
+        parent_id = child_row.get("parent_playlist_id")
+        if not parent_id:
+            return None
+        for row in self.rows:
+            if row.get("id") == parent_id:
+                return row
+        return None
+
+    def _visible_rows(self):
+        return [row for row in self.rows if self._row_is_visible(row)]
 
     def _render_rows(self):
         self._sort_rows()
-        while self.row_layout.count() > 1:
-            item = self.row_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
+        row_widgets = []
         for row in self.rows:
-            widget = DownloadRowWidget(self, row)
-            row["widget"] = widget
+            widget = row.get("widget")
+            if widget is None:
+                widget = DownloadRowWidget(self, row)
+                row["widget"] = widget
+            else:
+                widget.refresh()
             widget.set_select_mode(self.select_mode)
-            self.row_layout.insertWidget(self.row_layout.count() - 1, widget)
+            render_widget = self._row_render_widget(row, widget)
+            row_widgets.append((row, widget, render_widget))
+
+        expected_widgets = {render_widget for _row, _widget, render_widget in row_widgets}
+        existing_widgets = []
+        for index in range(self.row_layout.count() - 1):
+            item = self.row_layout.itemAt(index)
+            widget = item.widget() if item else None
+            if widget:
+                existing_widgets.append(widget)
+        for widget in existing_widgets:
+            if widget in expected_widgets:
+                continue
+            self.row_layout.removeWidget(widget)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+
+        for index, (row, widget, render_widget) in enumerate(row_widgets):
+            current_index = self.row_layout.indexOf(render_widget)
+            if current_index != index:
+                if current_index >= 0:
+                    self.row_layout.removeWidget(render_widget)
+                self.row_layout.insertWidget(index, render_widget)
+            visible = self._row_is_visible(row)
+            render_widget.setVisible(visible)
+            widget.setVisible(visible)
+        visible_rows = self._visible_rows()
         self.count_label.setText(f"{len(self.rows)}개")
         if hasattr(self, "empty_state"):
             self.empty_state.setGeometry(self.scroll_area.viewport().rect())
-            self.empty_state.setVisible(not self.rows)
-            if not self.rows:
+            self.empty_state.setVisible(not visible_rows)
+            if not visible_rows:
                 self.empty_state.raise_()
         self._refresh_footer()
         self._refresh_row_selection()
         self._refresh_primary_action()
         self._refresh_playlist_float_button()
 
+    def _row_render_widget(self, row, widget):
+        if not row.get("is_playlist_child"):
+            row["render_widget"] = widget
+            return widget
+        container = row.get("render_widget")
+        if container is None or container is widget:
+            container = QWidget()
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(28, 0, 0, 0)
+            layout.setSpacing(0)
+            layout.addWidget(widget)
+            row["render_widget"] = container
+        return container
+
     def playlist_expansion_changed(self, row):
-        widget = row.get("widget") if isinstance(row, dict) else None
-        if widget:
-            widget.updateGeometry()
+        self._sync_row_layout_geometry()
+        before_top = self._row_viewport_top(row)
+        if isinstance(row, dict) and not row.get("expanded"):
+            selected = self.rows[self.selected_row_index] if 0 <= self.selected_row_index < len(self.rows) else None
+            if selected and selected.get("parent_playlist_id") == row.get("id"):
+                self.selected_row_index = self.rows.index(row)
+        if self._playlist_parent_needs_child_analysis(row):
+            source_url = self._playlist_source_url(row)
+            row["expanded"] = True
+            self.url_input.setText(source_url)
+            self._start_analysis(auto_download=False)
+            return
+        if self._set_playlist_child_visibility(row):
+            self._sync_row_layout_geometry()
+            self._refresh_footer()
+            self._refresh_row_selection()
+            self._refresh_primary_action()
+            self._refresh_playlist_float_button()
+        else:
+            self._render_rows()
+        self._restore_row_viewport_top(row, before_top)
         QTimer.singleShot(0, self._refresh_playlist_float_button)
+
+    def _playlist_parent_needs_child_analysis(self, row):
+        if not isinstance(row, dict) or row.get("kind") != "playlist":
+            return False
+        if row.get("analysis_loading") or self.analysis_thread:
+            return False
+        if self._playlist_children_for_parent(row):
+            return False
+        return bool(self._playlist_source_url(row))
+
+    def _playlist_source_url(self, row):
+        if not isinstance(row, dict):
+            return ""
+        candidate = row.get("candidate") or {}
+        return str(
+            row.get("analysis_source_url")
+            or row.get("source_url")
+            or row.get("input_url")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or candidate.get("source")
+            or ""
+        ).strip()
+
+    def _set_playlist_child_visibility(self, row):
+        if not isinstance(row, dict) or row.get("kind") != "playlist":
+            return False
+        children = self._playlist_children_for_parent(row)
+        if not children:
+            return True
+        render_widgets = []
+        for child in children:
+            render_widget = child.get("render_widget") or child.get("widget")
+            if render_widget is None or self.row_layout.indexOf(render_widget) < 0:
+                return False
+            render_widgets.append(render_widget)
+        visible = bool(row.get("expanded"))
+        for child, render_widget in zip(children, render_widgets):
+            render_widget.setVisible(visible)
+            widget = child.get("widget")
+            if widget and widget is not render_widget:
+                widget.setVisible(visible)
+        return True
+
+    def _sync_row_layout_geometry(self):
+        if not hasattr(self, "row_layout") or not hasattr(self, "row_container"):
+            return
+        self.row_layout.activate()
+        self.row_container.adjustSize()
+        self.row_container.updateGeometry()
+
+    def _row_viewport_top(self, row):
+        widget = (row.get("render_widget") or row.get("widget")) if isinstance(row, dict) else None
+        if not widget:
+            return None
+        return widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
+
+    def _restore_row_viewport_top(self, row, before_top):
+        if before_top is None:
+            return
+        after_top = self._row_viewport_top(row)
+        if after_top is None:
+            return
+        delta = after_top - before_top
+        if not delta:
+            return
+        bar = self.scroll_area.verticalScrollBar()
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + delta)))
 
     def _expanded_playlist_row(self):
         for row in self.rows:
-            if row.get("kind") == "playlist" and row.get("expanded"):
+            if row.get("kind") == "playlist" and row.get("expanded") and row.get("widget"):
                 return row
         return None
 
@@ -993,6 +1570,14 @@ class ClipFlowWindow(QMainWindow):
         if widget:
             top = widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
             bottom = top + widget.height()
+            child_widgets = [
+                child.get("widget")
+                for child in self.rows
+                if child.get("parent_playlist_id") == row.get("id") and child.get("widget")
+            ]
+            for child_widget in child_widgets:
+                child_top = child_widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
+                bottom = max(bottom, child_top + child_widget.height())
             visible = top < 4 and bottom > 0
         self.playlist_float_button.setVisible(visible)
         if visible:
@@ -1011,10 +1596,7 @@ class ClipFlowWindow(QMainWindow):
         if not row:
             return
         row["expanded"] = False
-        widget = row.get("widget")
-        if widget:
-            widget._refresh_playlist_detail()
-            widget.updateGeometry()
+        self._render_rows()
         self._scroll_row_to_top(row)
         self._refresh_playlist_float_button()
 
@@ -1024,10 +1606,35 @@ class ClipFlowWindow(QMainWindow):
 
     def _sort_rows(self):
         reverse = bool(self.sort_desc)
+        top_rows = []
+        child_rows = []
+        parent_ids = set()
+        for row in self.rows:
+            if row.get("is_playlist_child"):
+                child_rows.append(row)
+            else:
+                top_rows.append(row)
+                parent_ids.add(row.get("id"))
+        attached_children = {parent_id: [] for parent_id in parent_ids}
+        orphan_children = []
+        for row in child_rows:
+            parent_id = row.get("parent_playlist_id")
+            if parent_id in attached_children:
+                attached_children[parent_id].append(row)
+            else:
+                orphan_children.append(row)
+        top_rows.extend(orphan_children)
         if self.sort_key == "name":
-            self.rows.sort(key=lambda row: self._row_sort_name(row), reverse=reverse)
+            top_rows.sort(key=lambda row: self._row_sort_name(row), reverse=reverse)
         else:
-            self.rows.sort(key=lambda row: int(row.get("created_order") or 0), reverse=reverse)
+            top_rows.sort(key=lambda row: int(row.get("created_order") or 0), reverse=reverse)
+        sorted_rows = []
+        for row in top_rows:
+            sorted_rows.append(row)
+            children = attached_children.get(row.get("id")) or []
+            children.sort(key=lambda child: (int(child.get("playlist_child_index") or 0), int(child.get("created_order") or 0)))
+            sorted_rows.extend(children)
+        self.rows = sorted_rows
 
     def _row_sort_name(self, row):
         candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
@@ -1118,7 +1725,7 @@ class ClipFlowWindow(QMainWindow):
             candidate = dict(row.get("candidate") or {})
             preferences = self.current_preferences()
             output_format = preferences.output_format
-            if str(output_format).casefold() == "자동".casefold():
+            if str(output_format).casefold() == AUTO_LABEL.casefold():
                 output_format = DEFAULT_OUTPUT_EXT
             candidate["output_ext"] = str(output_format).lower()
             candidate["ext"] = str(output_format).lower()
@@ -1152,6 +1759,9 @@ class ClipFlowWindow(QMainWindow):
     def start_download_for_row(self, row):
         if row not in self.rows:
             return
+        if row.get("kind") == "playlist":
+            self._start_playlist_children_downloads(row)
+            return
         candidate = self.selected_candidate_for_row_ref(row)
         if not candidate:
             self._set_status("다운로드할 항목을 선택하세요")
@@ -1179,10 +1789,75 @@ class ClipFlowWindow(QMainWindow):
 
         self._begin_download(row, candidate)
 
+    def _playlist_children_for_parent(self, parent):
+        parent_id = parent.get("id")
+        return [row for row in self.rows if row.get("parent_playlist_id") == parent_id]
+
+    def _start_playlist_children_downloads(self, parent):
+        children = self._playlist_children_for_parent(parent)
+        if not children:
+            self._set_status("재생목록 하위 항목이 없습니다")
+            return
+        started = 0
+        for child in children:
+            if child.get("child_loading") or child.get("status") == ERROR_STATUS:
+                continue
+            before_active = len(self.active_downloads)
+            before_queued = len(self.queued_download_rows)
+            if child.get("status") not in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
+                child["status"] = DOWNLOAD_STATUS
+                child["progress"] = 0
+                child["progress_text"] = "0%"
+                widget = child.get("widget")
+                if widget:
+                    widget.set_status(DOWNLOAD_STATUS)
+                    widget.set_progress(0, "0%")
+            self.start_download_for_row(child)
+            if len(self.active_downloads) != before_active or len(self.queued_download_rows) != before_queued:
+                started += 1
+        self._refresh_playlist_parent_status(parent)
+        self._set_status(DOWNLOAD_STATUS if started else "다운로드할 새 항목이 없습니다")
+
+    def _refresh_playlist_parent_status(self, parent):
+        children = self._playlist_children_for_parent(parent)
+        if not children:
+            return
+        total = len(children)
+        completed = sum(1 for row in children if row.get("status") == COMPLETED_STATUS)
+        active = sum(1 for row in children if row.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS})
+        failed = sum(1 for row in children if row.get("status") == ERROR_STATUS)
+        progress = int(sum(engine.safe_int(row.get("progress")) for row in children) / total)
+        if completed == total:
+            status = COMPLETED_STATUS
+            detail = ""
+            progress = 100
+            progress_text = ""
+        elif active:
+            status = DOWNLOAD_STATUS
+            detail = f"{completed}/{total}"
+            progress_text = f"{progress}%"
+        elif failed:
+            status = ERROR_STATUS
+            detail = f"{completed}/{total}"
+            progress_text = f"{progress}%"
+        else:
+            status = READY_STATUS
+            detail = f"{completed}/{total}" if completed else ""
+            progress_text = ""
+        parent["status"] = status
+        parent["status_detail"] = detail
+        parent["progress"] = progress
+        parent["progress_text"] = progress_text
+        widget = parent.get("widget")
+        if widget:
+            widget.set_status(status, detail)
+            widget.set_progress(progress, progress_text)
+
     def _begin_download(self, row, candidate=None):
         candidate = candidate or self.selected_candidate_for_row_ref(row)
         if not candidate:
             return
+        self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
         row["download_started_at"] = time.time()
@@ -1197,7 +1872,7 @@ class ClipFlowWindow(QMainWindow):
         worker = DownloadWorker(
             page_url,
             candidate,
-            engine.output_dir_for_candidate(candidate, self.folder_input.text()),
+            self._output_dir_for_row(row, candidate),
             cookie_source_from_display(self.cookie_combo.currentText()),
             self.download_func,
         )
@@ -1235,7 +1910,57 @@ class ClipFlowWindow(QMainWindow):
             and not engine.output_is_too_small_for_candidate(output_path, candidate)
         ):
             return output_path
-        return engine.existing_output_path_for_candidate(candidate, self.folder_input.text())
+        row_output_dir = self._output_dir_for_row(row, candidate)
+        existing = engine.existing_output_path_for_candidate(candidate, row_output_dir)
+        if existing:
+            return existing
+        return None
+
+    def _output_dir_for_row(self, row, candidate):
+        if row and row.get("is_playlist_child"):
+            parent = self._parent_playlist_for_child(row)
+            if parent:
+                return engine.output_dir_for_candidate(parent.get("candidate") or {}, self.folder_input.text())
+        return engine.output_dir_for_candidate(candidate, self.folder_input.text())
+
+    def _existing_playlist_child_output(self, row, candidate, output_dir):
+        output_dir = Path(output_dir).expanduser()
+        if not output_dir.exists():
+            return None
+        keys = self._playlist_child_title_keys(candidate)
+        if not keys:
+            return None
+        preferred_ext = str((candidate or {}).get("output_ext") or (candidate or {}).get("ext") or "").lower()
+        extensions = [ext for ext in [preferred_ext, "mp4", "webm", "m4a", "mp3"] if ext]
+        for ext in dict.fromkeys(extensions):
+            for path in output_dir.glob(f"*.{ext}"):
+                path_key = self._playlist_child_title_key(path.stem)
+                if any(key and (key in path_key or path_key in key) for key in keys):
+                    if engine.completed_output_exists(path, candidate):
+                        return path
+        return None
+
+    def _playlist_child_title_keys(self, candidate):
+        values = [
+            (candidate or {}).get("display_title"),
+            (candidate or {}).get("title"),
+            (candidate or {}).get("alt_title"),
+        ]
+        keys = []
+        for value in values:
+            key = self._playlist_child_title_key(value)
+            if key:
+                keys.append(key)
+            if " - " in str(value or ""):
+                suffix_key = self._playlist_child_title_key(str(value).split(" - ", 1)[1])
+                if suffix_key:
+                    keys.append(suffix_key)
+        return list(dict.fromkeys(keys))
+
+    def _playlist_child_title_key(self, value):
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        text = re.sub(r"^\s*\d+\s*-\s*", "", text)
+        return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
 
     def _mark_existing_output(self, row, output_path):
         row["output_path"] = str(output_path)
@@ -1250,6 +1975,7 @@ class ClipFlowWindow(QMainWindow):
         self._set_status(f"이미 파일 있음: {Path(output_path).name}")
         self._refresh_primary_action()
         self._refresh_footer()
+        self._refresh_parent_for_child(row)
 
     @Slot(dict)
     def _download_finished(self, result):
@@ -1339,7 +2065,23 @@ class ClipFlowWindow(QMainWindow):
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
+        if row:
+            self._refresh_parent_for_child(row)
         self._start_queued_downloads()
+        if not self.active_downloads and not self.queued_download_rows:
+            self._refresh_all_playlist_parent_statuses()
+
+    def _refresh_parent_for_child(self, row):
+        if not row or not row.get("parent_playlist_id"):
+            return
+        parent = self._parent_playlist_for_child(row)
+        if parent:
+            self._refresh_playlist_parent_status(parent)
+
+    def _refresh_all_playlist_parent_statuses(self):
+        for row in self.rows:
+            if row.get("kind") == "playlist":
+                self._refresh_playlist_parent_status(row)
 
     def _start_queued_downloads(self):
         while self.queued_download_rows and len(self.active_downloads) < DOWNLOAD_CONCURRENCY:
@@ -1362,6 +2104,9 @@ class ClipFlowWindow(QMainWindow):
     @Slot(dict)
     def _handle_analysis_event(self, event):
         event_type = event.get("type")
+        if event_type in {"playlist_parent", "playlist_entry", "playlist_entry_loading", "playlist_complete", "playlist_failed_entry"}:
+            self._handle_playlist_analysis_event(event)
+            return
         message = event.get("message") or event.get("path") or ""
         if event_type in {"progress", "status"}:
             self.status_label.setText(message or "분석 중")
@@ -1369,6 +2114,218 @@ class ClipFlowWindow(QMainWindow):
                 self.event_messages.append(message)
         elif event_type in {"log", "done", "file"} and message:
             self.event_messages.append(message)
+
+    def _handle_playlist_analysis_event(self, event):
+        event_type = event.get("type")
+        parent = self._ensure_playlist_event_parent(event)
+        if not parent:
+            return
+        if event_type == "playlist_entry_loading":
+            self._ensure_playlist_loading_child(parent, event.get("index"), event.get("title"), event.get("source_url") or event.get("url"))
+            self._render_rows()
+            return
+        if event_type == "playlist_entry":
+            self._replace_playlist_loading_with_entry(parent, event)
+            self._render_rows()
+            return
+        if event_type == "playlist_failed_entry":
+            self._replace_playlist_loading_with_failed_entry(parent, event)
+            self._render_rows()
+            return
+        if event_type == "playlist_complete":
+            self.rows = [
+                row
+                for row in self.rows
+                if not (row.get("parent_playlist_id") == parent.get("id") and row.get("child_loading"))
+            ]
+            parent["analysis_loading"] = False
+            parent["playlist_entries"] = [
+                {"candidate": row.get("candidate") or {}, "qualities": row.get("qualities") or []}
+                for row in self._playlist_children_for_parent(parent)
+                if not row.get("child_loading")
+            ]
+            self._refresh_playlist_parent_status(parent)
+            self._render_rows()
+            return
+        self._ensure_playlist_loading_child(parent, event.get("index"), event.get("title"), event.get("source_url") or event.get("url"))
+        self._render_rows()
+
+    def _ensure_playlist_event_parent(self, event):
+        source_url = event.get("source_url") or event.get("url") or self.url_input.text().strip()
+        parent = self._find_row_by_id(self._playlist_event_parent_id)
+        if not parent:
+            parent = next((row for row in self.rows if row.get("kind") == "playlist" and row.get("analysis_loading")), None)
+        if not parent:
+            parent = self._playlist_parent_loading_row(source_url)
+            self.rows = [parent] + [row for row in self.rows if not self._is_analysis_loading_row(row)]
+        self._playlist_event_parent_id = parent.get("id") or ""
+        if event.get("type") == "playlist_parent":
+            title = event.get("title") or source_url
+            count = engine.safe_int(event.get("count"))
+            parent["candidate"].update(
+                {
+                    "title": title,
+                    "display_title": title,
+                    "item_count": count,
+                    "playlist_count": count,
+                    "source": source_url,
+                    "url": source_url,
+                    "webpage_url": source_url,
+                }
+            )
+            parent["analysis_source_url"] = source_url
+            parent["source_url"] = source_url
+            parent["input_url"] = event.get("input_url") or source_url
+        parent.setdefault("expanded", True)
+        return parent
+
+    def _ensure_playlist_loading_child(self, parent, index=None, title=None, source_url=None):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        child_index = engine.safe_int(index) or 0
+        existing = next((row for row in self.rows if row.get("parent_playlist_id") == parent_id and row.get("child_loading")), None)
+        if existing:
+            if child_index:
+                existing["playlist_child_index"] = child_index
+            if title:
+                existing["candidate"]["title"] = title
+                existing["candidate"]["display_title"] = title
+            if source_url:
+                existing["source_url"] = source_url
+                existing["analysis_source_url"] = source_url
+                existing["input_url"] = source_url
+            return
+        source_url = source_url or parent.get("analysis_source_url") or parent.get("source_url") or self.url_input.text().strip()
+        loading = self._playlist_child_loading_row(parent_id, source_url)
+        if child_index:
+            loading["playlist_child_index"] = child_index
+        if title:
+            loading["candidate"]["title"] = title
+            loading["candidate"]["display_title"] = title
+        children = self._playlist_children_for_parent(parent)
+        insert_index = (self.rows.index(children[-1]) + 1) if children else (self.rows.index(parent) + 1 if parent in self.rows else len(self.rows))
+        self.rows.insert(insert_index, loading)
+
+    def _replace_playlist_loading_with_entry(self, parent, event):
+        candidates = event.get("candidates") if isinstance(event.get("candidates"), list) else None
+        if candidates is None:
+            candidate = event.get("candidate") if isinstance(event.get("candidate"), dict) else None
+            candidates = [candidate] if candidate else []
+        candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+        if not candidates:
+            return
+        self._playlist_event_candidates.extend(candidates)
+        analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
+        source_url = event.get("source_url") or event.get("url") or analysis.get("webpage_url") or parent.get("analysis_source_url") or parent.get("source_url") or self.url_input.text().strip()
+        grouped = presenter.group_candidates(candidates)
+        children = self._playlist_child_rows_from_grouped(parent, grouped, analysis or {"url": source_url, "webpage_url": source_url}, source_url)
+        child_index = engine.safe_int(event.get("index")) or self._next_playlist_child_index(parent)
+        for offset, child in enumerate(children):
+            index = child_index + offset
+            child["id"] = f"{parent['id']}-child-{index}"
+            child["playlist_child_index"] = index
+        self._replace_playlist_loading_rows(parent, child_index, children)
+        self._ensure_next_playlist_loading(parent, child_index)
+
+    def _replace_playlist_loading_with_failed_entry(self, parent, event):
+        child_index = engine.safe_int(event.get("index")) or self._next_playlist_child_index(parent)
+        source_url = event.get("source_url") or event.get("url") or parent.get("analysis_source_url") or parent.get("source_url") or self.url_input.text().strip()
+        title = event.get("title") or source_url or f"Video {child_index}"
+        candidate = self._placeholder_candidate(source_url)
+        candidate.update({"id": f"{parent['id']}-failed-{child_index}", "title": title, "display_title": title, "source": source_url, "url": source_url, "webpage_url": source_url})
+        failed = {
+            "id": f"{parent['id']}-failed-{child_index}",
+            "kind": "video",
+            "candidate": candidate,
+            "qualities": [candidate],
+            "quality_options": build_quality_options([candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": source_url,
+            "source_url": source_url,
+            "input_url": source_url,
+            "status": ERROR_STATUS,
+            "status_detail": str(event.get("message") or event.get("error") or ""),
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [str(event.get("message") or event.get("error") or "")],
+            "created_order": self._next_row_sequence(),
+            "parent_playlist_id": parent["id"],
+            "is_playlist_child": True,
+            "playlist_child_index": child_index,
+            "playlist_key": parent.get("playlist_key"),
+        }
+        self._replace_playlist_loading_rows(parent, child_index, [failed])
+        self._ensure_next_playlist_loading(parent, child_index)
+
+    def _next_playlist_child_index(self, parent):
+        indices = [engine.safe_int(row.get("playlist_child_index")) for row in self._playlist_children_for_parent(parent)]
+        return (max(indices) if indices else 0) + 1
+
+    def _replace_playlist_loading_rows(self, parent, child_index, replacement_rows):
+        parent_id = parent.get("id")
+        loading_rows = [
+            row for row in self.rows
+            if row.get("parent_playlist_id") == parent_id and row.get("child_loading")
+        ]
+        target = next((row for row in loading_rows if engine.safe_int(row.get("playlist_child_index")) == child_index), None) or (loading_rows[0] if loading_rows else None)
+        insert_index = self.rows.index(target) if target in self.rows else self._playlist_child_insert_index(parent, child_index)
+        if target in self.rows:
+            self.rows.remove(target)
+        existing_ids = {row.get("id") for row in replacement_rows}
+        self.rows = [
+            row for row in self.rows
+            if not (row.get("parent_playlist_id") == parent_id and engine.safe_int(row.get("playlist_child_index")) == child_index and not row.get("child_loading") and row.get("id") not in existing_ids)
+        ]
+        insert_index = min(insert_index, len(self.rows))
+        for row in reversed(replacement_rows):
+            self.rows.insert(insert_index, row)
+
+    def _playlist_child_insert_index(self, parent, child_index):
+        insert_index = self.rows.index(parent) + 1 if parent in self.rows else len(self.rows)
+        for index, row in enumerate(self.rows):
+            if row.get("parent_playlist_id") != parent.get("id"):
+                continue
+            if engine.safe_int(row.get("playlist_child_index")) < child_index:
+                insert_index = index + 1
+        return insert_index
+
+    def _ensure_next_playlist_loading(self, parent, child_index):
+        count = engine.safe_int((parent.get("candidate") or {}).get("playlist_count") or (parent.get("candidate") or {}).get("item_count"))
+        next_index = child_index + 1
+        if count and next_index > count:
+            return
+        self._ensure_playlist_loading_child(parent, next_index)
+
+    def _replace_playlist_children(self, parent, grouped_rows, source_url, keep_loading=False):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        loading_rows = [
+            row
+            for row in self.rows
+            if keep_loading and row.get("parent_playlist_id") == parent_id and row.get("child_loading")
+        ]
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row.get("parent_playlist_id") == parent_id and not row.get("child_loading"))
+            and not (row.get("parent_playlist_id") == parent_id and row.get("child_loading"))
+        ]
+        children = self._playlist_child_rows_from_grouped(parent, grouped_rows, {"url": source_url, "webpage_url": source_url}, source_url)
+        insert_index = self.rows.index(parent) + 1 if parent in self.rows else len(self.rows)
+        for row in reversed(children + loading_rows):
+            self.rows.insert(insert_index, row)
+
+    def _find_row_by_id(self, row_id):
+        if not row_id:
+            return None
+        for row in self.rows:
+            if row.get("id") == row_id:
+                return row
+        return None
 
     def _handle_engine_event_for(self, row, event):
         event_type = event.get("type")
@@ -1460,7 +2417,14 @@ class ClipFlowWindow(QMainWindow):
             return
         if row in self.rows:
             index = self.rows.index(row)
-            self.rows.pop(index)
+            if row.get("kind") == "playlist":
+                parent_id = row.get("id")
+                self.rows = [
+                    item for item in self.rows
+                    if item is not row and item.get("parent_playlist_id") != parent_id
+                ]
+            else:
+                self.rows.pop(index)
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
@@ -1557,13 +2521,9 @@ class ClipFlowWindow(QMainWindow):
     def delete_file_for_row(self, row):
         if row.get("status") == "다운로드 중":
             return
-        if row.get("kind") == "playlist":
-            output_path = engine.output_dir_for_candidate(row.get("candidate") or {}, self.folder_input.text())
-        else:
-            saved_output = row.get("output_path") or ""
-            if not saved_output:
-                return
-            output_path = Path(saved_output)
+        output_path = self._delete_target_for_row(row)
+        if output_path is None:
+            return
         if not output_path.exists():
             return
         confirmed = (
@@ -1574,21 +2534,72 @@ class ClipFlowWindow(QMainWindow):
         if not confirmed:
             return
         try:
-            if output_path.is_dir():
-                for child in output_path.iterdir():
-                    if child.is_file():
-                        child.unlink()
+            if row.get("kind") == "playlist":
+                self._delete_playlist_output_files(row, output_path)
+            elif output_path.is_dir():
                 output_path.rmdir()
             else:
                 output_path.unlink()
         except OSError as exc:
             QMessageBox.warning(self, "파일 삭제 실패", str(exc))
             return
-        row["output_path"] = ""
-        widget = row.get("widget")
-        if widget:
-            widget._refresh_actions()
+        self._remove_rows_after_file_delete(row)
         self._save_completed_history()
+
+    def _delete_target_for_row(self, row):
+        if row.get("kind") == "playlist":
+            return engine.output_dir_for_candidate(row.get("candidate") or {}, self.folder_input.text())
+        saved_output = row.get("output_path") or ""
+        if saved_output:
+            return Path(saved_output)
+        candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        return self._existing_output_path_for_row(row, candidate)
+
+    def _delete_playlist_output_files(self, row, playlist_dir):
+        playlist_dir = Path(playlist_dir).expanduser()
+        paths = []
+        for child in self._playlist_children_for_parent(row):
+            saved_output = child.get("output_path") or ""
+            if saved_output:
+                path = Path(saved_output).expanduser()
+            else:
+                path = engine.existing_output_path_for_candidate(child.get("candidate") or {}, playlist_dir)
+            if path and path.exists() and path.is_file():
+                try:
+                    path.relative_to(playlist_dir)
+                except ValueError:
+                    continue
+                paths.append(path)
+        for path in dict.fromkeys(paths):
+            path.unlink()
+        save_folder = Path(self.folder_input.text()).expanduser().resolve()
+        if playlist_dir.exists() and playlist_dir.resolve() != save_folder:
+            try:
+                playlist_dir.rmdir()
+            except OSError:
+                pass
+
+    def _remove_rows_after_file_delete(self, row):
+        if row.get("kind") == "playlist":
+            parent_id = row.get("id")
+            self.rows = [
+                item for item in self.rows
+                if item is not row and item.get("parent_playlist_id") != parent_id
+            ]
+        else:
+            parent = self._parent_playlist_for_child(row)
+            if row in self.rows:
+                self.rows.remove(row)
+            if parent:
+                parent["playlist_entries"] = [
+                    {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
+                    for child in self._playlist_children_for_parent(parent)
+                    if child is not row and not child.get("child_loading")
+                ]
+                self._refresh_playlist_parent_status(parent)
+        if self.selected_row_index >= len(self.rows):
+            self.selected_row_index = len(self.rows) - 1
+        self._render_rows()
 
     def _create_delete_confirm_dialog(self, output_path):
         return DeleteConfirmDialog(output_path, self)
@@ -1599,14 +2610,44 @@ class ClipFlowWindow(QMainWindow):
 
     def _refresh_primary_action(self):
         self._refresh_url_trailing()
-        has_target = 0 <= self.selected_row_index < len(self.rows)
+        has_target = 0 <= self.selected_row_index < len(self.rows) and self._row_is_visible(self.rows[self.selected_row_index])
         if has_target:
-            has_target = self.rows[self.selected_row_index].get("status") != "분석 중"
+            has_target = self.rows[self.selected_row_index].get("status") != ANALYZING_STATUS
+        has_url = bool(self.url_input.text().strip())
         analyzing = bool(self.analysis_thread and self.analysis_thread.isRunning())
-        self.primary_button.setEnabled(has_target and not analyzing)
+        self.primary_button.setEnabled((has_target or has_url) and not analyzing)
+
+    def _first_visible_analyzed_row_index_for_url(self, url):
+        url = str(url or "").strip()
+        if not url:
+            return -1
+        playlist_key = self._playlist_key(url)
+        for index, row in enumerate(self.rows):
+            if not self._row_is_visible(row) or self._is_analysis_loading_row(row):
+                continue
+            if row.get("status") == ANALYZING_STATUS:
+                continue
+            if playlist_key and row.get("kind") == "playlist" and self._playlist_key_for_row(row) == playlist_key:
+                return index
+            row_urls = {
+                str(row.get("analysis_source_url") or "").strip(),
+                str(row.get("source_url") or "").strip(),
+                str(row.get("input_url") or "").strip(),
+            }
+            if url in row_urls:
+                return index
+        return -1
+
+    def _selected_row_can_download(self):
+        if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
+            return False
+        row = self.rows[self.selected_row_index]
+        return self._row_is_visible(row) and not self._is_analysis_loading_row(row) and row.get("status") != ANALYZING_STATUS
 
     def _selected_row_matches_current_url(self):
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
+            return False
+        if not self._row_is_visible(self.rows[self.selected_row_index]):
             return False
         current_url = self.url_input.text().strip()
         if not current_url:

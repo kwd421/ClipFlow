@@ -82,7 +82,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "1080-60")
 
-    def test_select_candidate_auto_format_uses_best_original_video_candidate(self):
+    def test_select_candidate_auto_format_prefers_best_mp4_video_candidate(self):
         candidates = [
             {"id": "mp4-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},
             {"id": "webm-1440", "output_ext": "webm", "height": 1440, "fps": 30, "vcodec": "vp9", "sort_bytes": 240},
@@ -94,7 +94,33 @@ class CandidatePresenterTests(unittest.TestCase):
             presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동"),
         )
 
-        self.assertEqual(selected["id"], "webm-1440")
+        self.assertEqual(selected["id"], "mp4-1080")
+
+    def test_select_candidate_auto_format_prefers_h264_mp4_over_higher_av1_mp4(self):
+        candidates = [
+            {"id": "mp4-av1-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "av01", "acodec": "none", "sort_bytes": 300},
+            {"id": "mp4-h264-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "mp4-h264-1080")
+
+    def test_select_candidate_prefers_direct_https_over_manifest_at_same_quality(self):
+        candidates = [
+            {"id": "hls-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 50_000_000, "is_manifest": True, "protocol": "m3u8_native"},
+            {"id": "direct-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 40_000_000, "is_manifest": False, "protocol": "https"},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="?먮룞", frame_rate="?먮룞"),
+        )
+
+        self.assertEqual(selected["id"], "direct-1080")
 
     def test_select_candidate_uses_same_family_format_fallback(self):
         candidates = [

@@ -103,6 +103,26 @@ def _codec_name(candidate):
     return codec.upper()
 
 
+def _stable_video_codec_score(candidate):
+    codec = _codec_name(candidate)
+    if codec == "H264":
+        return 3
+    if codec == "H265":
+        return 2
+    if codec in {"VP9", "AV1"}:
+        return 1
+    return 0
+
+
+def _stable_audio_codec_score(candidate):
+    codec = str(candidate.get("acodec") or "").lower()
+    if codec.startswith(("mp4a", "aac")):
+        return 2
+    if codec and codec not in {"none", "unknown"}:
+        return 1
+    return 0
+
+
 def _target_height(quality):
     text = str(quality or "").strip().lower()
     if text in {"", "자동", "auto"}:
@@ -143,8 +163,9 @@ def _best_candidate(candidates, preferences):
         fps = engine.safe_int(candidate.get("fps"))
         size = engine.safe_int(candidate.get("sort_bytes"))
         codec = _codec_name(candidate)
-        codec_score = 1 if codec_auto or codec == target_codec else 0
-        return (codec_score, height, fps, size)
+        codec_score = _stable_video_codec_score(candidate) if codec_auto else (1 if codec == target_codec else 0)
+        direct_score = 0 if candidate.get("is_manifest") else 1
+        return (codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
 
     return max(candidates, key=score) if candidates else None
 
@@ -159,7 +180,12 @@ def select_candidate_for_preferences(candidates, preferences):
         if _candidate_family(candidate) == family and _normalized_format(candidate) in allowed_formats
     ]
     if _is_auto(preferences.output_format):
-        return _best_candidate(family_candidates, preferences)
+        preferred_video = [
+            candidate
+            for candidate in family_candidates
+            if family == "video" and _normalized_format(candidate) == VIDEO_FORMATS[0]
+        ]
+        return _best_candidate(preferred_video, preferences) or _best_candidate(family_candidates, preferences)
     for output_format in _format_order(preferences.output_format):
         matching = [
             candidate
