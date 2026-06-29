@@ -144,6 +144,11 @@ class RowActionOverlay(QFrame):
     visible seam or colour shift, leaving only the action icons on top.
     """
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
@@ -172,7 +177,7 @@ class DownloadRowWidget(QFrame):
         self.setProperty("hovered", "false")
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
-        self.setMinimumHeight(72)
+        self.setFixedHeight(72)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._build()
         self.refresh()
@@ -285,26 +290,26 @@ class DownloadRowWidget(QFrame):
         self.actions_widget.setObjectName("ActionOverlay")
         self.actions_widget.setMinimumWidth(ACTIONS_WIDTH)
         actions = QHBoxLayout(self.actions_widget)
-        actions.setContentsMargins(24, 0, 16, 0)
+        actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(4)
-        actions.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        actions.setAlignment(Qt.AlignCenter)
 
-        self.open_folder_button = LucideIconButton("folder", size=34, icon_size=20)
+        self.open_folder_button = LucideIconButton("folder", size=38, icon_size=22)
         self.open_folder_button.setToolTip("폴더 열기")
         self.open_folder_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_folder_button)
 
-        self.remove_button = LucideIconButton("x", size=34, icon_size=20)
+        self.remove_button = LucideIconButton("x", size=38, icon_size=22)
         self.remove_button.setToolTip("목록에서 삭제")
         self.remove_button.clicked.connect(self._remove_row)
         actions.addWidget(self.remove_button)
 
-        self.delete_file_button = LucideIconButton("trash-2", size=34, icon_size=20, danger=True)
+        self.delete_file_button = LucideIconButton("trash-2", size=38, icon_size=22, danger=True)
         self.delete_file_button.setToolTip("파일 삭제")
         self.delete_file_button.clicked.connect(self._delete_file)
         actions.addWidget(self.delete_file_button)
 
-        self.more_button = LucideIconButton("more-vertical", size=34, icon_size=20)
+        self.more_button = LucideIconButton("more-vertical", size=38, icon_size=22)
         self.more_button.setToolTip("더보기")
         actions.addWidget(self.more_button)
         self.actions_widget.hide()

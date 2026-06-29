@@ -118,7 +118,7 @@ QWidget#RowContainer {{
     background: transparent;
 }}
 QFrame#ActionOverlay {{
-    background: {SURFACE};
+    background: transparent;
     border: none;
 }}
 QFrame#ThumbBox {{
@@ -430,6 +430,15 @@ QScrollBar::handle:vertical {{
 }}
 QScrollBar::handle:vertical:hover {{
     background: {MUTED_SOFT};
+}}
+QScrollBar[scrollable="false"]:vertical {{
+    background: transparent;
+}}
+QScrollBar[scrollable="false"]::handle:vertical {{
+    background: transparent;
+}}
+QScrollBar[scrollable="false"]::handle:vertical:hover {{
+    background: transparent;
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;

@@ -1240,14 +1240,46 @@ print(Path(url.toLocalFile()) == Path(tempdir.name).resolve())
 print("QDesktopServices.openUrl" in inspect.getsource(clipflow_qt.ClipFlowWindow._open_path))
 print(("os." + "startfile") in source)
 print(("xdg" + "-open") in source)
-print(("explorer" + ".exe") in source)
 print(("Path." + "home(") in source)
 tempdir.cleanup()
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "False", "False", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "False", "False"])
+
+    def test_clipflow_qt_file_view_reveals_completed_file_instead_of_parent_only(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+opened = []
+revealed = []
+window = ClipFlowWindow()
+window._set_save_folder(tempdir.name)
+window._open_path = lambda path: opened.append(Path(path))
+window._reveal_in_file_manager = lambda path: revealed.append(Path(path))
+output = Path(tempdir.name) / "Video.mp4"
+output.write_bytes(b"video")
+row = {
+    "kind": "video",
+    "candidate": {"title": "Video", "source": "https://media.test/video", "url": "https://media.test/video"},
+    "output_path": str(output),
+    "status": "완료",
+}
+window.open_folder_for_row(row)
+print(revealed == [output])
+print(opened)
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "[]"])
 
     def test_clipflow_qt_delete_file_confirms_and_deletes_resolved_download_output(self):
         script = r'''
@@ -1864,6 +1896,87 @@ print(QColor(pixmap.toImage().pixelColor(0, 0)).name().upper() == theme.SURFACE_
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True"])
 
+    def test_clipflow_qt_scrollbar_space_is_reserved_but_handle_appears_only_when_scrollable(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 760)
+window.show()
+app.processEvents()
+bar = window.scroll_area.verticalScrollBar()
+print(window.scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOn)
+print(bar.property("scrollable"))
+
+for index in range(14):
+    candidate = {
+        "id": f"row-{index}",
+        "title": f"Video {index}",
+        "display_title": f"Video {index}",
+        "source": f"https://media.test/{index}",
+        "url": f"https://media.test/{index}",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "duration": 60,
+        "sort_bytes": 10,
+    }
+    window.rows.append({
+        "id": f"row-{index}",
+        "kind": "video",
+        "candidate": candidate,
+        "qualities": [candidate],
+        "quality_options": [],
+        "selected_index": 0,
+        "selected_format_index": 0,
+        "analysis_source_url": candidate["url"],
+        "source_url": candidate["url"],
+        "status": READY_STATUS,
+        "status_detail": "",
+        "progress": 0,
+        "progress_text": "",
+        "output_path": "",
+        "messages": [],
+        "created_order": index + 1,
+    })
+window._render_rows()
+app.processEvents()
+print(bar.maximum() > 0)
+print(bar.property("scrollable"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "false", "True", "true"])
+
+    def test_clipflow_qt_action_overlay_does_not_paint_over_right_rounded_corner(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication, QWidget
+from tools.clipflow_theme import APP_STYLE
+from tools.clipflow_rows import RowActionOverlay
+
+app = QApplication([])
+app.setStyleSheet(APP_STYLE)
+parent = QWidget()
+overlay = RowActionOverlay(parent)
+overlay.resize(160, 70)
+pixmap = QPixmap(160, 70)
+pixmap.fill(QColor(0, 0, 0, 0))
+overlay.render(pixmap, QPoint(0, 0))
+top_right = pixmap.toImage().pixelColor(159, 0)
+bottom_right = pixmap.toImage().pixelColor(159, 69)
+print(top_right.alpha())
+print(bottom_right.alpha())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0", "0"])
+
     def test_clipflow_qt_row_selection_has_no_visible_selected_state(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
@@ -2190,6 +2303,7 @@ opened = []
 window = ClipFlowWindow()
 window._set_save_folder(tempdir.name)
 window._open_path = lambda path: opened.append(Path(path))
+window._reveal_in_file_manager = lambda path: opened.append(Path(path))
 row = {
     "kind": "playlist",
     "candidate": {"media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "output_ext": "mp4"},
@@ -3818,6 +3932,68 @@ print(abs(after_expand - after_collapse) <= 2)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+
+    def test_clipflow_qt_playlist_toggle_keeps_parent_row_height_stable(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/steady-height"
+
+def fake_analysis():
+    candidates = []
+    for index in range(12):
+        candidates.append({
+            "id": str(index),
+            "source": f"https://media.test/watch/{index}",
+            "url": f"https://media.test/watch/{index}",
+            "title": f"Video {index}",
+            "display_title": f"Video {index}",
+            "thumbnail": "",
+            "ext": "mp4",
+            "output_ext": "mp4",
+            "resolution": "1080p",
+            "height": 1080,
+            "duration": 60,
+            "sort_bytes": 10,
+        })
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Steady Height",
+        "playlist_title": "Steady Height",
+        "is_playlist": True,
+        "playlist_count": len(candidates),
+        "candidates": candidates,
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 760)
+window.show()
+app.processEvents()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+app.processEvents()
+row = next(row for row in window.rows if row.get("kind") == "playlist")
+height_open = row["widget"].height()
+row["expanded"] = False
+window.playlist_expansion_changed(row)
+app.processEvents()
+height_closed = row["widget"].height()
+row["expanded"] = True
+window.playlist_expansion_changed(row)
+app.processEvents()
+height_reopened = row["widget"].height()
+print(height_open)
+print(height_closed)
+print(height_reopened)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["72", "72", "72"])
 
     def test_clipflow_qt_long_titles_use_marquee_label(self):
         script = r'''

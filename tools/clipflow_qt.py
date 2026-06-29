@@ -538,6 +538,7 @@ class ClipFlowWindow(QMainWindow):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._refresh_playlist_float_button)
+        self.scroll_area.verticalScrollBar().rangeChanged.connect(self._refresh_scrollbar_activity)
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
@@ -545,6 +546,7 @@ class ClipFlowWindow(QMainWindow):
         self.row_layout.setSpacing(10)
         self.row_layout.addStretch(1)
         self.scroll_area.setWidget(self.row_container)
+        self._refresh_scrollbar_activity()
         self.scroll_area.viewport().installEventFilter(self)
         self.playlist_float_button = QPushButton("접기", self.scroll_area.viewport())
         self.playlist_float_button.setObjectName("FloatingButton")
@@ -1543,6 +1545,19 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_row_selection()
         self._refresh_primary_action()
         self._refresh_playlist_float_button()
+        self._refresh_scrollbar_activity()
+
+    def _refresh_scrollbar_activity(self, *_args):
+        if not hasattr(self, "scroll_area"):
+            return
+        bar = self.scroll_area.verticalScrollBar()
+        scrollable = "true" if bar.maximum() > bar.minimum() else "false"
+        if bar.property("scrollable") == scrollable:
+            return
+        bar.setProperty("scrollable", scrollable)
+        bar.style().unpolish(bar)
+        bar.style().polish(bar)
+        bar.update()
 
     def _row_render_widget(self, row, widget):
         if not row.get("is_playlist_child"):
@@ -2484,28 +2499,43 @@ class ClipFlowWindow(QMainWindow):
             self.open_url_func(source_url)
 
     def open_folder_for_row(self, row):
+        reveal_target = None
+        open_target = None
         if row.get("kind") == "playlist":
             candidate = row.get("candidate") or {}
             playlist_folder = engine.output_dir_for_candidate(candidate, self.folder_input.text())
             if playlist_folder.exists():
-                target = playlist_folder
+                reveal_target = playlist_folder
             else:
-                target = self._first_playlist_output_parent(row) or Path(self.folder_input.text()).expanduser()
+                open_target = self._first_playlist_output_parent(row) or Path(self.folder_input.text()).expanduser()
         else:
             saved_output = row.get("output_path") or ""
             output_path = Path(saved_output)
             if saved_output and output_path.exists():
-                target = output_path.parent
+                reveal_target = output_path
             else:
-                target = Path(self.folder_input.text()).expanduser()
-        target.mkdir(parents=True, exist_ok=True)
-        self._open_path(target)
+                candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+                existing_output = self._existing_output_path_for_row(row, candidate)
+                reveal_target = existing_output if existing_output and existing_output.exists() else None
+                open_target = Path(self.folder_input.text()).expanduser()
+        if reveal_target:
+            self._reveal_in_file_manager(reveal_target)
+            return
+        open_target = open_target or Path(self.folder_input.text()).expanduser()
+        open_target.mkdir(parents=True, exist_ok=True)
+        self._open_path(open_target)
 
     def _reveal_in_file_manager(self, path):
         path = Path(path)
         if sys.platform == "darwin":
             try:
                 subprocess.run(["open", "-R", str(path)], check=False)
+                return
+            except Exception:
+                pass
+        if sys.platform.startswith("win") and path.exists():
+            try:
+                subprocess.Popen(["explorer.exe", f"/select,{path.resolve()}"])
                 return
             except Exception:
                 pass
