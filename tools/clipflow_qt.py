@@ -7,6 +7,7 @@ from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -685,6 +686,63 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 row["status_detail"] = message
                 row["progress_text"] = message
         self._set_status(f"{engine.classify_error(message)}: {message}")
+        self._maybe_prompt_macos_cookie_permission(message)
+
+    def _maybe_prompt_macos_cookie_permission(self, message):
+        """On macOS, if a browser-cookie read failed (typically because the app
+        lacks Full Disk Access), explain why and offer to open the settings pane."""
+        if sys.platform != "darwin":
+            return
+        if getattr(self, "_cookie_permission_prompt_shown", False):
+            return
+        source = cookie_source_from_display(self.cookie_combo.currentText())
+        if not engine.cookie_spec(source):
+            return
+        text = str(message or "").lower()
+        if "cookie" not in text:
+            return
+        if not any(token in text for token in ("could not find", "database", "permission", "decrypt", "blocked", "denied", "access")):
+            return
+        self._cookie_permission_prompt_shown = True
+        self._show_macos_cookie_permission_dialog()
+
+    def _show_macos_cookie_permission_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("쿠키 접근 권한 필요")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        title = QLabel("로그인이 필요한 항목이에요")
+        title.setObjectName("SectionTitle")
+        title.setWordWrap(True)
+        detail = QLabel(
+            "비공개·로그인 전용 영상이나 재생목록은 브라우저의 로그인 쿠키가 필요해요.\n"
+            "macOS에서는 ClipFlow가 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 있어야 합니다.\n\n"
+            "‘전체 디스크 접근 열기’를 누른 뒤 목록에서 이 앱(터미널에서 실행했다면 터미널)을 켜고, "
+            "다시 다운로드를 시도하세요."
+        )
+        detail.setObjectName("MetaText")
+        detail.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        later = QPushButton("나중에")
+        later.setObjectName("SecondaryButton")
+        later.setCursor(Qt.PointingHandCursor)
+        open_button = QPushButton("전체 디스크 접근 열기")
+        open_button.setCursor(Qt.PointingHandCursor)
+        later.clicked.connect(dialog.reject)
+        open_button.clicked.connect(lambda: (self._open_full_disk_access_settings(), dialog.accept()))
+        buttons.addWidget(later)
+        buttons.addWidget(open_button)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def _open_full_disk_access_settings(self):
+        QDesktopServices.openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
 
     @Slot()
     def _analysis_thread_finished(self):

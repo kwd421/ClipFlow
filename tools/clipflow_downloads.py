@@ -416,6 +416,7 @@ class DownloadMixin:
                 widget.set_status("오류", message)
                 widget.set_progress(0, "")
         self._set_status(f"{engine.classify_error(message)}: {message}")
+        self._maybe_prompt_macos_cookie_permission(message)
 
     def _handle_thread_finished(self, thread):
         row = next(
