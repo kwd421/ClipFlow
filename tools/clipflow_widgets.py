@@ -6,6 +6,7 @@ from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
+from shiboken6 import isValid
 
 try:
     from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
@@ -355,6 +356,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self.favicon_url = ""
 
     def _favicon_finished(self, reply, domain, favicon_url):
+        if not isValid(self):
+            reply.deleteLater()
+            return
         if reply is not self._reply:
             reply.deleteLater()
             return
@@ -377,6 +381,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             reply.deleteLater()
 
     def _icon_page_finished(self, reply, page_url):
+        if not isValid(self):
+            reply.deleteLater()
+            return
         if reply is not self._reply:
             reply.deleteLater()
             return

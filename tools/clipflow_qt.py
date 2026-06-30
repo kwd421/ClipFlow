@@ -552,9 +552,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if self._analysis_auto_download and self.rows:
             self._analysis_auto_download = False
             row_index = self._first_visible_analyzed_row_index_for_url(source_url)
-            self.selected_row_index = row_index if row_index >= 0 else 0
+            target_row = self.rows[row_index] if row_index >= 0 else self.rows[0]
+            self.selected_row_index = self.rows.index(target_row)
             self._refresh_row_selection()
-            QTimer.singleShot(0, self._start_download)
+            # Bind the resolved row object (not the shared selected index, which a
+            # subsequent analysis can reset to -1 before this timer fires).
+            QTimer.singleShot(0, lambda r=target_row: self.start_download_for_row(r))
 
     @Slot(str)
     def _analysis_failed(self, message):
@@ -690,7 +693,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             percent = max(0, min(100, int(float(event.get("percent") or 0))))
             text = self._progress_text(percent, message)
             if widget:
-                widget.set_status("다운로드 중")
+                # Avoid the heavy set_status() on every progress tick (it does
+                # spinner/visibility work + a filesystem stat in _refresh_actions).
+                # Status is already "다운로드 중" from _begin_download; only assert
+                # it once if it somehow drifted.
+                if row.get("status") != DOWNLOAD_STATUS:
+                    widget.set_status(DOWNLOAD_STATUS)
                 widget.set_progress(percent, text)
             if hasattr(self, "status_label"):
                 self.status_label.setText(text or "다운로드 중")

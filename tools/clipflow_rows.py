@@ -510,7 +510,9 @@ class DownloadRowWidget(QFrame):
         self.setProperty("progressValue", str(bounded if active else 0))
         self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
-        self._repolish()
+        # A repaint is enough for the painted progress ring; avoid a full style
+        # unpolish/polish on every progress tick (called dozens of times/sec).
+        self.update()
 
     def paintEvent(self, event):
         super().paintEvent(event)

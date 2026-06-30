@@ -981,13 +981,22 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
 
 
 def progress_hook(on_event=None):
+    last_emit = [0.0]
+
     def hook(data):
         status = data.get("status")
         if status == "downloading":
             downloaded = data.get("downloaded_bytes") or 0
             total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+            percent = max(0, min(100, downloaded * 100 / total)) if total else 0
+            # Throttle to ~10 events/sec. yt-dlp fires this callback dozens of
+            # times per second; with concurrent downloads the cross-thread signal
+            # flood can starve the UI thread. Always let the final tick through.
+            now = time.monotonic()
+            if percent < 100 and now - last_emit[0] < 0.1:
+                return
+            last_emit[0] = now
             if total:
-                percent = max(0, min(100, downloaded * 100 / total))
                 speed = (data.get("_speed_str") or "").strip()
                 eta = (data.get("_eta_str") or "").strip()
                 emit_event(on_event, "progress", percent=percent, message=f"{percent:.1f}% {speed} ETA {eta}".strip())
