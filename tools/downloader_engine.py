@@ -1118,6 +1118,7 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
 
 def progress_hook(on_event=None):
     last_emit = [0.0]
+    unknown_total_reported = [False]
 
     def hook(data):
         status = data.get("status")
@@ -1147,9 +1148,13 @@ def progress_hook(on_event=None):
                     eta_text=eta,
                     message=f"{percent:.1f}% {speed} ETA {eta}".strip(),
                 )
+                unknown_total_reported[0] = False
             else:
-                emit_event(on_event, "status", message="Downloading")
+                if not unknown_total_reported[0]:
+                    emit_event(on_event, "status", message="Downloading")
+                    unknown_total_reported[0] = True
         elif status == "finished":
+            unknown_total_reported[0] = False
             emit_event(on_event, "status", message="Merging or converting MP4")
             if data.get("filename"):
                 emit_event(on_event, "file", path=data["filename"])
@@ -2036,12 +2041,17 @@ class DownloadProcessPool:
 
     def _trim_locked(self):
         now = time.monotonic()
-        survivors = []
+        alive = [
+            worker
+            for worker in self._idle
+            if worker.is_alive() and now - worker.last_used <= self.idle_seconds
+        ]
+        alive.sort(key=lambda worker: worker.last_used, reverse=True)
+        survivors = alive[:self.max_idle]
+        survivor_ids = {id(worker) for worker in survivors}
         for worker in self._idle:
-            if not worker.is_alive() or now - worker.last_used > self.idle_seconds or len(survivors) >= self.max_idle:
+            if id(worker) not in survivor_ids:
                 worker.close()
-            else:
-                survivors.append(worker)
         self._idle = survivors
 
     def warm(self):

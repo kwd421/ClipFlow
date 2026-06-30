@@ -578,6 +578,8 @@ class ThumbnailPlaceholder(QFrame):
         self._reply = None
         self._preview = None
         self._preview_label = None
+        self._preview_pixmap = QPixmap()
+        self._preview_pixmap_key = None
 
     @classmethod
     def network_manager(cls):
@@ -593,6 +595,8 @@ class ThumbnailPlaceholder(QFrame):
         self._pixmap = QPixmap()
         self._scaled_pixmap = QPixmap()
         self._scaled_target_size = QSize()
+        self._preview_pixmap = QPixmap()
+        self._preview_pixmap_key = None
         self.icon.show()
         if self._reply:
             self._reply.abort()
@@ -629,6 +633,8 @@ class ThumbnailPlaceholder(QFrame):
     def _set_pixmap(self, pixmap):
         self._scaled_pixmap = QPixmap()
         self._scaled_target_size = QSize()
+        self._preview_pixmap = QPixmap()
+        self._preview_pixmap_key = None
         if pixmap.isNull():
             self.icon.show()
             self.update()
@@ -689,7 +695,11 @@ class ThumbnailPlaceholder(QFrame):
             self._preview_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             preview_layout.addWidget(self._preview_label)
         self._preview_label.setFixedSize(width, height)
-        self._preview_label.setPixmap(_rounded_pixmap(self._pixmap, width, height, 12))
+        key = (self._pixmap.cacheKey(), width, height, 12)
+        if self._preview_pixmap.isNull() or self._preview_pixmap_key != key:
+            self._preview_pixmap = _rounded_pixmap(self._pixmap, width, height, 12)
+            self._preview_pixmap_key = key
+        self._preview_label.setPixmap(self._preview_pixmap)
         self._preview.adjustSize()
         anchor = self.mapToGlobal(QPoint((self.width() - width) // 2, -height - 10))
         self._preview.move(anchor)

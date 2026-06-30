@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+from collections import OrderedDict, deque
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon
@@ -74,6 +76,11 @@ __all__ = [
 ]
 
 
+EVENT_MESSAGE_LIMIT = 500
+DOWNLOAD_INFO_CACHE_LIMIT = 20
+DOWNLOAD_INFO_CACHE_TTL_SECONDS = 600.0
+
+
 class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, DownloadMixin, QMainWindow):
     def __init__(
         self,
@@ -144,13 +151,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.queued_download_rows = []
         self.selected_row_index = -1
         self.select_mode = False
-        self.event_messages = []
+        self.event_messages = deque(maxlen=EVENT_MESSAGE_LIMIT)
         self._clear_url_on_next_click = False
         self._row_sequence = 0
         self._analysis_auto_download = False
         self._analysis_url = ""
         self._queued_analysis_downloads = []
-        self._download_info_cache = {}
+        self._download_info_cache = OrderedDict()
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
         self.setWindowTitle(APP_NAME)
@@ -511,15 +518,47 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _remember_download_infos(self, analysis):
         if not isinstance(analysis, dict):
             return
+        now = time.monotonic()
+        self._trim_download_info_cache(now)
         infos = analysis.get("_download_infos")
         if isinstance(infos, dict):
-            self._download_info_cache.update({str(key): value for key, value in infos.items() if isinstance(value, dict)})
+            for key, value in infos.items():
+                if isinstance(value, dict):
+                    cache_key = str(key)
+                    self._download_info_cache[cache_key] = (now, value)
+                    self._download_info_cache.move_to_end(cache_key)
+        self._trim_download_info_cache(now)
+
+    def _trim_download_info_cache(self, now=None):
+        now = time.monotonic() if now is None else now
+        for key in list(self._download_info_cache.keys()):
+            cached = self._download_info_cache.get(key)
+            timestamp = cached[0] if isinstance(cached, tuple) and len(cached) == 2 else now
+            if now - timestamp > DOWNLOAD_INFO_CACHE_TTL_SECONDS:
+                self._download_info_cache.pop(key, None)
+        while len(self._download_info_cache) > DOWNLOAD_INFO_CACHE_LIMIT:
+            self._download_info_cache.popitem(last=False)
+
+    def _cached_download_info(self, key):
+        cached = self._download_info_cache.get(key)
+        if not cached:
+            return None
+        if isinstance(cached, tuple) and len(cached) == 2:
+            timestamp, value = cached
+        else:
+            timestamp, value = time.monotonic(), cached
+        if time.monotonic() - timestamp > DOWNLOAD_INFO_CACHE_TTL_SECONDS:
+            self._download_info_cache.pop(key, None)
+            return None
+        self._download_info_cache.move_to_end(key)
+        return value if isinstance(value, dict) else None
 
     def _candidate_for_download(self, row, candidate):
         prepared = dict(candidate or {})
         key = str(prepared.get("_download_info_key") or "")
-        if key and key in self._download_info_cache and engine.download_info_reuse_supported(prepared):
-            prepared["_download_info"] = self._download_info_cache[key]
+        cached_info = self._cached_download_info(key) if key else None
+        if cached_info and engine.download_info_reuse_supported(prepared):
+            prepared["_download_info"] = cached_info
         return prepared
 
     def _start_analysis(self, auto_download=False):
@@ -543,7 +582,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             try:
                 engine.warm_download_worker()
             except Exception as exc:
-                self.event_messages.append(f"Download worker warmup failed: {engine.strip_ansi(exc)}")
+                self._append_event_message(f"Download worker warmup failed: {engine.strip_ansi(exc)}")
 
         loading_rows = self._analysis_loading_rows(url)
         self.rows = loading_rows + [row for row in self.rows if not self._is_analysis_loading_row(row)]
@@ -629,7 +668,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._set_status(f"분석 완료: {len(grouped)}개")
         self._refresh_footer()
         for warning in analysis.get("warnings") or []:
-            self.event_messages.append(str(warning))
+            self._append_event_message(str(warning))
         if self._analysis_auto_download and self.rows:
             self._analysis_auto_download = False
             row_index = self._first_visible_analyzed_row_index_for_url(source_url)
@@ -739,9 +778,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if hasattr(self, "status_label"):
                 self.status_label.setText(message or "분석 중")
             if message:
-                self.event_messages.append(message)
+                self._append_event_message(message)
         elif event_type in {"log", "done", "file"} and message:
-            self.event_messages.append(message)
+            self._append_event_message(message)
 
     def _find_row_by_id(self, row_id):
         if not row_id:
@@ -795,10 +834,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if message:
                 if hasattr(self, "status_label"):
                     self.status_label.setText(message)
-                self.event_messages.append(message)
+                self._append_event_message(message)
         elif event_type in {"log", "done"}:
             if message:
-                self.event_messages.append(message)
+                self._append_event_message(message)
 
     def _progress_text(self, percent, event):
         if isinstance(event, dict):
@@ -877,6 +916,14 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _set_status(self, message):
         if hasattr(self, "status_label"):
             self.status_label.setText(message)
+        self._append_event_message(message)
+
+    def _append_event_message(self, message):
+        message = str(message or "")
+        if not message:
+            return
+        if self.event_messages and self.event_messages[-1] == message:
+            return
         self.event_messages.append(message)
 
 

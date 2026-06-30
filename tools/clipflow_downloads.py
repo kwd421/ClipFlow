@@ -332,7 +332,7 @@ class DownloadMixin:
         self._set_status("완료")
         output_dir = result.get("output_dir") if isinstance(result, dict) else None
         if output_dir:
-            self.event_messages.append(str(output_dir))
+            self._append_event_message(str(output_dir))
 
     def _resolve_finished_output_path(self, row, result):
         if not row:
