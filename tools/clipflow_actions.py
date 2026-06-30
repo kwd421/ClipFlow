@@ -69,7 +69,7 @@ class ActionMixin:
         path = Path(path)
         if sys.platform == "darwin":
             try:
-                subprocess.run(["open", "-R", str(path)], check=False)
+                subprocess.Popen(["open", "-R", str(path)])
                 return
             except Exception:
                 pass
@@ -102,8 +102,12 @@ class ActionMixin:
             self._render_rows()
             self._save_completed_history()
 
-    def _toggle_select_mode(self, checked):
-        self.select_mode = bool(checked)
+    def _toggle_select_mode(self, *_args):
+        self.select_mode = not getattr(self, "select_mode", False)
+        self.select_toggle.setText("완료" if self.select_mode else "선택")
+        self.select_toggle.setProperty("active", "true" if self.select_mode else "false")
+        self.select_toggle.style().unpolish(self.select_toggle)
+        self.select_toggle.style().polish(self.select_toggle)
         self.select_actions.setVisible(self.select_mode)
         if not self.select_mode:
             for row in self.rows:

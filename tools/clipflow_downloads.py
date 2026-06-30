@@ -36,6 +36,41 @@ class DownloadMixin:
             return
         self.start_download_for_row(self.rows[self.selected_row_index])
 
+    def extract_audio_for_row(self, row, audio_ext):
+        if row not in self.rows:
+            return
+        base = row.get("candidate") or {}
+        ext_lower = str(audio_ext).lower()
+        candidate = dict(base)
+        candidate["output_ext"] = audio_ext
+        candidate["ext"] = ext_lower
+        candidate["format_selector"] = "bestaudio/best"
+        candidate.pop("media_type", None)
+        order = self._next_row_sequence()
+        audio_row = {
+            "id": f"audio-{order}",
+            "kind": "video",
+            "candidate": candidate,
+            "qualities": [candidate],
+            "quality_options": build_quality_options([candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "fixed_candidate": True,
+            "analysis_source_url": row.get("analysis_source_url") or row.get("source_url") or "",
+            "source_url": row.get("source_url") or "",
+            "input_url": row.get("input_url") or row.get("source_url") or "",
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": order,
+        }
+        self.rows.insert(self.rows.index(row) + 1, audio_row)
+        self._render_rows()
+        self.start_download_for_row(audio_row)
+
     def start_download_for_row(self, row):
         if row not in self.rows:
             return

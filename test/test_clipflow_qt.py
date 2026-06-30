@@ -138,7 +138,7 @@ print(window.cookie_combo.show_arrow)
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["False", "True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["False", "True", "False"])
 
     def test_clipflow_qt_discovers_favicon_links_from_html(self):
         script = r'''
@@ -1889,7 +1889,7 @@ overlay.resize(160, 70)
 pixmap = QPixmap(160, 70)
 pixmap.fill(QColor(0, 0, 0, 0))
 overlay.render(pixmap, QPoint(0, 0))
-print(QColor(pixmap.toImage().pixelColor(0, 0)).name().upper() == theme.SURFACE_SOFT)
+print(QColor(pixmap.toImage().pixelColor(0, 35)).name().upper() == theme.SURFACE_SOFT)
 '''
         result = run_qt_script(script)
 

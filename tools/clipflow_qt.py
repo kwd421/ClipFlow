@@ -26,7 +26,7 @@ try:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from tools.clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
     from tools.clipflow_workers import AnalyzeWorker
     from tools.clipflow_dialogs import DeleteConfirmDialog
     from tools.clipflow_playlist import PlaylistMixin
@@ -43,7 +43,7 @@ except ImportError:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
     from clipflow_workers import AnalyzeWorker
     from clipflow_dialogs import DeleteConfirmDialog
     from clipflow_playlist import PlaylistMixin
@@ -224,7 +224,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.primary_button.setFixedSize(64, TOP_FIELD_HEIGHT)
         self.primary_button.setCursor(Qt.PointingHandCursor)
         self.primary_button.setToolTip("다운로드")
-        self.primary_button.setIcon(QIcon(lucide_pixmap("download", 18, theme.ON_ACCENT)))
+        download_icon = QIcon()
+        download_icon.addPixmap(lucide_pixmap("download", 18, theme.ON_ACCENT), QIcon.Normal)
+        download_icon.addPixmap(lucide_pixmap("download", 18, theme.MUTED), QIcon.Disabled)
+        self.primary_button.setIcon(download_icon)
         self.primary_button.setIconSize(QSize(18, 18))
         self.primary_button.clicked.connect(self._handle_primary_action)
 
@@ -239,6 +242,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
         self.cookie_combo = CleanComboBox("cookie")
         self.cookie_combo.addItems(COOKIE_DISPLAY_CHOICES)
+        self.cookie_combo.show_arrow = False
+        self.cookie_combo.text_alignment = Qt.AlignCenter
         self.cookie_combo.setFixedHeight(TOP_FIELD_HEIGHT)
         self.cookie_combo.setMinimumWidth(132)
         self.cookie_combo.setMaximumWidth(142)
@@ -276,18 +281,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        title = QLabel("다운로드 목록")
-        title.setObjectName("SectionTitle")
-        apply_tracking(title, -0.2)
         self.count_label = QLabel("0개")
         self.count_label.setObjectName("CountChip")
         self.count_label.setAlignment(Qt.AlignCenter)
 
-        self.select_checkbox = CleanCheckBox()
-        self.select_checkbox.setObjectName("SelectToggle")
-        self.select_checkbox.setCursor(Qt.PointingHandCursor)
-        self.select_checkbox.setToolTip("선택 모드")
-        self.select_checkbox.toggled.connect(self._toggle_select_mode)
+        self.select_toggle = QPushButton("선택")
+        self.select_toggle.setObjectName("GhostButton")
+        self.select_toggle.setProperty("active", "false")
+        self.select_toggle.setCursor(Qt.PointingHandCursor)
+        self.select_toggle.setToolTip("선택 모드")
+        self.select_toggle.clicked.connect(self._toggle_select_mode)
 
         self.select_actions = QWidget()
         select_actions_layout = QHBoxLayout(self.select_actions)
@@ -307,7 +310,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         select_actions_layout.addWidget(self.remove_file_button)
         self.select_actions.hide()
         self.sort_label = QLabel("정렬:")
-        self.sort_label.setObjectName("MetaText")
+        self.sort_label.setObjectName("SortLabel")
         self.sort_label.setFixedHeight(TOP_FIELD_HEIGHT - 2)
         self.sort_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         self.sort_order_combo = CleanComboBox()
@@ -317,7 +320,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.sort_order_combo.show_arrow = False
         self.sort_order_combo.text_alignment = Qt.AlignCenter
         self.sort_order_combo.setMaximumWidth(120)
-        self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=40, icon_size=18)
+        self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=40, icon_size=18, bordered=True)
         self.sort_direction_button.clicked.connect(self._toggle_sort_direction)
         self._refresh_sort_direction_button()
         self.preference_button = QPushButton("품질")
@@ -326,8 +329,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.preference_button.setCursor(Qt.PointingHandCursor)
         self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
         self.preference_button.clicked.connect(self._toggle_preferences_popup)
-        header.addWidget(title)
-        header.addWidget(self.select_checkbox, 0, Qt.AlignVCenter)
+        header.addWidget(self.select_toggle, 0, Qt.AlignVCenter)
         header.addWidget(self.select_actions, 0, Qt.AlignVCenter)
         header.addStretch(1)
         header.addWidget(self.sort_label, 0, Qt.AlignVCenter)

@@ -355,6 +355,8 @@ class RenderMixin:
         return options[selected_index]
 
     def selected_candidate_for_row_ref(self, row):
+        if row and row.get("fixed_candidate"):
+            return row.get("candidate")
         if row and row.get("kind") == "playlist":
             candidate = dict(row.get("candidate") or {})
             preferences = self.current_preferences()

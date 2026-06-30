@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QSizePolicy,
     QVBoxLayout,
@@ -153,9 +154,13 @@ class RowActionOverlay(QFrame):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
+        # Inset top/right/bottom so the fill never overlaps the row's 2px
+        # painted border ring (which lives ~0.5–2.5px from the row edge). The
+        # fill colour matches the hovered row background, so the inset is
+        # seamless while leaving the coloured ring fully visible on hover.
+        rect = QRectF(self.rect()).adjusted(0, 3, -3, -3)
         color = theme.SURFACE_SOFT
-        radius = 9.0
+        radius = 7.0
         path = QPainterPath()
         path.moveTo(rect.left(), rect.top())
         path.lineTo(rect.right() - radius, rect.top())
@@ -311,6 +316,7 @@ class DownloadRowWidget(QFrame):
 
         self.more_button = LucideIconButton("more-vertical", size=38, icon_size=22)
         self.more_button.setToolTip("더보기")
+        self.more_button.clicked.connect(self._show_more_menu)
         actions.addWidget(self.more_button)
         self.actions_widget.hide()
 
@@ -456,6 +462,13 @@ class DownloadRowWidget(QFrame):
     def _delete_file(self):
         self.owner.delete_file_for_row(self.row)
 
+    def _show_more_menu(self):
+        menu = QMenu(self)
+        for label, fmt in (("음원 추출 (WAV)", "WAV"), ("음원 추출 (MP3)", "MP3")):
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, f=fmt: self.owner.extract_audio_for_row(self.row, f))
+        menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
+
     def set_selected(self, selected):
         del selected
         self.setProperty("selected", "false")
@@ -469,6 +482,7 @@ class DownloadRowWidget(QFrame):
     def set_status(self, status, detail=""):
         self.row["status"] = status
         self.row["status_detail"] = detail
+        self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
         analyzing = status == "분석 중"
         if analyzing:
             self._position_spinner()
@@ -500,9 +514,9 @@ class DownloadRowWidget(QFrame):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self.property("progressActive") != "true":
+        completed = self.property("completed") == "true"
+        if self.property("progressActive") != "true" and not completed:
             return
-        progress = max(0, min(100, int(self.property("progressValue") or 0)))
         rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         radius = 10.0
         full = QPainterPath()
@@ -510,6 +524,17 @@ class DownloadRowWidget(QFrame):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+
+        if completed:
+            # Full rounded ring at the same width as the download progress arc,
+            # so a finished row reads like a "100% green" version of it.
+            hovered = self.property("hovered") == "true"
+            color = theme.SUCCESS_BORDER_STRONG if hovered else theme.SUCCESS_BORDER
+            painter.setPen(QPen(QColor(color), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            return
+
+        progress = max(0, min(100, int(self.property("progressValue") or 0)))
         painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(full)
         if progress <= 0:

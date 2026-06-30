@@ -2,7 +2,7 @@ from pathlib import Path
 from functools import lru_cache
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QToolButton, QWidget
 
@@ -76,6 +76,7 @@ class LucideIconButton(QToolButton):
         icon_color=None,
         background=None,
         hover_background=None,
+        bordered=False,
     ):
         super().__init__(parent)
         self.icon_name = icon_name
@@ -84,6 +85,7 @@ class LucideIconButton(QToolButton):
         self.icon_color = icon_color
         self.background = background
         self.hover_background = hover_background
+        self.bordered = bordered
         self.setObjectName("ActionButton")
         self.setProperty("danger", "true" if danger else "false")
         self.setFixedSize(size, size)
@@ -114,7 +116,16 @@ class LucideIconButton(QToolButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        if self.background and self.isEnabled():
+        if self.bordered:
+            # Persistent bordered box so this reads as the same control family
+            # as the adjacent combo box / secondary button.
+            hovered = self.underMouse() and self.isEnabled()
+            border = theme.BORDER_STRONG if hovered else theme.FIELD_BORDER
+            background = theme.SURFACE_SOFT if hovered else theme.SURFACE
+            painter.setPen(QPen(QColor(border), 1))
+            painter.setBrush(QColor(background))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+        elif self.background and self.isEnabled():
             painter.setPen(Qt.NoPen)
             background = self.hover_background if self.underMouse() and self.hover_background else self.background
             painter.setBrush(QColor(background))

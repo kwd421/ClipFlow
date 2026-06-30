@@ -446,14 +446,32 @@ class CleanComboBox(QComboBox):
         painter.setBrush(QColor(background))
         painter.drawRoundedRect(rect, 8, 8)
 
-        text_left = 38 if self.icon_kind else 11
-        if self.icon_kind:
-            icon_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
-            painter.drawPixmap(14, (self.height() - 16) // 2, 16, 16, lucide_pixmap(self.icon_kind, 16, icon_color))
+        enabled_icon_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
+        text = self.currentText()
+        text_font = painter.font()
+        text_font.setPixelSize(13)
+        painter.setFont(text_font)
+        center = bool(self.text_alignment & Qt.AlignHCenter)
 
-        text_rect = self.rect().adjusted(text_left, 0, -28 if self.show_arrow else -11, 0)
-        painter.setPen(QColor(text_color))
-        painter.drawText(text_rect, Qt.AlignVCenter | self.text_alignment, self.currentText())
+        if center:
+            # Centre the icon + text together so the pair sits truly centred.
+            metrics = painter.fontMetrics()
+            icon_width = 16 if self.icon_kind else 0
+            icon_gap = 6 if self.icon_kind else 0
+            group_width = icon_width + icon_gap + metrics.horizontalAdvance(text)
+            start_x = max(10.0, (self.width() - group_width) / 2)
+            if self.icon_kind:
+                painter.drawPixmap(int(start_x), (self.height() - 16) // 2, 16, 16, lucide_pixmap(self.icon_kind, 16, enabled_icon_color))
+            text_x = start_x + icon_width + icon_gap
+            painter.setPen(QColor(text_color))
+            painter.drawText(QRectF(text_x, 0, self.width() - text_x, self.height()), Qt.AlignVCenter | Qt.AlignLeft, text)
+        else:
+            if self.icon_kind:
+                painter.drawPixmap(14, (self.height() - 16) // 2, 16, 16, lucide_pixmap(self.icon_kind, 16, enabled_icon_color))
+            text_left = 38 if self.icon_kind else 11
+            text_rect = self.rect().adjusted(text_left, 0, -28 if self.show_arrow else -11, 0)
+            painter.setPen(QColor(text_color))
+            painter.drawText(text_rect, Qt.AlignVCenter | self.text_alignment, text)
 
         if self.show_arrow:
             arrow_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)

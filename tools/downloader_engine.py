@@ -34,6 +34,12 @@ COOKIE_SOURCES = {
     "edge": ("edge",),
     "microsoft edge": ("edge",),
     "firefox": ("firefox",),
+    "safari": ("safari",),
+    "brave": ("brave",),
+    "opera": ("opera",),
+    "vivaldi": ("vivaldi",),
+    "whale": ("whale",),
+    "chromium": ("chromium",),
 }
 
 

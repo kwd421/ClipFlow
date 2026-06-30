@@ -5,8 +5,8 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
 APP_NAME = "ClipFlow"
 DEFAULT_OUTPUT_EXT = "MP4"
-COOKIE_CHOICES = ["없음", "Chrome", "Firefox", "Edge"]
-COOKIE_DISPLAY_CHOICES = ["쿠키 미사용", "Chrome", "Firefox", "Edge"]
+COOKIE_CHOICES = ["없음", "Chrome", "Edge", "Firefox", "Safari", "Brave", "Opera", "Vivaldi", "Whale", "Chromium"]
+COOKIE_DISPLAY_CHOICES = ["쿠키 미사용", "Chrome", "Edge", "Firefox", "Safari", "Brave", "Opera", "Vivaldi", "Whale", "Chromium"]
 TOP_FIELD_HEIGHT = 42
 PRIMARY_BUTTON_WIDTH = 150
 THUMBNAIL_WIDTH = 96
@@ -59,6 +59,8 @@ ACCENT_SOFT = "#3B9EFF"
 
 SUCCESS = "#0F7B3F"
 SUCCESS_TINT = "#E6F4EA"
+SUCCESS_BORDER = "#9CD3B0"
+SUCCESS_BORDER_STRONG = "#6FBF8E"
 DANGER = "#E5484D"
 DANGER_HOVER = "#CF3035"
 DANGER_PRESSED = "#B91C1C"
@@ -207,6 +209,11 @@ QLabel#MetaText {{
     color: {MUTED};
     font-size: 12px;
 }}
+QLabel#SortLabel {{
+    color: {MUTED};
+    font-size: 13px;
+    font-weight: 600;
+}}
 QLabel#PlaylistPill {{
     background: {ACCENT_TINT};
     color: {ACCENT};
@@ -265,14 +272,16 @@ QMenu {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 10px;
-    padding: 5px;
+    padding: 4px;
 }}
 QMenu::item {{
     background: transparent;
     color: {INK};
-    padding: 8px 16px;
-    border-radius: 7px;
+    padding: 6px 12px;
+    margin: 1px 2px;
+    border-radius: 6px;
     font-size: 13px;
+    font-weight: 500;
 }}
 QMenu::item:selected {{
     background: {SURFACE_SOFT};
@@ -339,11 +348,13 @@ QPushButton:pressed {{
 QPushButton:disabled {{
     background: {GRAPHITE_DISABLED};
     color: {MUTED_SOFT};
+    border: 1px solid {BORDER_STRONG};
 }}
 QPushButton#SecondaryButton {{
     background: {SURFACE};
     color: {INK};
     border: 1px solid {FIELD_BORDER};
+    font-size: 13px;
     font-weight: 600;
 }}
 QPushButton#DangerButton {{
@@ -364,6 +375,27 @@ QPushButton#SecondaryButton:hover {{
 }}
 QPushButton#SecondaryButton:pressed {{
     background: {SURFACE_SOFT};
+}}
+QPushButton#GhostButton {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 7px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+}}
+QPushButton#GhostButton:hover {{
+    background: {SURFACE_SOFT};
+    color: {INK};
+}}
+QPushButton#GhostButton:pressed {{
+    background: {SURFACE_SOFT};
+    color: {INK};
+}}
+QPushButton#GhostButton[active="true"] {{
+    background: {ACCENT_TINT};
+    color: {ACCENT};
 }}
 QToolButton {{
     background: transparent;
