@@ -122,6 +122,42 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "direct-1080")
 
+    def test_select_candidate_prefers_hls_over_risky_youtube_direct_format(self):
+        candidates = [
+            {"id": "hls-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 466_000_000, "is_manifest": True, "protocol": "m3u8_native"},
+            {"id": "direct-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "bestaudio", "sort_bytes": 133_000_000, "is_manifest": False, "protocol": "https", "download_risk": "youtube_tv_https_po_token"},
+        ]
+
+        rows = presenter.group_candidates(candidates)
+        selected = presenter.select_candidate_for_preferences(
+            rows[0]["qualities"],
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="?먮룞", frame_rate="?먮룞"),
+        )
+
+        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["hls-1080"])
+        self.assertEqual(selected["id"], "hls-1080")
+
+    def test_group_candidates_defaults_to_downloadable_candidate_over_risky_direct(self):
+        candidates = [
+            {"id": "direct-2160", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 2160, "fps": 60, "vcodec": "vp9", "sort_bytes": 500_000_000, "is_manifest": False, "protocol": "https", "download_risk": "youtube_tv_https_po_token"},
+            {"id": "hls-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 300_000_000, "is_manifest": True, "protocol": "m3u8_native"},
+        ]
+
+        rows = presenter.group_candidates(candidates)
+
+        self.assertEqual(rows[0]["candidate"]["id"], "hls-1080")
+
+    def test_group_candidates_dedupes_same_quality_using_downloadability(self):
+        candidates = [
+            {"id": "direct-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "bestaudio", "sort_bytes": 900_000_000, "is_manifest": False, "protocol": "https", "download_risk": "youtube_tv_https_po_token"},
+            {"id": "hls-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 300_000_000, "is_manifest": True, "protocol": "m3u8_native"},
+        ]
+
+        rows = presenter.group_candidates(candidates)
+
+        self.assertEqual(rows[0]["candidate"]["id"], "hls-1080")
+        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["hls-1080"])
+
     def test_select_candidate_uses_same_family_format_fallback(self):
         candidates = [
             {"id": "webm", "output_ext": "webm", "height": 1080, "fps": 30, "vcodec": "vp9", "sort_bytes": 100},

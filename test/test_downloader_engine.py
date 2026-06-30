@@ -1,3 +1,4 @@
+import concurrent.futures
 import unittest
 import tempfile
 import sys
@@ -109,6 +110,43 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(candidates[0]["duration"], 125)
         self.assertEqual(candidates[-1]["sort_bytes"], 0)
         self.assertEqual(candidates[-1]["resolution"], "3840x2160")
+
+    def test_youtube_tvhtml5_direct_video_candidate_is_marked_download_risky(self):
+        info = {
+            "id": "yt-id",
+            "title": "YouTube Video",
+            "webpage_url": "https://www.youtube.com/watch?v=yt-id",
+            "formats": [
+                {
+                    "format_id": "299",
+                    "url": "https://rr1---sn.googlevideo.com/videoplayback?c=TVHTML5&itag=299",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "height": 1080,
+                    "fps": 60,
+                    "vcodec": "avc1",
+                    "acodec": "none",
+                    "filesize": 123,
+                },
+                {
+                    "format_id": "301",
+                    "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/playlist/index.m3u8",
+                    "protocol": "m3u8_native",
+                    "ext": "mp4",
+                    "height": 1080,
+                    "fps": 60,
+                    "vcodec": "avc1",
+                    "acodec": "mp4a",
+                    "tbr": 1000,
+                    "duration": 10,
+                },
+            ],
+        }
+
+        candidates = {candidate["format_id"]: candidate for candidate in engine.candidates_from_info(info)}
+
+        self.assertEqual(candidates["299"]["download_risk"], "youtube_tv_https_po_token")
+        self.assertFalse(candidates["301"].get("download_risk"))
 
     def test_display_duration_formats_runtime(self):
         self.assertEqual(engine.display_duration(65), "1:05")
@@ -293,6 +331,46 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(options["cookiesfrombrowser"], ("chrome",))
         self.assertEqual(options["proxy"], "http://127.0.0.1:8080")
 
+    def test_download_options_keep_native_hls_progress_for_mp4_manifest(self):
+        options = engine.build_download_options(
+            {
+                "format_selector": "301",
+                "output_ext": "mp4",
+                "is_manifest": True,
+                "protocol": "m3u8_native",
+            },
+            "C:/Temp",
+        )
+
+        self.assertNotIn("external_downloader", options)
+        self.assertNotIn("postprocessors", options)
+        self.assertEqual(options.get("fixup"), "never")
+
+    def test_download_options_disable_hls_fixup_for_m3u8_url_even_with_https_protocol(self):
+        options = engine.build_download_options(
+            {
+                "format_selector": "hls-1080",
+                "output_ext": "mp4",
+                "protocol": "https",
+                "url": "https://media.test/playlist.m3u8",
+            },
+            "C:/Temp",
+        )
+
+        self.assertEqual(options.get("fixup"), "never")
+
+    def test_download_options_only_convert_video_when_target_is_not_mp4(self):
+        options = engine.build_download_options(
+            {
+                "format_selector": "bestvideo*+bestaudio/best",
+                "output_ext": "webm",
+                "ext": "webm",
+            },
+            "C:/Temp",
+        )
+
+        self.assertEqual(options["postprocessors"], [{"key": "FFmpegVideoConvertor", "preferedformat": "webm"}])
+
     def test_download_candidate_retries_progressive_mp4_after_video_data_403(self):
         calls = []
 
@@ -357,6 +435,105 @@ class DownloaderEngineTests(unittest.TestCase):
             ],
         )
 
+    def test_download_candidate_uses_analyzed_info_without_reextracting_url(self):
+        calls = []
+        analyzed_info = {
+            "id": "video-id",
+            "title": "Analyzed Video",
+            "webpage_url": "https://youtube.test/watch?v=video-id",
+            "extractor": "youtube",
+            "formats": [
+                {
+                    "format_id": "18",
+                    "url": "https://media.test/video.mp4",
+                    "ext": "mp4",
+                    "vcodec": "avc1",
+                    "acodec": "mp4a",
+                }
+            ],
+        }
+
+        class RecordingYDL:
+            def __init__(self, options):
+                self.options = options
+                calls.append(("options", options.get("format")))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def process_video_result(self, info, download=True):
+                calls.append(("process_video_result", info["id"], download, self.options.get("format")))
+                info["processed"] = True
+                return info
+
+            def download(self, urls):
+                raise AssertionError("download() should not re-extract the URL when analyzed info is available")
+
+        result = engine.download_candidate(
+            "https://youtube.test/watch?v=video-id",
+            {
+                "id": "best",
+                "title": "Analyzed Video",
+                "display_title": "Analyzed Video",
+                "source": "https://youtube.test/watch?v=video-id",
+                "format_selector": "18",
+                "output_ext": "mp4",
+                "_download_info": analyzed_info,
+            },
+            "C:/Temp",
+            ydl_factory=RecordingYDL,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            calls,
+            [
+                ("options", "18"),
+                ("process_video_result", "video-id", True, "18"),
+            ],
+        )
+        self.assertNotIn("processed", analyzed_info)
+
+    def test_download_candidate_does_not_serialize_reused_info_for_youtube(self):
+        calls = []
+
+        class RecordingYDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def process_video_result(self, info, download=True):
+                raise AssertionError("YouTube analyzed info carries runtime extractor state and must not be reused across processes")
+
+            def download(self, urls):
+                calls.append(urls)
+
+        result = engine.download_candidate(
+            "https://www.youtube.com/watch?v=video-id",
+            {
+                "id": "best",
+                "title": "YouTube Video",
+                "display_title": "YouTube Video",
+                "source": "https://www.youtube.com/watch?v=video-id",
+                "format_selector": "301",
+                "output_ext": "mp4",
+                "_download_info": {"id": "video-id", "formats": []},
+            },
+            "C:/Temp",
+            ydl_factory=RecordingYDL,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["https://www.youtube.com/watch?v=video-id"]])
+
     def test_download_candidate_in_subprocess_relays_events_and_result(self):
         events = []
         script = (
@@ -396,15 +573,146 @@ with event_path.open("a", encoding="utf-8") as file:
         original_command = engine.download_worker_command
         engine.download_worker_command = lambda request_path: [sys.executable, "-u", "-c", script, str(request_path)]
         try:
-            result = engine.download_candidate_in_subprocess(
-                "https://media.test/watch",
-                {"format_selector": "best", "output_ext": "mp4"},
-                "C:/Out",
+            result = engine._download_candidate_in_one_shot_worker(
+                engine._download_worker_request(
+                    "https://media.test/watch",
+                    {"format_selector": "best", "output_ext": "mp4"},
+                    "C:/Out",
+                ),
             )
         finally:
             engine.download_worker_command = original_command
 
         self.assertEqual(result["target_url"], "partial-line")
+
+    def test_download_candidate_in_subprocess_uses_reusable_worker_pool_by_default(self):
+        events = []
+
+        class FakePool:
+            def __init__(self):
+                self.requests = []
+
+            def run(self, request, on_event=None):
+                self.requests.append(request)
+                if on_event:
+                    on_event({"type": "progress", "percent": 33, "message": "33%"})
+                return {"ok": True, "target_url": request["page_url"], "output_dir": request["output_dir"]}
+
+        fake_pool = FakePool()
+        original_pool = getattr(engine, "_DOWNLOAD_PROCESS_POOL", None)
+        original_command = engine.download_worker_command
+        engine._DOWNLOAD_PROCESS_POOL = fake_pool
+        engine.download_worker_command = lambda request_path: (_ for _ in ()).throw(AssertionError("one-shot worker should not be started"))
+        try:
+            result = engine.download_candidate_in_subprocess(
+                "https://media.test/watch",
+                {"format_selector": "best", "output_ext": "mp4"},
+                "C:/Out",
+                cookie_source="Firefox",
+                on_event=events.append,
+                proxy_url="http://127.0.0.1:8080",
+            )
+        finally:
+            engine._DOWNLOAD_PROCESS_POOL = original_pool
+            engine.download_worker_command = original_command
+
+        self.assertEqual(events, [{"type": "progress", "percent": 33, "message": "33%"}])
+        self.assertEqual(result["target_url"], "https://media.test/watch")
+        self.assertEqual(fake_pool.requests[0]["cookie_source"], "Firefox")
+        self.assertEqual(fake_pool.requests[0]["proxy_url"], "http://127.0.0.1:8080")
+
+    def test_warm_download_worker_warms_reusable_pool(self):
+        class FakePool:
+            def __init__(self):
+                self.warmed = 0
+
+            def warm(self):
+                self.warmed += 1
+
+        fake_pool = FakePool()
+        original_pool = getattr(engine, "_DOWNLOAD_PROCESS_POOL", None)
+        engine._DOWNLOAD_PROCESS_POOL = fake_pool
+        try:
+            engine.warm_download_worker()
+        finally:
+            engine._DOWNLOAD_PROCESS_POOL = original_pool
+
+        self.assertEqual(fake_pool.warmed, 1)
+
+    def test_download_process_pool_reuses_persistent_worker_process(self):
+        script = r'''
+import json
+import os
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"type": "event", "event": {"type": "status", "message": request["page_url"]}}), flush=True)
+    print(json.dumps({"type": "finished", "result": {"ok": True, "target_url": request["page_url"], "pid": os.getpid()}}), flush=True)
+'''
+        pool = engine.DownloadProcessPool(
+            idle_seconds=60,
+            max_idle=1,
+            command_factory=lambda: [sys.executable, "-u", "-c", script],
+        )
+        events = []
+        try:
+            pool.warm()
+            first = pool.run(engine._download_worker_request("https://media.test/one", {}, "C:/Out"), on_event=events.append)
+            second = pool.run(engine._download_worker_request("https://media.test/two", {}, "C:/Out"), on_event=events.append)
+        finally:
+            pool.close_all()
+
+        self.assertEqual(first["target_url"], "https://media.test/one")
+        self.assertEqual(second["target_url"], "https://media.test/two")
+        self.assertEqual(first["pid"], second["pid"])
+        self.assertEqual(
+            events,
+            [
+                {"type": "status", "message": "https://media.test/one"},
+                {"type": "status", "message": "https://media.test/two"},
+            ],
+        )
+
+    def test_download_process_pool_keeps_parallel_events_on_their_request_callbacks(self):
+        script = r'''
+import json
+import os
+import sys
+import time
+
+for line in sys.stdin:
+    request = json.loads(line)
+    label = request["candidate"]["id"]
+    print(json.dumps({"type": "event", "event": {"type": "progress", "label": label, "percent": 50}}), flush=True)
+    time.sleep(0.2)
+    print(json.dumps({"type": "finished", "result": {"ok": True, "target_url": request["page_url"], "label": label, "pid": os.getpid()}}), flush=True)
+'''
+        pool = engine.DownloadProcessPool(
+            idle_seconds=60,
+            max_idle=2,
+            command_factory=lambda: [sys.executable, "-u", "-c", script],
+        )
+        events = {"one": [], "two": []}
+
+        def run(label):
+            return pool.run(
+                engine._download_worker_request(f"https://media.test/{label}", {"id": label}, "C:/Out"),
+                on_event=events[label].append,
+            )
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(run, "one")
+                second = executor.submit(run, "two")
+                results = [first.result(), second.result()]
+        finally:
+            pool.close_all()
+
+        self.assertEqual({result["label"] for result in results}, {"one", "two"})
+        self.assertEqual(events["one"], [{"type": "progress", "label": "one", "percent": 50}])
+        self.assertEqual(events["two"], [{"type": "progress", "label": "two", "percent": 50}])
+        self.assertNotEqual(results[0]["pid"], results[1]["pid"])
 
     def test_download_options_convert_audio_candidates_to_wav(self):
         candidate = {"format_selector": "140", "output_ext": "wav"}

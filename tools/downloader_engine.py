@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
+import atexit
 from pathlib import Path
 
 
@@ -742,6 +744,38 @@ def is_manifest_format(fmt):
     return "m3u8" in protocol or "dash" in protocol or ".m3u8" in url or ".mpd" in url
 
 
+def is_hls_manifest_format(fmt):
+    protocol = format_protocol(fmt).lower()
+    url = str(fmt.get("url") or "").lower()
+    return "m3u8" in protocol or ".m3u8" in url
+
+
+def youtube_direct_download_risk(fmt, video_info=None, root_info=None):
+    protocol = format_protocol(fmt).lower()
+    if protocol != "https" or is_manifest_format(fmt):
+        return ""
+    source = " ".join(
+        str(value or "")
+        for value in (
+            (video_info or {}).get("webpage_url"),
+            (video_info or {}).get("original_url"),
+            (root_info or {}).get("webpage_url"),
+            (root_info or {}).get("original_url"),
+        )
+    ).lower()
+    if "youtube.com" not in source and "youtu.be" not in source:
+        return ""
+    url = str(fmt.get("url") or "")
+    if "googlevideo.com" not in url:
+        return ""
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    client = next((value for value in query.get("c", []) if value), "")
+    has_video = str(fmt.get("vcodec") or "none").lower() != "none" or safe_int(fmt.get("height")) > 0
+    if has_video and client.upper() == "TVHTML5":
+        return "youtube_tv_https_po_token"
+    return ""
+
+
 def bitrate_duration_size(fmt, duration=0):
     bitrate_kbps = safe_int(fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr"))
     seconds = safe_int(fmt.get("duration") or duration)
@@ -830,6 +864,8 @@ def candidates_from_info(info, output_ext=None):
                             "sort_bytes": size,
                             "size_source": size_source,
                             "source": source,
+                            "_download_info_key": download_info_key(video_info, info),
+                            "download_risk": youtube_direct_download_risk(fmt, video_info, info),
                             "protocol": format_protocol(fmt),
                             "is_manifest": is_manifest_format(fmt),
                             "media_type": "audio",
@@ -886,6 +922,8 @@ def candidates_from_info(info, output_ext=None):
                     "sort_bytes": sort_bytes,
                     "size_source": size_source,
                     "source": source,
+                    "_download_info_key": download_info_key(video_info, info),
+                    "download_risk": youtube_direct_download_risk(fmt, video_info, info),
                     "protocol": format_protocol(fmt),
                     "is_manifest": is_manifest_format(fmt),
                     "media_type": "video",
@@ -924,6 +962,8 @@ def candidates_from_info(info, output_ext=None):
                     "sort_bytes": size,
                     "size_source": size_source,
                     "source": video_info.get("webpage_url") or video_info["url"],
+                    "_download_info_key": download_info_key(video_info, info),
+                    "download_risk": youtube_direct_download_risk(video_info, video_info, info),
                     "protocol": format_protocol(video_info),
                     "is_manifest": is_manifest_format(video_info),
                     "media_type": "video",
@@ -931,6 +971,57 @@ def candidates_from_info(info, output_ext=None):
                 }
             )
     return sort_candidates(candidates)
+
+
+def download_info_key(video_info, root_info=None):
+    if not isinstance(video_info, dict):
+        return ""
+    root_info = root_info if isinstance(root_info, dict) else {}
+    return str(
+        video_info.get("webpage_url")
+        or video_info.get("original_url")
+        or root_info.get("webpage_url")
+        or root_info.get("original_url")
+        or video_info.get("url")
+        or video_info.get("id")
+        or ""
+    )
+
+
+def json_ready_download_info(info):
+    if not isinstance(info, dict):
+        return {}
+    cleaned = json.loads(json.dumps(info, ensure_ascii=False, default=str))
+    for key in (
+        "automatic_captions",
+        "subtitles",
+        "requested_subtitles",
+        "comments",
+        "heatmap",
+    ):
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def download_infos_from_info(info):
+    if not isinstance(info, dict):
+        return {}
+    infos = {}
+    for video_info in iter_video_infos(info):
+        key = download_info_key(video_info, info)
+        if key:
+            infos[key] = json_ready_download_info(video_info)
+    return infos
+
+
+def download_info_reuse_supported(candidate):
+    candidate = candidate or {}
+    for value in (candidate.get("source"), candidate.get("webpage_url"), candidate.get("url")):
+        parsed = urllib.parse.urlparse(str(value or ""))
+        host = parsed.netloc.lower().removeprefix("www.")
+        if host in {"youtube.com", "m.youtube.com", "youtu.be"} or host.endswith(".youtube.com"):
+            return False
+    return True
 
 
 def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_url=None, impersonate=False, allow_playlist=False):
@@ -1000,9 +1091,12 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
                 "format_sort": ["vcodec:h264", "quality", "res", "fps", "hdr:12", "acodec:aac"],
                 "merge_output_format": output_ext,
                 "final_ext": output_ext,
-                "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": output_ext}],
             }
         )
+        if output_ext != "mp4":
+            options["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": output_ext}]
+        elif is_hls_manifest_format(candidate):
+            options["fixup"] = "never"
     return options
 
 
@@ -1494,6 +1588,7 @@ def analyze_playlist_progressively(
     emit_event(on_event, "playlist_parent", parent_id=parent_id, title=playlist_title, count=count, source_url=source_url, url=source_url)
 
     candidates = []
+    download_infos = {}
     warnings = []
     for index, entry in enumerate(entries, start=1):
         entry_title = clean_video_title(entry.get("title") or "") or f"Video {index}"
@@ -1525,6 +1620,7 @@ def analyze_playlist_progressively(
             )
             child_candidates = child.get("candidates") or []
             candidates.extend(child_candidates)
+            download_infos.update(child.get("_download_infos") or {})
             emit_event(
                 on_event,
                 "playlist_entry",
@@ -1551,6 +1647,7 @@ def analyze_playlist_progressively(
         "playlist_title": playlist_title,
         "playlist_count": count,
         "candidates": sort_candidates(enrich_missing_sizes(candidates)),
+        "_download_infos": download_infos,
         "warnings": warnings,
     }
 
@@ -1680,6 +1777,7 @@ def analyze_url(
         "playlist_title": playlist_title,
         "playlist_count": safe_int(info.get("playlist_count") or info.get("n_entries") or (len(entries) if entries else 0)),
         "candidates": candidates,
+        "_download_infos": download_infos_from_info(info),
         "warnings": warnings,
     }
     emit_playlist_analysis_events(result, on_event=on_event)
@@ -1709,7 +1807,11 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     emit_event(on_event, "status", message="Starting download")
     try:
         with ydl_factory(options) as ydl:
-            ydl.download([target_url])
+            download_info = candidate.get("_download_info") if isinstance(candidate, dict) else None
+            if isinstance(download_info, dict) and download_info and download_info_reuse_supported(candidate):
+                ydl.process_video_result(json_ready_download_info(download_info), download=True)
+            else:
+                ydl.download([target_url])
     except Exception as exc:
         if not should_retry_progressive_mp4(candidate, exc):
             raise
@@ -1727,7 +1829,11 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         )
         try:
             with ydl_factory(fallback_options) as ydl:
-                ydl.download([target_url])
+                download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
+                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
+                    ydl.process_video_result(json_ready_download_info(download_info), download=True)
+                else:
+                    ydl.download([target_url])
         except Exception as fallback_exc:
             if not (cookie_spec(cookie_source) and should_retry_progressive_mp4(fallback_candidate, fallback_exc, allow_progressive=True)):
                 raise
@@ -1740,9 +1846,28 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
                 proxy_url=proxy_url,
             )
             with ydl_factory(no_cookie_options) as ydl:
-                ydl.download([target_url])
+                download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
+                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
+                    ydl.process_video_result(json_ready_download_info(download_info), download=True)
+                else:
+                    ydl.download([target_url])
     emit_event(on_event, "done", path=str(output_dir))
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
+
+
+DOWNLOAD_WORKER_IDLE_SECONDS = 90.0
+_DOWNLOAD_PROCESS_POOL = None
+_DOWNLOAD_PROCESS_POOL_LOCK = threading.Lock()
+
+
+def _download_worker_request(page_url, candidate, output_dir, cookie_source="없음", proxy_url=None):
+    return {
+        "page_url": page_url,
+        "candidate": candidate or {},
+        "output_dir": str(output_dir),
+        "cookie_source": cookie_source,
+        "proxy_url": proxy_url,
+    }
 
 
 def download_worker_command(request_path):
@@ -1752,15 +1877,188 @@ def download_worker_command(request_path):
     return [sys.executable, "-u", "-m", "tools.clipflow_download_process", request_path]
 
 
-def download_candidate_in_subprocess(
-    page_url,
-    candidate,
-    output_dir,
-    cookie_source="없음",
-    on_event=None,
-    proxy_url=None,
-    process_command=None,
-):
+def persistent_download_worker_command():
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--clipflow-download-worker", "--persistent"]
+    return [sys.executable, "-u", "-m", "tools.clipflow_download_process", "--persistent"]
+
+
+def _download_worker_environment():
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
+def _download_worker_creationflags():
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
+
+class PersistentDownloadProcess:
+    def __init__(self, command=None):
+        self.command = command or persistent_download_worker_command()
+        self.process = subprocess.Popen(
+            self.command,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=_download_worker_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=_download_worker_creationflags(),
+        )
+        self.last_used = time.monotonic()
+        self._closed = False
+
+    def is_alive(self):
+        return not self._closed and self.process.poll() is None
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.process.stdin:
+                self.process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+        except Exception:
+            pass
+        try:
+            if self.process.stdout:
+                self.process.stdout.close()
+        except Exception:
+            pass
+
+    def run(self, request, on_event=None):
+        if not self.is_alive() or not self.process.stdin or not self.process.stdout:
+            raise RuntimeError("Download worker is not running.")
+
+        result = None
+        failed_message = ""
+        side_output = []
+
+        def handle_line(line):
+            nonlocal result, failed_message
+            text = str(line or "").strip()
+            if not text:
+                return False
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                side_output.append(strip_ansi(text))
+                return False
+            payload_type = payload.get("type")
+            if payload_type == "event":
+                event = payload.get("event")
+                if isinstance(event, dict) and on_event:
+                    on_event(event)
+            elif payload_type == "finished":
+                result_value = payload.get("result")
+                result = result_value if isinstance(result_value, dict) else {}
+                return True
+            elif payload_type == "failed":
+                failed_message = strip_ansi(payload.get("message") or "Download worker failed.")
+                return True
+            return False
+
+        try:
+            self.process.stdin.write(json.dumps(request, ensure_ascii=False, default=str) + "\n")
+            self.process.stdin.flush()
+            while True:
+                line = self.process.stdout.readline()
+                if line == "":
+                    break
+                if handle_line(line):
+                    break
+        except BrokenPipeError as exc:
+            failed_message = strip_ansi(exc)
+
+        self.last_used = time.monotonic()
+        if failed_message:
+            raise RuntimeError(strip_ansi(failed_message))
+        if result is None:
+            code = self.process.poll()
+            suffix = f" with code {code}" if code is not None else ""
+            detail = "\n".join(side_output[-20:]) or f"Download worker exited unexpectedly{suffix}."
+            raise RuntimeError(strip_ansi(detail))
+        return result
+
+
+class DownloadProcessPool:
+    def __init__(self, idle_seconds=DOWNLOAD_WORKER_IDLE_SECONDS, max_idle=3, command_factory=None):
+        self.idle_seconds = idle_seconds
+        self.max_idle = max_idle
+        self.command_factory = command_factory or persistent_download_worker_command
+        self._idle = []
+        self._lock = threading.Lock()
+
+    def _new_process(self):
+        return PersistentDownloadProcess(command=self.command_factory())
+
+    def _trim_locked(self):
+        now = time.monotonic()
+        survivors = []
+        for worker in self._idle:
+            if not worker.is_alive() or now - worker.last_used > self.idle_seconds or len(survivors) >= self.max_idle:
+                worker.close()
+            else:
+                survivors.append(worker)
+        self._idle = survivors
+
+    def warm(self):
+        with self._lock:
+            self._trim_locked()
+            if self._idle:
+                return
+            self._idle.append(self._new_process())
+
+    def run(self, request, on_event=None):
+        with self._lock:
+            self._trim_locked()
+            worker = self._idle.pop() if self._idle else self._new_process()
+        try:
+            return worker.run(request, on_event=on_event)
+        finally:
+            with self._lock:
+                if worker.is_alive():
+                    self._idle.append(worker)
+                    self._trim_locked()
+                else:
+                    worker.close()
+
+    def close_all(self):
+        with self._lock:
+            workers = list(self._idle)
+            self._idle = []
+        for worker in workers:
+            worker.close()
+
+
+def download_process_pool():
+    global _DOWNLOAD_PROCESS_POOL
+    with _DOWNLOAD_PROCESS_POOL_LOCK:
+        if _DOWNLOAD_PROCESS_POOL is None:
+            _DOWNLOAD_PROCESS_POOL = DownloadProcessPool()
+            atexit.register(_DOWNLOAD_PROCESS_POOL.close_all)
+        return _DOWNLOAD_PROCESS_POOL
+
+
+def warm_download_worker():
+    download_process_pool().warm()
+
+
+def _download_candidate_in_one_shot_worker(request, on_event=None, process_command=None):
     temp_root = Path(tempfile.mkdtemp(prefix="clipflow-download-"))
     request_path = temp_root / "request.json"
     event_path = temp_root / "events.jsonl"
@@ -1795,23 +2093,16 @@ def download_candidate_in_subprocess(
             return
         handle_payload(payload)
 
-    request = {
-        "page_url": page_url,
-        "candidate": candidate or {},
-        "output_dir": str(output_dir),
-        "cookie_source": cookie_source,
-        "proxy_url": proxy_url,
-    }
+    request = dict(request or {})
     use_event_file = process_command is None
     if use_event_file:
         request["event_path"] = str(event_path)
     request_path.write_text(json.dumps(request, ensure_ascii=False, default=str), encoding="utf-8")
 
     command = process_command or download_worker_command(request_path)
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
+    env = _download_worker_environment()
     cwd = str(Path(__file__).resolve().parents[1])
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    creationflags = _download_worker_creationflags()
 
     try:
         if use_event_file:
@@ -1890,6 +2181,27 @@ def download_candidate_in_subprocess(
         return result
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def download_candidate_in_subprocess(
+    page_url,
+    candidate,
+    output_dir,
+    cookie_source="없음",
+    on_event=None,
+    proxy_url=None,
+    process_command=None,
+):
+    request = _download_worker_request(
+        page_url,
+        candidate,
+        output_dir,
+        cookie_source=cookie_source,
+        proxy_url=proxy_url,
+    )
+    if process_command is not None:
+        return _download_candidate_in_one_shot_worker(request, on_event=on_event, process_command=process_command)
+    return download_process_pool().run(request, on_event=on_event)
 
 
 def should_retry_progressive_mp4(candidate, exc, allow_progressive=False):

@@ -189,6 +189,7 @@ class DownloadMixin:
         candidate = candidate or self.selected_candidate_for_row_ref(row)
         if not candidate:
             return
+        download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
         self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
@@ -204,7 +205,7 @@ class DownloadMixin:
         worker = DownloadWorker(
             str(row.get("id") or ""),
             page_url,
-            candidate,
+            download_candidate,
             self._output_dir_for_row(row, candidate),
             cookie_source_from_display(self.cookie_combo.currentText()),
             self.download_func,

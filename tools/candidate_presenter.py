@@ -123,6 +123,10 @@ def _stable_audio_codec_score(candidate):
     return 0
 
 
+def _downloadable_score(candidate):
+    return 0 if candidate.get("download_risk") else 1
+
+
 def _target_height(quality):
     text = str(quality or "").strip().lower()
     if text in {"", "자동", "auto"}:
@@ -164,8 +168,8 @@ def _best_candidate(candidates, preferences):
         size = engine.safe_int(candidate.get("sort_bytes"))
         codec = _codec_name(candidate)
         codec_score = _stable_video_codec_score(candidate) if codec_auto else (1 if codec == target_codec else 0)
-        direct_score = 0 if candidate.get("is_manifest") else 1
-        return (codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
+        direct_score = 1 if not candidate.get("is_manifest") and size > 0 else 0
+        return (_downloadable_score(candidate), codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
 
     return max(candidates, key=score) if candidates else None
 
@@ -202,6 +206,7 @@ def filter_manifest_duplicates(candidates):
     has_sized_direct = any(
         _candidate_family(candidate) == "video"
         and not candidate.get("is_manifest")
+        and not candidate.get("download_risk")
         and engine.safe_int(candidate.get("sort_bytes")) > 0
         for candidate in candidates
     )
@@ -220,14 +225,18 @@ def filter_manifest_duplicates(candidates):
 
 
 def filter_visible_quality_duplicates(candidates):
-    filtered = []
-    seen = set()
+    groups = {}
+    order = []
     for candidate in candidates:
         key = candidate_visible_quality_key(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        filtered.append(candidate)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(candidate)
+    filtered = []
+    for key in order:
+        matches = groups[key]
+        filtered.append(select_candidate_for_preferences(matches, DownloadPreferences()) or matches[0])
     return filtered
 
 
@@ -247,5 +256,8 @@ def group_candidates(candidates):
         qualities = filter_visible_quality_duplicates(qualities)
         if not qualities:
             continue
+        selected = select_candidate_for_preferences(qualities, DownloadPreferences())
+        if selected in qualities:
+            qualities = [selected] + [candidate for candidate in qualities if candidate is not selected]
         rows.append({"id": f"group-{index}", "candidate": qualities[0], "qualities": qualities})
     return rows

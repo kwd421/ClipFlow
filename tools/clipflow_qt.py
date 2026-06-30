@@ -121,6 +121,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                     proxy_url=proxy_url,
                 )
 
+            download_with_subprocess_boundary._clipflow_uses_download_worker_pool = True
             self.download_func = download_with_subprocess_boundary
         else:
             self.download_func = download_func
@@ -147,6 +148,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._clear_url_on_next_click = False
         self._row_sequence = 0
         self._analysis_auto_download = False
+        self._analysis_url = ""
+        self._queued_analysis_downloads = []
+        self._download_info_cache = {}
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
         self.setWindowTitle(APP_NAME)
@@ -452,13 +456,14 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._set_save_folder(folder)
 
     def _handle_primary_action(self):
-        if self.analysis_thread and self.analysis_thread.isRunning():
-            return
         current_url = self.url_input.text().strip()
         if current_url:
             row_index = self._first_visible_analyzed_row_index_for_url(current_url)
             if row_index < 0:
-                self._start_analysis(auto_download=True)
+                if self.analysis_thread and self.analysis_thread.isRunning():
+                    self._queue_analysis_download(current_url)
+                else:
+                    self._start_analysis(auto_download=True)
                 return
             if self._selected_row_can_download():
                 self._start_download()
@@ -479,6 +484,44 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.paste_button.setVisible(not has_text)
         self.clear_url_button.setVisible(has_text)
 
+    def _queue_analysis_download(self, url):
+        url = str(url or "").strip()
+        if not url:
+            return
+        if url == self._analysis_url and self._analysis_auto_download:
+            return
+        if any(item.get("url") == url for item in self._queued_analysis_downloads):
+            return
+        self._queued_analysis_downloads.append({"url": url, "auto_download": True})
+        self._set_status("Queued for analysis")
+        self._refresh_primary_action()
+
+    def _start_next_queued_analysis(self):
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
+        while self._queued_analysis_downloads:
+            item = self._queued_analysis_downloads.pop(0)
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            self.url_input.setText(url)
+            self._start_analysis(auto_download=bool(item.get("auto_download")))
+            return
+
+    def _remember_download_infos(self, analysis):
+        if not isinstance(analysis, dict):
+            return
+        infos = analysis.get("_download_infos")
+        if isinstance(infos, dict):
+            self._download_info_cache.update({str(key): value for key, value in infos.items() if isinstance(value, dict)})
+
+    def _candidate_for_download(self, row, candidate):
+        prepared = dict(candidate or {})
+        key = str(prepared.get("_download_info_key") or "")
+        if key and key in self._download_info_cache and engine.download_info_reuse_supported(prepared):
+            prepared["_download_info"] = self._download_info_cache[key]
+        return prepared
+
     def _start_analysis(self, auto_download=False):
         if self.analysis_thread and self.analysis_thread.isRunning():
             return
@@ -490,11 +533,17 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis = None
         self.selected_row_index = -1
         self._analysis_auto_download = bool(auto_download)
+        self._analysis_url = url
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
-        self.primary_button.setEnabled(False)
+        self._refresh_primary_action()
         self.primary_button.set_loading(False)
         self._set_status(ANALYZING_STATUS)
+        if auto_download and getattr(self.download_func, "_clipflow_uses_download_worker_pool", False):
+            try:
+                engine.warm_download_worker()
+            except Exception as exc:
+                self.event_messages.append(f"Download worker warmup failed: {engine.strip_ansi(exc)}")
 
         loading_rows = self._analysis_loading_rows(url)
         self.rows = loading_rows + [row for row in self.rows if not self._is_analysis_loading_row(row)]
@@ -572,6 +621,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     @Slot(dict)
     def _analysis_finished(self, analysis):
         self.analysis = analysis
+        self._remember_download_infos(analysis)
         grouped = presenter.group_candidates(analysis.get("candidates") or [])
         source_url = analysis.get("webpage_url") or analysis.get("url") or self.url_input.text().strip()
         self._prepend_analysis_rows(analysis, grouped, source_url)
@@ -606,12 +656,15 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.primary_button.set_loading(False)
         self.analysis_thread = None
         self.analysis_worker = None
+        self._analysis_url = ""
         if any(self._is_analysis_loading_row(row) for row in self.rows):
             self.rows = [row for row in self.rows if not self._is_analysis_loading_row(row)]
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
         self._refresh_primary_action()
+        if self._queued_analysis_downloads:
+            QTimer.singleShot(0, self._start_next_queued_analysis)
 
     def _is_analysis_loading_row(self, row):
         return bool(row.get("analysis_loading")) or row.get("id") == "__analyzing__" or bool(row.get("child_loading"))
@@ -765,8 +818,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if has_target:
             has_target = self.rows[self.selected_row_index].get("status") != ANALYZING_STATUS
         has_url = bool(self.url_input.text().strip())
-        analyzing = bool(self.analysis_thread and self.analysis_thread.isRunning())
-        self.primary_button.setEnabled((has_target or has_url) and not analyzing)
+        self.primary_button.setEnabled(has_target or has_url)
 
     def _first_visible_analyzed_row_index_for_url(self, url):
         url = str(url or "").strip()

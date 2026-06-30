@@ -3229,6 +3229,229 @@ print(result["target_url"])
             ],
         )
 
+    def test_clipflow_qt_auto_download_warms_default_download_worker(self):
+        script = r'''
+from PySide6.QtCore import QTimer, QThread
+from PySide6.QtWidgets import QApplication
+from tools import clipflow_qt
+
+app = QApplication([])
+warm_calls = []
+download_calls = []
+
+original_warm = getattr(clipflow_qt.engine, "warm_download_worker", None)
+original_download = clipflow_qt.engine.download_candidate_in_subprocess
+
+def fake_warm():
+    warm_calls.append(QThread.currentThread() is app.thread())
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, on_event=None, proxy_url=None):
+    download_calls.append([page_url, candidate.get("id")])
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+clipflow_qt.engine.warm_download_worker = fake_warm
+clipflow_qt.engine.download_candidate_in_subprocess = fake_download
+try:
+    window = clipflow_qt.ClipFlowWindow(analyze_func=fake_analyze)
+    window.url_input.setText("https://media.test/video")
+    window._start_analysis(auto_download=True)
+
+    def drive():
+        if window.analysis_thread or window.download_thread or window.active_downloads:
+            return
+        app.quit()
+
+    timer = QTimer()
+    timer.timeout.connect(drive)
+    timer.start(20)
+    QTimer.singleShot(5000, app.quit)
+    app.exec()
+finally:
+    if original_warm is None:
+        delattr(clipflow_qt.engine, "warm_download_worker")
+    else:
+        clipflow_qt.engine.warm_download_worker = original_warm
+    clipflow_qt.engine.download_candidate_in_subprocess = original_download
+
+print(warm_calls)
+print(download_calls)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["[True]", "[['https://media.test/video', 'best']]"])
+
+    def test_clipflow_qt_download_button_queues_url_while_analysis_is_running(self):
+        script = r'''
+import time
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+analyzed = []
+downloaded = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    analyzed.append(url)
+    time.sleep(0.15)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": url.rsplit("/", 1)[-1],
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": url, "display_title": url, "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append(page_url)
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window.url_input.setText("https://media.test/one")
+window._start_analysis(auto_download=True)
+window.url_input.setText("https://media.test/two")
+window._refresh_primary_action()
+print(window.primary_button.isEnabled())
+window._handle_primary_action()
+
+def drive():
+    if window.analysis_thread or window.download_thread or window.active_downloads or window.queued_download_rows:
+        return
+    if len(downloaded) < 2:
+        return
+    print(analyzed)
+    print(downloaded)
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "True",
+                "['https://media.test/one', 'https://media.test/two']",
+                "['https://media.test/one', 'https://media.test/two']",
+            ],
+        )
+
+    def test_clipflow_qt_attaches_cached_analysis_info_only_to_download_candidate(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+download_infos = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    download_infos.append(candidate.get("_download_info"))
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "_download_infos": {
+            "info-key": {"id": "video-id", "title": "Video", "formats": [{"format_id": "18", "url": "https://media.test/video.mp4"}]},
+        },
+        "candidates": [
+            {"id": "best", "_download_info_key": "info-key", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+url = "https://media.test/video"
+analysis = fake_analyze(url)
+window._analysis_finished(analysis)
+row = window.rows[0]
+print("_download_info" in row["candidate"])
+window.start_download_for_row(row)
+while window.active_downloads:
+    app.processEvents()
+print(download_infos)
+print("_download_info" in row["candidate"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "False",
+                "[{'id': 'video-id', 'title': 'Video', 'formats': [{'format_id': '18', 'url': 'https://media.test/video.mp4'}]}]",
+                "False",
+            ],
+        )
+
+    def test_clipflow_qt_playlist_entry_event_attaches_cached_analysis_info_to_child_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+download_infos = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    download_infos.append(candidate.get("_download_info"))
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+window = ClipFlowWindow(download_func=fake_download)
+playlist_url = "https://youtube.test/playlist?list=abc"
+parent = window._playlist_parent_loading_row(playlist_url)
+window.rows = [parent]
+window._playlist_event_parent_id = parent["id"]
+candidate = {"id": "child", "_download_info_key": "child-key", "source": "https://youtube.test/watch?v=child", "url": "https://youtube.test/watch?v=child", "title": "Child", "display_title": "Child", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30}
+window._handle_playlist_analysis_event({
+    "type": "playlist_entry",
+    "parent_id": parent["id"],
+    "index": 1,
+    "title": "Child",
+    "source_url": "https://youtube.test/watch?v=child",
+    "url": "https://youtube.test/watch?v=child",
+    "analysis": {"_download_infos": {"child-key": {"id": "child-id", "title": "Child", "formats": [{"format_id": "18", "url": "https://media.test/child.mp4"}]}}},
+    "candidates": [candidate],
+    "candidate": candidate,
+})
+child = next(row for row in window.rows if row.get("is_playlist_child") and not row.get("child_loading"))
+window.start_download_for_row(child)
+while window.active_downloads:
+    app.processEvents()
+print(download_infos)
+print("_download_info" in child["candidate"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[{'id': 'child-id', 'title': 'Child', 'formats': [{'format_id': '18', 'url': 'https://media.test/child.mp4'}]}]",
+                "False",
+            ],
+        )
+
     def test_clipflow_qt_completed_history_saves_playlist_parent_with_completed_children(self):
         script = r'''
 from PySide6.QtWidgets import QApplication

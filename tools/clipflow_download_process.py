@@ -42,10 +42,31 @@ def run_request(request, download_func=engine.download_candidate):
     return result
 
 
+def run_persistent(input_stream=None):
+    input_stream = input_stream or sys.stdin
+    for line in input_stream:
+        text = str(line or "").strip()
+        if not text:
+            continue
+        try:
+            request = json.loads(text)
+        except Exception as exc:
+            _write_payload({"type": "failed", "message": f"Cannot read download request: {engine.strip_ansi(exc)}"})
+            continue
+        try:
+            run_request(request)
+        except Exception as exc:
+            event_path = request.get("event_path") if isinstance(request, dict) else None
+            _write_payload({"type": "failed", "message": engine.strip_ansi(exc)}, event_path=event_path)
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--clipflow-download-worker":
         argv = argv[1:]
+    if argv and argv[0] == "--persistent":
+        return run_persistent()
     if not argv:
         _write_payload({"type": "failed", "message": "Missing download request path."})
         return 2

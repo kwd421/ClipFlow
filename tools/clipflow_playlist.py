@@ -44,6 +44,8 @@ class PlaylistMixin:
             self._render_rows()
             return
         if event_type == "playlist_entry":
+            if hasattr(self, "_remember_download_infos"):
+                self._remember_download_infos(event.get("analysis"))
             entry_rows = self._replace_playlist_loading_with_entry(parent, event)
             self._render_rows()
             if self._analysis_auto_download:
