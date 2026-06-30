@@ -12,6 +12,7 @@ except ImportError:
 
 def _write_payload(payload):
     line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+    line = line.encode("utf-8", errors="replace").decode("utf-8")
     stdout_buffer = getattr(sys.stdout, "buffer", None)
     if stdout_buffer is not None:
         stdout_buffer.write(line.encode("utf-8"))
@@ -19,6 +20,18 @@ def _write_payload(payload):
         return
     sys.stdout.write(line)
     sys.stdout.flush()
+
+
+def _iter_input_lines(input_stream=None):
+    if input_stream is not None:
+        yield from input_stream
+        return
+    stdin_buffer = getattr(sys.stdin, "buffer", None)
+    if stdin_buffer is not None:
+        for raw_line in stdin_buffer:
+            yield raw_line.decode("utf-8", errors="replace")
+        return
+    yield from sys.stdin
 
 
 def run_request(request, analyze_func=engine.analyze_url):
@@ -37,8 +50,7 @@ def run_request(request, analyze_func=engine.analyze_url):
 
 
 def run_persistent(input_stream=None):
-    input_stream = input_stream or sys.stdin
-    for line in input_stream:
+    for line in _iter_input_lines(input_stream):
         text = str(line or "").strip()
         if not text:
             continue

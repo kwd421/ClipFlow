@@ -194,11 +194,12 @@ class DownloadMixin:
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
         row["download_started_at"] = time.time()
+        row["download_starting"] = True
         widget = row.get("widget")
         if widget:
             widget.set_status("다운로드 중")
-            widget.set_progress(0, "0%")
-        self._set_status("다운로드 중")
+            widget.set_progress(0, "다운로드 준비 중")
+        self._set_status("다운로드 준비 중")
 
         page_url = row.get("source_url") or (self.analysis or {}).get("webpage_url") or self.url_input.text().strip()
         thread = QThread(self)
@@ -296,12 +297,38 @@ class DownloadMixin:
         text = re.sub(r"^\s*\d+\s*-\s*", "", text)
         return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
 
+    def _apply_actual_output_size(self, row, output_path=None):
+        if not row:
+            return
+        path = Path(output_path or row.get("output_path") or "")
+        if not path.is_file():
+            return
+        try:
+            actual_size = path.stat().st_size
+        except OSError:
+            return
+        if actual_size <= 0:
+            return
+        selected = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        candidate = dict(selected)
+        candidate["filesize"] = actual_size
+        candidate["filesize_approx"] = 0
+        candidate["sort_bytes"] = actual_size
+        candidate["size_source"] = "actual"
+        row["candidate"] = candidate
+        row["qualities"] = [candidate]
+        row["quality_options"] = build_quality_options([candidate])
+        row["selected_index"] = 0
+        row["selected_format_index"] = 0
+
     def _mark_existing_output(self, row, output_path):
         row["output_path"] = str(output_path)
+        self._apply_actual_output_size(row, output_path)
         row["progress"] = 100
         row["progress_text"] = ""
         widget = row.get("widget")
         if widget:
+            widget.refresh()
             widget.set_status("완료")
             widget.set_progress(100, "완료")
             widget._refresh_actions()
@@ -317,14 +344,17 @@ class DownloadMixin:
 
     def _download_finished_for(self, row, result):
         if row:
+            row["download_starting"] = False
             selected = self.selected_candidate_for_row_ref(row)
             if selected:
                 row["candidate"] = selected
                 row["qualities"] = [selected]
                 row["quality_options"] = build_quality_options([selected])
             self._resolve_finished_output_path(row, result)
+            self._apply_actual_output_size(row)
             widget = row.get("widget")
             if widget:
+                widget.refresh()
                 widget.set_status("완료")
                 widget.set_progress(100, "완료")
                 widget._refresh_actions()
@@ -379,6 +409,7 @@ class DownloadMixin:
     def _download_failed_for(self, row, message):
         message = engine.strip_ansi(message)
         if row:
+            row["download_starting"] = False
             widget = row.get("widget")
             row["messages"].append(message)
             if widget:

@@ -324,7 +324,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["자동", "자동", "자동", "자동", "['all']", "WEBM", "webm-1080", "40 B", "00:02:00", "webm-1080"],
+            ["최고화질", "자동", "자동", "자동", "['all']", "WEBM", "webm-1080", "40 B", "00:02:00", "webm-1080"],
         )
 
     def test_clipflow_qt_quality_button_opens_dropdown_preferences(self):

@@ -1,66 +1,73 @@
 # AGENTS.md
 
-Behavioral guidelines to reduce common Codex coding mistakes. Merge with project-specific instructions as needed.
+Repository guidance for Codex and other AI agents.
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+The goal is not to make the agent look busy. The goal is to keep the codebase
+easy for the next AI session to understand, change, and verify.
 
-## 1. Think Before Coding
+## 1. Preserve The Shape Of The System
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+- Read the existing module boundaries before editing.
+- Put new logic next to the behavior it belongs to; do not create a helper file
+  just because a helper file sounds tidy.
+- Prefer explicit data fields over hidden coupling.
+- Keep row dictionaries, candidate dictionaries, worker events, and UI state
+  shapes stable unless the user explicitly asks to change the contract.
+- When adding a new field, make its producer and consumer obvious in the same
+  change.
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+## 2. Verify Real Evidence First
 
-## 2. Simplicity First
+- Inspect the real file, diff, command output, or app behavior before explaining
+  a cause.
+- Do not treat estimates, labels, cached metadata, or UI text as facts until
+  verified.
+- If terminal output or filenames look mojibake/broken, fix the shell/output
+  encoding before using that output as evidence.
+- For media/download issues, keep these concepts separate:
+  protocol/transport, container, codec, bitrate, selected format, estimated size,
+  and actual file size.
 
-**Minimum code that solves the problem. Nothing speculative.**
+## 3. Make Small, Traceable Changes
 
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+- Touch only the files needed for the current request.
+- Do not refactor adjacent code unless the requested fix cannot be made safely
+  without it.
+- Do not add abstractions for one-off fixes.
+- Do not add fallback paths to hide a root cause.
+- Every changed line should have a clear reason tied to the user's request.
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+## 4. Optimize For The Next AI Reader
 
-## 3. Surgical Changes
+- Use clear names over cleverness.
+- Keep functions short enough that an agent can understand inputs, side effects,
+  and outputs without reconstructing the whole app.
+- Prefer one direct code path over several fallback branches.
+- Leave a short comment only when it explains a boundary, invariant, or
+  non-obvious external behavior.
+- Do not rewrite working code just to make it look cleaner.
 
-**Touch only what you must. Clean up only your own mess.**
+## 5. Tests Are Proportional, Not Automatic
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+- Do not add new tests for trivial constants, label changes, one-line config
+  changes, or obvious UI text edits.
+- Prefer the cheapest useful verification: compile, direct function check, real
+  app check, or a focused command.
+- Add or update tests only when the change affects shared behavior, fixes a
+  realistic recurring regression, or the user asks for tests.
+- If a test would be larger than the code change, pause and justify it before
+  writing it.
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+## 6. Debug Without Guessing
 
-The test: Every changed line should trace directly to the user's request.
+- Find the root cause before changing code.
+- Reproduce or gather direct evidence when practical.
+- Change one thing at a time.
+- If a fix fails, do not stack another guess on top of it; re-check the evidence.
 
-## 4. Goal-Driven Execution
+## 7. Report What Actually Happened
 
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-
-```text
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let Codex loop independently. Weak criteria ("make it work") require constant clarification.
-
----
-
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+- Say what was checked.
+- Say what was not checked.
+- Separate actual values from estimates.
+- Keep final reports short unless the user asks for detail.

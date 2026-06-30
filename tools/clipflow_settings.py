@@ -119,7 +119,7 @@ class SettingsMixin:
         layout.setVerticalSpacing(8)
 
         quality_combo = CleanComboBox()
-        quality_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        quality_combo.addItems(["최고화질", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
         format_combo = CleanComboBox()
         format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
         codec_combo = CleanComboBox()
@@ -256,31 +256,32 @@ class SettingsMixin:
             playlist_key = item.get("playlist_key") or self._playlist_key(
                 item.get("analysis_source_url") or source_url
             )
-            restored.append(
-                {
-                    "id": candidate.get("id") or f"history-{created_order}",
-                    "kind": row_kind(candidate),
-                    "candidate": candidate,
-                    "qualities": [candidate],
-                    "quality_options": build_quality_options([candidate]),
-                    "selected_index": 0,
-                    "selected_format_index": 0,
-                    "analysis_source_url": item.get("analysis_source_url") or source_url,
-                    "source_url": source_url,
-                    "playlist_key": playlist_key,
-                    "parent_playlist_id": item.get("parent_playlist_id") or "",
-                    "is_playlist_child": bool(item.get("is_playlist_child")),
-                    "playlist_child_index": engine.safe_int(item.get("playlist_child_index")),
-                    "expanded": bool(item.get("expanded", True)),
-                    "status": "완료",
-                    "status_detail": "",
-                    "progress": 100,
-                    "progress_text": "",
-                    "output_path": item.get("output_path") or "",
-                    "messages": item.get("messages") or [],
-                    "created_order": created_order,
-                }
-            )
+            row = {
+                "id": candidate.get("id") or f"history-{created_order}",
+                "kind": row_kind(candidate),
+                "candidate": candidate,
+                "qualities": [candidate],
+                "quality_options": build_quality_options([candidate]),
+                "selected_index": 0,
+                "selected_format_index": 0,
+                "analysis_source_url": item.get("analysis_source_url") or source_url,
+                "source_url": source_url,
+                "playlist_key": playlist_key,
+                "parent_playlist_id": item.get("parent_playlist_id") or "",
+                "is_playlist_child": bool(item.get("is_playlist_child")),
+                "playlist_child_index": engine.safe_int(item.get("playlist_child_index")),
+                "expanded": bool(item.get("expanded", True)),
+                "status": "완료",
+                "status_detail": "",
+                "progress": 100,
+                "progress_text": "",
+                "output_path": item.get("output_path") or "",
+                "messages": item.get("messages") or [],
+                "created_order": created_order,
+            }
+            if hasattr(self, "_apply_actual_output_size"):
+                self._apply_actual_output_size(row)
+            restored.append(row)
         if restored:
             repaired_missing_parents = self._restore_missing_playlist_parents(restored)
             restored = self._dedupe_playlist_parent_rows(restored)

@@ -117,6 +117,13 @@ def candidate_size_value(candidate):
     )
 
 
+def candidate_size_label(candidate):
+    label = engine.display_size(candidate_size_value(candidate))
+    if label != "unknown" and candidate.get("size_source") == "clen_estimate":
+        return f"예상 {label}"
+    return label
+
+
 def build_quality_options(qualities):
     grouped = {}
     for candidate in qualities or []:
@@ -363,7 +370,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.setToolTip(str(title))
         self.title_label.start_marquee_if_needed()
         self.info_label.setText(row_info_text(candidate))
-        self.size_label.setText(engine.display_size(candidate_size_value(candidate)))
+        self.size_label.setText(candidate_size_label(candidate))
         if self.row.get("kind") == "playlist":
             self.row_quality_label.setText("")
         else:
@@ -489,16 +496,16 @@ class DownloadRowWidget(QFrame):
         self.row["status"] = status
         self.row["status_detail"] = detail
         self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
-        analyzing = status == "분석 중"
-        if analyzing:
+        loading = status == ANALYZING_STATUS or bool(self.row.get("download_starting"))
+        if loading:
             self._position_spinner()
             self.spinner.raise_()
             self.spinner.start()
         else:
             self.spinner.stop()
-        self.row_quality_label.setVisible(not analyzing and self.row.get("kind") != "playlist")
-        self.info_widget.setVisible(not analyzing)
-        self.size_widget.setVisible(not analyzing)
+        self.row_quality_label.setVisible(not loading and self.row.get("kind") != "playlist")
+        self.info_widget.setVisible(not loading)
+        self.size_widget.setVisible(not loading)
         self._refresh_actions()
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
 

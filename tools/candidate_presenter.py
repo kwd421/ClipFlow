@@ -12,7 +12,7 @@ AUDIO_FORMATS = ["mp3", "wav", "aac"]
 
 @dataclass(frozen=True)
 class DownloadPreferences:
-    quality: str = "자동"
+    quality: str = "최고화질"
     output_format: str = "자동"
     codec: str = "자동"
     frame_rate: str = "자동"
@@ -57,6 +57,8 @@ def candidate_visible_quality_key(candidate):
 def quality_label(candidate):
     ext = str(candidate.get("output_ext") or candidate.get("ext") or "").upper()
     size = engine.display_size(candidate.get("sort_bytes"))
+    if size != "unknown" and candidate.get("size_source") == "clen_estimate":
+        size = f"예상 {size}"
     if candidate.get("media_type") == "audio" or ext == "WAV":
         note = candidate.get("note") or "audio"
         return f"{ext} · {size} · {note}"
@@ -83,6 +85,10 @@ def _format_order(format_label):
 
 def _is_auto(value):
     return str(value or "").strip().lower() in {"", "자동", "auto"}
+
+
+def _is_best_quality(value):
+    return str(value or "").strip().lower() in {"", "자동", "최고화질", "auto", "best"}
 
 
 def _candidate_family(candidate):
@@ -129,7 +135,7 @@ def _downloadable_score(candidate):
 
 def _target_height(quality):
     text = str(quality or "").strip().lower()
-    if text in {"", "자동", "auto"}:
+    if _is_best_quality(text):
         return 0
     digits = "".join(char for char in text if char.isdigit())
     return int(digits) if digits else 0

@@ -810,6 +810,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if event_type == "progress":
             percent = max(0, min(100, int(float(event.get("percent") or 0))))
             text = self._progress_text(percent, event)
+            if row and row.get("download_starting"):
+                row["download_starting"] = False
+                if widget:
+                    widget.set_status(DOWNLOAD_STATUS)
             if widget:
                 # Avoid the heavy set_status() on every progress tick (it does
                 # spinner/visibility work + a filesystem stat in _refresh_actions).
@@ -829,9 +833,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if message:
                 if hasattr(self, "status_label"):
                     self.status_label.setText(message)
+                if row and row.get("download_starting") and widget:
+                    widget.set_progress(0, engine.compact_text(message, 48))
                 self._append_event_message(message)
         elif event_type in {"log", "done"}:
             if message:
+                if row and row.get("download_starting") and event_type == "log" and widget:
+                    widget.set_progress(0, engine.compact_text(message, 48))
                 self._append_event_message(message)
 
     def _progress_text(self, percent, event):

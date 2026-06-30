@@ -554,7 +554,7 @@ SORT_KEY_SETTING = "sort_key"
 SORT_DESC_SETTING = "sort_desc"
 
 PREFERENCE_DEFAULTS = {
-    "quality": "자동",
+    "quality": "최고화질",
     "output_format": "자동",
     "codec": "자동",
     "frame_rate": "자동",

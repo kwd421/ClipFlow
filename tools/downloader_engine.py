@@ -796,8 +796,27 @@ def bitrate_duration_size(fmt, duration=0):
     return int(bitrate_kbps * 1000 * seconds / 8)
 
 
+def manifest_clen_size(fmt):
+    url = urllib.parse.unquote(str((fmt or {}).get("url") or ""))
+    values = [safe_int(match) for match in re.findall(r"(?:^|[;/&?])clen=(\d+)(?:[;/&]|$)", url)]
+    return sum(value for value in values if value > 0)
+
+
+def manifest_bitrate_size_is_unreliable(fmt):
+    if not is_manifest_format(fmt):
+        return False
+    url = str(fmt.get("url") or "").lower()
+    protocol = format_protocol(fmt).lower()
+    return "googlevideo.com" in url and ("m3u8" in protocol or "hls_playlist" in url or ".m3u8" in url)
+
+
 def media_size_for_format(fmt, duration=0, extra_size=0):
     if is_manifest_format(fmt):
+        clen_size = manifest_clen_size(fmt)
+        if clen_size:
+            return clen_size + safe_int(extra_size), "clen_estimate"
+        if manifest_bitrate_size_is_unreliable(fmt):
+            return 0, "unknown"
         estimated = bitrate_duration_size(fmt, duration)
         if estimated:
             return estimated + safe_int(extra_size), "bitrate"
@@ -811,7 +830,7 @@ def media_size_for_format(fmt, duration=0, extra_size=0):
 
 def candidate_filesize_fields(fmt, sort_bytes=0, size_source="unknown"):
     if is_manifest_format(fmt):
-        if size_source == "bitrate":
+        if size_source in {"bitrate", "clen_estimate"}:
             return 0, safe_int(sort_bytes)
         return 0, 0
     return safe_int(fmt.get("filesize")), safe_int(fmt.get("filesize_approx"))

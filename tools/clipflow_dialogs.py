@@ -29,7 +29,7 @@ class PreferencesDialog(QDialog):
         form.setVerticalSpacing(10)
 
         self.quality_combo = CleanComboBox()
-        self.quality_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        self.quality_combo.addItems(["최고화질", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
         self.format_combo = CleanComboBox()
         self.format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
         self.codec_combo = CleanComboBox()

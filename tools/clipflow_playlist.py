@@ -455,6 +455,7 @@ class PlaylistMixin:
     def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):
         first_candidate = (grouped_rows[0].get("candidate") if grouped_rows else {}) or {}
         candidates = [row.get("candidate") or {} for row in grouped_rows]
+        size_source = self._playlist_size_source(candidates)
         title = (
             analysis.get("playlist_title")
             or analysis.get("title")
@@ -471,6 +472,7 @@ class PlaylistMixin:
             "thumbnail": first_candidate.get("thumbnail") or "",
             "duration": sum(engine.safe_int(candidate.get("duration")) for candidate in candidates),
             "sort_bytes": sum(engine.safe_int(candidate.get("sort_bytes")) for candidate in candidates),
+            "size_source": size_source,
             "item_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
             "playlist_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
             "source": source_url,
@@ -495,12 +497,24 @@ class PlaylistMixin:
             count = max(count, expected)
         candidate["duration"] = sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children)
         candidate["sort_bytes"] = sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children)
+        candidate["size_source"] = self._playlist_size_source([child.get("candidate") or {} for child in children])
         candidate["item_count"] = count
         candidate["playlist_count"] = count
         parent["playlist_entries"] = [
             {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
             for child in children
         ]
+
+    def _playlist_size_source(self, candidates):
+        candidates = [candidate for candidate in candidates if engine.safe_int(candidate.get("sort_bytes"))]
+        if not candidates:
+            return "unknown"
+        sources = {str(candidate.get("size_source") or "") for candidate in candidates}
+        if sources == {"actual"}:
+            return "actual"
+        if "clen_estimate" in sources or "bitrate" in sources:
+            return "clen_estimate"
+        return "metadata"
 
     def _parent_playlist_for_child(self, child_row):
         parent_id = child_row.get("parent_playlist_id")
