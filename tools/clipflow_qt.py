@@ -682,7 +682,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if row.get("kind") == "playlist" and row.get("analysis_loading") and not row.get("child_loading"):
                 row["analysis_loading"] = False
                 row["status"] = ERROR_STATUS
-                row["progress_text"] = ""
+                row["status_detail"] = message
+                row["progress_text"] = message
         self._set_status(f"{engine.classify_error(message)}: {message}")
 
     @Slot()

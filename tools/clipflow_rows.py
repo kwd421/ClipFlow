@@ -496,6 +496,7 @@ class DownloadRowWidget(QFrame):
         self.row["status"] = status
         self.row["status_detail"] = detail
         self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
+        self.setProperty("errored", "true" if status == ERROR_STATUS else "false")
         loading = status == ANALYZING_STATUS or bool(self.row.get("download_starting"))
         if loading:
             self._position_spinner()
@@ -534,6 +535,9 @@ class DownloadRowWidget(QFrame):
         self.setProperty("progressValue", progress_value)
         self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
+        self.progress_text.setStyleSheet(
+            f"color: {theme.DANGER};" if status == ERROR_STATUS and display_text else ""
+        )
         # A repaint is enough for the painted progress ring; avoid a full style
         # unpolish/polish on every progress tick (called dozens of times/sec).
         self.update()
@@ -600,12 +604,19 @@ class DownloadRowWidget(QFrame):
     def paintEvent(self, event):
         super().paintEvent(event)
         completed = self.property("completed") == "true"
-        if self.property("progressActive") != "true" and not completed:
+        errored = self.property("errored") == "true"
+        if self.property("progressActive") != "true" and not completed and not errored:
             return
         _rect, full, gradient = self._progress_paths()
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+
+        if errored:
+            # Full red ring so a failed row is obvious at a glance.
+            painter.setPen(QPen(QColor(theme.DANGER), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            return
 
         if completed:
             # Full rounded ring at the same width as the download progress arc,
