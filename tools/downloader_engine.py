@@ -1073,7 +1073,7 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             "continuedl": True,
             "retries": 10,
             "fragment_retries": 10,
-            "concurrent_fragment_downloads": 4,
+            "concurrent_fragment_downloads": 1,
             "progress_hooks": [progress_hook(on_event)],
             "postprocessor_hooks": [postprocessor_hook(on_event)],
         }
