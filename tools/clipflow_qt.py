@@ -701,7 +701,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         text = str(message or "").lower()
         if "cookie" not in text:
             return
-        if not any(token in text for token in ("could not find", "database", "permission", "decrypt", "blocked", "denied", "access")):
+        if not any(token in text for token in (
+            "could not find", "database", "permission", "permitted", "decrypt",
+            "blocked", "denied", "access", "errno", "could not copy", "operation not",
+        )):
             return
         self._cookie_permission_prompt_shown = True
         self._show_macos_cookie_permission_dialog()
