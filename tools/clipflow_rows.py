@@ -348,6 +348,7 @@ class DownloadRowWidget(QFrame):
     def resizeEvent(self, event):
         self._position_actions()
         self._position_spinner()
+        self._clear_progress_path_cache()
         super().resizeEvent(event)
 
     def _position_spinner(self):
@@ -528,10 +529,6 @@ class DownloadRowWidget(QFrame):
         # A repaint is enough for the painted progress ring; avoid a full style
         # unpolish/polish on every progress tick (called dozens of times/sec).
         self.update()
-
-    def resizeEvent(self, event):
-        self._clear_progress_path_cache()
-        super().resizeEvent(event)
 
     def _clear_progress_path_cache(self):
         self._progress_cache_key = None

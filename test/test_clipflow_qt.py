@@ -1827,6 +1827,48 @@ print(row_widget.property("progressValue"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["true", "0"])
 
+    def test_clipflow_qt_row_resize_repositions_actions_spinner_and_clears_progress_cache(self):
+        script = r'''
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+row = {
+    "id": "row",
+    "kind": "video",
+    "candidate": {"id": "best", "source": "https://media.test/watch", "url": "https://media.test/watch", "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": "https://media.test/watch",
+    "source_url": "https://media.test/watch",
+    "status": "준비",
+    "status_detail": "",
+    "progress": 0,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+}
+window.rows = [row]
+window._render_rows()
+widget = row["widget"]
+calls = []
+widget._position_actions = lambda: calls.append("actions")
+widget._position_spinner = lambda: calls.append("spinner")
+widget._clear_progress_path_cache = lambda: calls.append("cache")
+widget.resizeEvent(QResizeEvent(QSize(700, 72), QSize(680, 72)))
+print(",".join(calls))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "actions,spinner,cache")
+
     def test_clipflow_qt_row_action_overlay_has_square_left_edge(self):
         script = r'''
 from PySide6.QtCore import QPoint
