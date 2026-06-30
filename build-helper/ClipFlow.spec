@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 ROOT = Path(SPECPATH).resolve().parent
-ENTRYPOINT = ROOT / "tools" / "clipflow_qt.py"
+ENTRYPOINT = ROOT / "tools" / "clipflow_entry.py"
 
 datas = [
     (str(ROOT / "assets" / "icons" / "lucide"), "assets/icons/lucide"),
@@ -15,7 +15,7 @@ binaries = []
 hiddenimports = []
 
 hiddenimports += collect_submodules("yt_dlp")
-hiddenimports += ["PySide6.QtSvg", "tools.clipflow_download_process"]
+hiddenimports += ["PySide6.QtSvg", "tools.clipflow_download_process", "tools.clipflow_qt"]
 
 for package in ("imageio_ffmpeg", "yt_dlp_ejs", "PIL", "curl_cffi"):
     tmp_ret = collect_all(package)

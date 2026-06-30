@@ -1026,12 +1026,16 @@ def download_infos_from_info(info):
     return infos
 
 
+def is_youtube_url(value):
+    parsed = urllib.parse.urlparse(str(value or ""))
+    host = parsed.netloc.lower().removeprefix("www.")
+    return host in {"youtube.com", "m.youtube.com", "youtu.be"} or host.endswith(".youtube.com")
+
+
 def download_info_reuse_supported(candidate):
     candidate = candidate or {}
     for value in (candidate.get("source"), candidate.get("webpage_url"), candidate.get("url")):
-        parsed = urllib.parse.urlparse(str(value or ""))
-        host = parsed.netloc.lower().removeprefix("www.")
-        if host in {"youtube.com", "m.youtube.com", "youtu.be"} or host.endswith(".youtube.com"):
+        if is_youtube_url(value):
             return False
     return True
 
@@ -1121,17 +1125,28 @@ def progress_hook(on_event=None):
             downloaded = data.get("downloaded_bytes") or 0
             total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
             percent = max(0, min(100, downloaded * 100 / total)) if total else 0
-            # Throttle to ~10 events/sec. yt-dlp fires this callback dozens of
+            # Throttle to ~4 events/sec. yt-dlp fires this callback dozens of
             # times per second; with concurrent downloads the cross-thread signal
             # flood can starve the UI thread. Always let the final tick through.
             now = time.monotonic()
-            if percent < 100 and now - last_emit[0] < 0.1:
+            if percent < 100 and now - last_emit[0] < 0.25:
                 return
             last_emit[0] = now
             if total:
                 speed = (data.get("_speed_str") or "").strip()
                 eta = (data.get("_eta_str") or "").strip()
-                emit_event(on_event, "progress", percent=percent, message=f"{percent:.1f}% {speed} ETA {eta}".strip())
+                emit_event(
+                    on_event,
+                    "progress",
+                    percent=percent,
+                    downloaded=downloaded,
+                    total=total,
+                    speed=data.get("speed") or 0,
+                    eta=data.get("eta"),
+                    speed_text=speed,
+                    eta_text=eta,
+                    message=f"{percent:.1f}% {speed} ETA {eta}".strip(),
+                )
             else:
                 emit_event(on_event, "status", message="Downloading")
         elif status == "finished":
@@ -1781,15 +1796,16 @@ def analyze_url(
     entries = info.get("entries") if isinstance(info, dict) else None
     is_playlist = bool(allow_playlist and entries)
     playlist_title = clean_video_title(info.get("title") or info.get("playlist_title") or "") if isinstance(info, dict) else ""
+    webpage_url = info.get("webpage_url") or url
     result = {
         "url": url,
-        "webpage_url": info.get("webpage_url") or url,
+        "webpage_url": webpage_url,
         "title": clean_video_title(info.get("title") or candidates[0].get("title")) or "video",
         "is_playlist": is_playlist,
         "playlist_title": playlist_title,
         "playlist_count": safe_int(info.get("playlist_count") or info.get("n_entries") or (len(entries) if entries else 0)),
         "candidates": candidates,
-        "_download_infos": download_infos_from_info(info),
+        "_download_infos": {} if is_youtube_url(webpage_url) else download_infos_from_info(info),
         "warnings": warnings,
     }
     emit_playlist_analysis_events(result, on_event=on_event)
@@ -1853,7 +1869,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
             no_cookie_options = build_download_options(
                 fallback_candidate,
                 output_dir,
-                cookie_source="?놁쓬",
+                cookie_source="없음",
                 on_event=on_event,
                 proxy_url=proxy_url,
             )
@@ -1867,7 +1883,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
 
 
-DOWNLOAD_WORKER_IDLE_SECONDS = 90.0
+DOWNLOAD_WORKER_IDLE_SECONDS = 30.0
 _DOWNLOAD_PROCESS_POOL = None
 _DOWNLOAD_PROCESS_POOL_LOCK = threading.Lock()
 
@@ -2008,7 +2024,7 @@ class PersistentDownloadProcess:
 
 
 class DownloadProcessPool:
-    def __init__(self, idle_seconds=DOWNLOAD_WORKER_IDLE_SECONDS, max_idle=3, command_factory=None):
+    def __init__(self, idle_seconds=DOWNLOAD_WORKER_IDLE_SECONDS, max_idle=1, command_factory=None):
         self.idle_seconds = idle_seconds
         self.max_idle = max_idle
         self.command_factory = command_factory or persistent_download_worker_command

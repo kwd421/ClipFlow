@@ -184,6 +184,10 @@ class DownloadRowWidget(QFrame):
         self.setMouseTracking(True)
         self.setFixedHeight(72)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._progress_cache_key = None
+        self._progress_full_path = None
+        self._progress_partial_paths = {}
+        self._progress_gradient = None
         self._build()
         self.refresh()
 
@@ -498,31 +502,76 @@ class DownloadRowWidget(QFrame):
 
     def set_progress(self, value, text=""):
         bounded = max(0, min(100, int(float(value or 0))))
-        self.row["progress"] = bounded
         status = self.row.get("status")
         active = status in ACTIVE_STATUSES
         error_detail = status == ERROR_STATUS and self.row.get("status_detail")
         display_text = text if active else (self.row.get("status_detail") if error_detail else "")
+        active_value = "true" if active else "false"
+        progress_value = str(bounded if active else 0)
+        if (
+            self.row.get("progress") == bounded
+            and self.row.get("progress_text") == display_text
+            and self.property("progressActive") == active_value
+            and self.property("progressValue") == progress_value
+            and self.progress_text.text() == display_text
+            and self.progress_text.isVisible() == bool(display_text)
+        ):
+            return
+        self.row["progress"] = bounded
         self.row["progress_text"] = display_text
         self.progress_bar.setValue(bounded)
         self.progress_bar.hide()
-        self.setProperty("progressActive", "true" if active else "false")
-        self.setProperty("progressValue", str(bounded if active else 0))
+        self.setProperty("progressActive", active_value)
+        self.setProperty("progressValue", progress_value)
         self.progress_text.setVisible(bool(display_text))
         self.progress_text.setText(display_text)
         # A repaint is enough for the painted progress ring; avoid a full style
         # unpolish/polish on every progress tick (called dozens of times/sec).
         self.update()
 
+    def resizeEvent(self, event):
+        self._clear_progress_path_cache()
+        super().resizeEvent(event)
+
+    def _clear_progress_path_cache(self):
+        self._progress_cache_key = None
+        self._progress_full_path = None
+        self._progress_partial_paths.clear()
+        self._progress_gradient = None
+
+    def _progress_paths(self):
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        key = (round(rect.width(), 2), round(rect.height(), 2))
+        if self._progress_cache_key != key:
+            self._progress_cache_key = key
+            self._progress_full_path = QPainterPath()
+            self._progress_full_path.addRoundedRect(rect, 10.0, 10.0)
+            self._progress_gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+            self._progress_gradient.setColorAt(0.0, QColor(theme.ACCENT))
+            self._progress_gradient.setColorAt(1.0, QColor(theme.ACCENT_SOFT))
+            self._progress_partial_paths.clear()
+        return rect, self._progress_full_path, self._progress_gradient
+
+    def _progress_partial_path(self, full, progress):
+        progress = max(0, min(100, int(progress)))
+        cached = self._progress_partial_paths.get(progress)
+        if cached is not None:
+            return cached
+        fraction = progress / 100.0
+        samples = 72
+        partial = QPainterPath()
+        partial.moveTo(full.pointAtPercent(0.0))
+        for index in range(1, samples + 1):
+            partial.lineTo(full.pointAtPercent(fraction * index / samples))
+        self._progress_partial_paths[progress] = partial
+        return partial
+
     def paintEvent(self, event):
         super().paintEvent(event)
         completed = self.property("completed") == "true"
         if self.property("progressActive") != "true" and not completed:
             return
-        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
-        radius = 10.0
-        full = QPainterPath()
-        full.addRoundedRect(rect, radius, radius)
+        _rect, full, gradient = self._progress_paths()
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -541,14 +590,6 @@ class DownloadRowWidget(QFrame):
         painter.drawPath(full)
         if progress <= 0:
             return
-        fraction = progress / 100.0
-        samples = 220
-        partial = QPainterPath()
-        partial.moveTo(full.pointAtPercent(0.0))
-        for index in range(1, samples + 1):
-            partial.lineTo(full.pointAtPercent(fraction * index / samples))
-        gradient = QLinearGradient(rect.topLeft(), rect.topRight())
-        gradient.setColorAt(0.0, QColor(theme.ACCENT))
-        gradient.setColorAt(1.0, QColor(theme.ACCENT_SOFT))
+        partial = self._progress_partial_path(full, progress)
         painter.setPen(QPen(QBrush(gradient), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(partial)

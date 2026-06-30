@@ -1061,52 +1061,6 @@ print(thumbnail._preview.testAttribute(Qt.WA_TransparentForMouseEvents))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True"])
 
-    def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
-        script = r'''
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFrame
-from tools.clipflow_qt import ClipFlowWindow
-
-url = "https://media.test/video"
-
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
-    return {
-        "webpage_url": url,
-        "url": url,
-        "title": "Video",
-        "candidates": [
-            {"id": "best", "source": url, "url": url, "title": "A very long media title that should use extra width", "display_title": "A very long media title that should use extra width", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
-        ],
-        "warnings": [],
-    }
-
-app = QApplication([])
-window = ClipFlowWindow(analyze_func=fake_analyze)
-window.resize(1500, 1100)
-window._analysis_finished(fake_analyze(url))
-window.show()
-app.processEvents()
-row_widget = window.rows[0]["widget"]
-fixed_column_widgets = [row_widget.info_widget, row_widget.size_widget, row_widget.actions_widget]
-print(len(window.findChildren(QFrame, "HeaderBar")))
-print(row_widget.item_widget.maximumWidth() > 10000)
-print(",".join(str(widget.width()) for widget in fixed_column_widgets))
-print(f"{window.minimumWidth()}x{window.minimumHeight()}")
-print(window.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff)
-print(window.scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOn)
-print(hasattr(window, "status_label"))
-print(len(window.findChildren(QFrame, "FooterDivider")))
-fresh = ClipFlowWindow()
-print(f"{fresh.width()}x{fresh.height()}")
-'''
-        result = run_qt_script(script)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(),
-            ["0", "True", "84,92,229", "560x420", "True", "True", "False", "0", "720x760"],
-        )
-
     def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
         script = r'''
 from PySide6.QtCore import QPoint

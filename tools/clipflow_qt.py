@@ -775,7 +775,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         widget = row.get("widget") if row else None
         if event_type == "progress":
             percent = max(0, min(100, int(float(event.get("percent") or 0))))
-            text = self._progress_text(percent, message)
+            text = self._progress_text(percent, event)
             if widget:
                 # Avoid the heavy set_status() on every progress tick (it does
                 # spinner/visibility work + a filesystem stat in _refresh_actions).
@@ -784,7 +784,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 if row.get("status") != DOWNLOAD_STATUS:
                     widget.set_status(DOWNLOAD_STATUS)
                 widget.set_progress(percent, text)
-            if hasattr(self, "status_label"):
+            if hasattr(self, "status_label") and self.status_label.text() != (text or "다운로드 중"):
                 self.status_label.setText(text or "다운로드 중")
         elif event_type == "file":
             if row and event.get("path"):
@@ -800,7 +800,15 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if message:
                 self.event_messages.append(message)
 
-    def _progress_text(self, percent, message):
+    def _progress_text(self, percent, event):
+        if isinstance(event, dict):
+            speed = str(event.get("speed_text") or "").strip()
+            if not speed:
+                message = event.get("message") or ""
+            else:
+                return f"{percent}% · {speed}"
+        else:
+            message = event
         parts = str(message or "").split()
         speed = ""
         for index, part in enumerate(parts):
