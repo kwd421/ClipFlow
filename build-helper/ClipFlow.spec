@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -9,6 +10,10 @@ ROOT = Path(SPECPATH).resolve().parent
 ENTRYPOINT = ROOT / "tools" / "clipflow_entry.py"
 ICNS = ROOT / "build-helper" / "ClipFlow.icns"
 ICO = ROOT / "build-helper" / "ClipFlow.ico"
+APP_VERSION = os.environ.get("CLIPFLOW_VERSION", "0.0.0")
+APP_BUILD = os.environ.get("CLIPFLOW_BUILD_NUMBER", APP_VERSION)
+CODESIGN_IDENTITY = os.environ.get("CLIPFLOW_CODESIGN_IDENTITY") or None
+ENTITLEMENTS_FILE = os.environ.get("CLIPFLOW_ENTITLEMENTS_FILE") or None
 
 # EXE icon must match the platform: .ico on Windows, .icns on macOS.
 if sys.platform == "darwin":
@@ -55,6 +60,30 @@ def without_unused_binaries(toc):
         filtered.append(item)
     return filtered
 
+
+def mac_info_plist():
+    info = {
+        "CFBundleDisplayName": "ClipFlow",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_BUILD,
+        "NSHighResolutionCapable": True,
+    }
+    sparkle_feed_url = os.environ.get("CLIPFLOW_SPARKLE_FEED_URL") or ""
+    sparkle_public_key = os.environ.get("CLIPFLOW_SPARKLE_PUBLIC_ED_KEY") or ""
+    if sparkle_feed_url or sparkle_public_key:
+        if not sparkle_feed_url or not sparkle_public_key:
+            raise ValueError("Set both CLIPFLOW_SPARKLE_FEED_URL and CLIPFLOW_SPARKLE_PUBLIC_ED_KEY for Sparkle builds.")
+        info.update(
+            {
+                "SUFeedURL": sparkle_feed_url,
+                "SUPublicEDKey": sparkle_public_key,
+                "SUEnableAutomaticChecks": True,
+                "SUAutomaticallyUpdate": True,
+                "SUAllowsAutomaticUpdates": True,
+            }
+        )
+    return info
+
 hiddenimports += collect_submodules("yt_dlp")
 hiddenimports += ["PySide6.QtSvg", "tools.clipflow_analysis_process", "tools.clipflow_download_process", "tools.clipflow_qt"]
 
@@ -99,8 +128,8 @@ if sys.platform == "darwin":
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
+        codesign_identity=CODESIGN_IDENTITY,
+        entitlements_file=ENTITLEMENTS_FILE,
         icon=EXE_ICON,
     )
     coll = COLLECT(
@@ -117,6 +146,7 @@ if sys.platform == "darwin":
         name="ClipFlow.app",
         icon=str(ICNS) if ICNS.exists() else None,
         bundle_identifier="com.clipflow.app",
+        info_plist=mac_info_plist(),
     )
 else:
     # Windows/Linux: onefile (single distributable executable).

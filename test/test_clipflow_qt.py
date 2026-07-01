@@ -1912,7 +1912,8 @@ print(QSettings(SETTINGS_ORG, SETTINGS_APP).value(SAVE_FOLDER_SETTING))
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["False", "True", "True", "C:\\ClipFlow\\Typed", "C:\\ClipFlow\\Typed"])
+        typed_path = "C:\\ClipFlow\\Typed" if os.name == "nt" else "C:/ClipFlow/Typed"
+        self.assertEqual(result.stdout.splitlines(), ["False", "True", "True", typed_path, typed_path])
 
     def test_clipflow_qt_persists_save_folder_with_qsettings(self):
         script = r'''

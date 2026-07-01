@@ -38,6 +38,7 @@ try:
     from tools.clipflow_views import RenderMixin
     from tools.clipflow_actions import ActionMixin, local_file_url
     from tools.clipflow_settings import SettingsMixin, default_save_folder
+    from tools.clipflow_updater import start_sparkle_updater
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -55,6 +56,7 @@ except ImportError:
     from clipflow_views import RenderMixin
     from clipflow_actions import ActionMixin, local_file_url
     from clipflow_settings import SettingsMixin, default_save_folder
+    from clipflow_updater import start_sparkle_updater
 
 try:
     from tools.clipflow_theme import (
@@ -1207,6 +1209,7 @@ def main():
 
     app = QApplication(sys.argv)
     configure_app_font(app)
+    app._clipflow_sparkle_updater = start_sparkle_updater()
     window = ClipFlowWindow()
     window.show()
 

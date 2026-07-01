@@ -1,0 +1,17 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>ClipFlow</title>
+        <item>
+            <title>0.1.0</title>
+            <pubDate>Wed, 01 Jul 2026 23:50:38 +0900</pubDate>
+            <link>https://github.com/kwd421/universal-mp4-browser-downloader</link>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://kwd421.github.io/universal-mp4-browser-downloader/ClipFlow-0.1.0.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/kwd421/universal-mp4-browser-downloader/releases/download/v0.1.0/ClipFlow-0.1.0.zip" length="71854523" type="application/octet-stream" sparkle:edSignature="hsYoox5cbBXteFtzCkf5+B+xEOoitBSUvdQqdEeRUqZbXDJk8brOiXbXX2jzhkcBk1CqljrdQ4/i3F8c4y9jAA=="/>
+        </item>
+    </channel>
+</rss>
