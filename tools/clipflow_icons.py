@@ -4,7 +4,7 @@ from functools import lru_cache
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QLabel, QToolButton, QWidget
+from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLabel, QToolButton, QVBoxLayout, QWidget
 
 try:
     from tools import clipflow_theme as theme
@@ -164,7 +164,7 @@ class LucideIconButton(QToolButton):
         self.update()
 
 
-class CustomTooltip(QLabel):
+class CustomTooltip(QWidget):
     """A single, app-wide tooltip popup.
 
     It is transparent to mouse events and shown above the hovered widget, which
@@ -173,19 +173,50 @@ class CustomTooltip(QLabel):
     """
 
     _instance = None
+    SHADOW_MARGIN = 12
 
     def __init__(self):
         super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setObjectName("CustomTooltip")
-        self.setWordWrap(False)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setStyleSheet(
-            "QLabel#CustomTooltip {"
-            f" background: {theme.INK}; color: {theme.SURFACE};"
-            " border-radius: 7px; padding: 7px 10px; font-size: 12px;"
+            "QLabel#CustomTooltipBubble {"
+            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.BORDER_STRONG};"
+            " border-radius: 7px; padding: 7px 10px; font-size: 12px; font-weight: 500;"
             " }"
         )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            self.SHADOW_MARGIN,
+            self.SHADOW_MARGIN,
+            self.SHADOW_MARGIN,
+            self.SHADOW_MARGIN + 4,
+        )
+        layout.setSpacing(0)
+        self._bubble = QLabel(self)
+        self._bubble.setObjectName("CustomTooltipBubble")
+        self._bubble.setWordWrap(False)
+        layout.addWidget(self._bubble)
+        shadow = QGraphicsDropShadowEffect(self._bubble)
+        shadow.setBlurRadius(18)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(20, 22, 30, 44))
+        self._bubble.setGraphicsEffect(shadow)
+        self._shadow = shadow
+
+    def setText(self, text):
+        self._bubble.setText(text)
+
+    def text(self):
+        return self._bubble.text()
+
+    def bubble_geometry(self):
+        return self._bubble.geometry()
+
+    def graphicsEffect(self):
+        return self._shadow
 
     @classmethod
     def instance(cls):

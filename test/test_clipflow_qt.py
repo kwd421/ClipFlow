@@ -105,7 +105,7 @@ print(called)
     def test_clipflow_qt_uses_bundled_lucide_icons(self):
         script = r'''
 import tools.clipflow_widgets as widgets
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from tools.clipflow_icons import LUCIDE_ICON_DIR, LucideIconButton, LucideIconWidget, icon_path
 
 app = QApplication([])
@@ -130,7 +130,8 @@ print(LucideIconButton("folder").icon_name)
         script = r'''
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel
 from tools.clipflow_widgets import CleanComboBox
 
 app = QApplication([])
@@ -157,6 +158,7 @@ print(not second_popup.isVisible())
 
     def test_clipflow_qt_sort_combo_hides_inline_arrow(self):
         script = r'''
+from PySide6.QtCore import Qt
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
@@ -329,8 +331,9 @@ app.exec()
 
     def test_clipflow_qt_quality_button_opens_dropdown_preferences(self):
         script = r'''
-from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel
 from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
 from tools.clipflow_widgets import CleanComboBox
 
@@ -342,21 +345,31 @@ window._create_preferences_dialog = lambda: (_ for _ in ()).throw(RuntimeError("
 window.preference_button.click()
 popup = window.preferences_popup
 combos = popup.findChildren(CleanComboBox)
+labels = [label.text() for label in popup.findChildren(QLabel)]
 print(bool(popup and popup.isVisible()))
 print(len(combos))
+print(window.preference_button.text())
+print("병렬" in labels)
+print(combos[-1].currentText())
 button_right = window.preference_button.mapToGlobal(QPoint(window.preference_button.width(), 0)).x()
 print(abs(popup.geometry().right() - button_right) <= 1)
 combos[0].setCurrentText("720p")
 combos[1].setCurrentText("WEBM")
+combos[-1].setCurrentText("2")
 print(window.current_preferences().quality)
 print(window.current_preferences().output_format)
-window.preference_button.click()
+print(window.download_concurrency)
+QTest.mouseClick(window.preference_button, Qt.LeftButton)
+app.processEvents()
 print(window.preferences_popup is None)
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "4", "True", "720p", "WEBM", "True"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["True", "5", "옵션", "True", "3", "True", "720p", "WEBM", "2", "True"],
+        )
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
         script = r'''
@@ -948,8 +961,8 @@ print(hasattr(row_widget, "status_label"))
 print(row_widget.progress_text.isHidden())
 row_widget.set_status("오류", "network problem")
 row_widget.set_progress(0, "")
-print(row_widget.progress_text.isHidden())
-print(row_widget.progress_text.text())
+print(row_widget.row_quality_label.isHidden())
+print(row_widget.row_quality_label.text())
 print(row_widget.progress_bar.isHidden())
 '''
         result = run_qt_script(script)
@@ -1008,11 +1021,12 @@ print(opened)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["False", "False", "False", "True", "False", "False", "True", "true", "False", "False", "False", "media.test", "['https://media.test/video']"],
+            ["False", "False", "False", "True", "False", "False", "True", "true", "False", "False", "False", "", "['https://media.test/video']"],
         )
 
-    def test_clipflow_qt_hover_actions_cover_time_and_size_columns(self):
+    def test_clipflow_qt_hover_actions_sit_above_time_and_size_columns(self):
         script = r'''
+from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
@@ -1035,15 +1049,321 @@ row_widget = window.rows[0]["widget"]
 row_widget._set_hovered(True)
 app.processEvents()
 actions = row_widget.actions_widget.geometry()
-info = row_widget.info_widget.geometry()
-size = row_widget.size_widget.geometry()
-print(actions.x() <= info.x())
-print(actions.x() + actions.width() >= size.x() + size.width())
+info_top_left = row_widget.info_widget.mapTo(row_widget, row_widget.info_widget.rect().topLeft())
+size_top_left = row_widget.size_widget.mapTo(row_widget, row_widget.size_widget.rect().topLeft())
+info_rect = QRect(info_top_left, row_widget.info_widget.size())
+size_rect = QRect(size_top_left, row_widget.size_widget.size())
+print(actions.y() < info_rect.y())
+print(not actions.intersects(info_rect))
+print(not actions.intersects(size_rect))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True"])
+
+    def test_clipflow_qt_hover_actions_use_compact_stable_title_slot(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(760, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+row_widget.set_status("완료")
+row_widget._set_hovered(True)
+app.processEvents()
+actions = row_widget.actions_widget.geometry()
+title_top = row_widget.title_label.mapTo(row_widget, QPoint(0, 0)).y()
+title_center = title_top + row_widget.title_label.height() / 2
+action_center = actions.y() + actions.height() / 2
+meta_top = row_widget.info_widget.mapTo(row_widget, QPoint(0, 0)).y()
+
+print(actions.height())
+print(row_widget.open_folder_button.width(), row_widget.open_folder_button.icon_size)
+print(abs(action_center - title_center) <= 1)
+print(actions.y() + actions.height() < meta_top)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["28", "28 18", "True", "True"])
+
+    def test_clipflow_qt_row_title_has_no_hover_tooltip_but_action_icons_do(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+print(row_widget.title_label.toolTip())
+print(row_widget.open_folder_button.toolTip())
+print(row_widget.more_button.toolTip())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["", "폴더 열기", "더보기"])
+
+    def test_clipflow_qt_row_meta_text_uses_icon_height_for_vertical_centering(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+print(row_widget.info_label.height(), row_widget.info_icon.height())
+print(row_widget.size_label.height(), row_widget.size_icon.height())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["14 14", "14 14"])
+
+    def test_clipflow_qt_row_title_uses_two_line_area_with_dynamic_vertical_alignment(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+long_title = "This is a long title that should wrap when the hover actions reserve the right title slot"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(560, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "short", "source": url, "url": url, "title": "Short", "display_title": "Short", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        {"id": "long", "source": url + "/2", "url": url + "/2", "title": long_title, "display_title": long_title, "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+short_row = next(row["widget"] for row in window.rows if row["candidate"].get("id") == "short")
+long_row = next(row["widget"] for row in window.rows if row["candidate"].get("id") == "long")
+print(short_row.title_label.height())
+print(bool(short_row.title_label.alignment() & Qt.AlignVCenter))
+
+long_row.set_status("완료")
+long_row._set_hovered(True)
+app.processEvents()
+print(long_row.title_label.height())
+print(bool(long_row.title_label.alignment() & Qt.AlignTop))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["34", "True", "34", "True"])
+
+    def test_clipflow_qt_row_keeps_hover_background_while_more_menu_is_open(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+row_widget.set_status("완료")
+row_widget._actions_menu_open = True
+row_widget._set_hovered(False)
+print(row_widget.property("hovered"))
+print(not row_widget.actions_widget.isHidden())
+row_widget._actions_menu_open = False
+row_widget._set_hovered(False)
+print(row_widget.property("hovered"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["true", "True", "false"])
+
+    def test_clipflow_qt_row_uses_same_inner_inset_for_thumbnail_meta_and_hover_actions(self):
+        script = r'''
+from PySide6.QtCore import QRect
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+border = 1
+inset = 5
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(760, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Kenshi Yonezu 米津玄師 - Sayonara, Mata Itsuka ! 75th", "display_title": "Kenshi Yonezu 米津玄師 - Sayonara, Mata Itsuka ! 75th", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 285, "sort_bytes": 87600000},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+row_widget._set_hovered(True)
+app.processEvents()
+
+def mapped_rect(widget):
+    return QRect(widget.mapTo(row_widget, widget.rect().topLeft()), widget.size())
+
+thumb = row_widget.thumbnail.geometry()
+title = mapped_rect(row_widget.title_label)
+favicon = mapped_rect(row_widget.source_link_button)
+favicon_icon = row_widget.source_link_button._icon_target_rect().translated(favicon.topLeft())
+info_icon = mapped_rect(row_widget.info_icon)
+info_label = mapped_rect(row_widget.info_label)
+size_icon = mapped_rect(row_widget.size_icon)
+size_label = mapped_rect(row_widget.size_label)
+info_widget = mapped_rect(row_widget.info_widget)
+actions = row_widget.actions_widget.geometry()
+
+print(thumb.x() - border)
+print(thumb.y() - border)
+print(row_widget.height() - border - (thumb.y() + thumb.height()))
+print(title.x() - (thumb.x() + thumb.width()))
+print(favicon.x() - (thumb.x() + thumb.width()))
+print(row_widget.height() - border - (favicon.y() + favicon.height()))
+print(favicon_icon.x() - (thumb.x() + thumb.width()))
+print(row_widget.height() - border - (favicon_icon.y() + favicon_icon.height()))
+print(row_widget.height() - border - (info_widget.y() + info_widget.height()))
+print(row_widget.width() - border - (size_label.x() + size_label.width()))
+print(size_icon.x() - (info_label.x() + info_label.width()))
+print(abs((info_icon.y() + info_icon.height() / 2) - (info_label.y() + info_label.height() / 2)) <= 1)
+print(abs((size_icon.y() + size_icon.height() / 2) - (size_label.y() + size_label.height() / 2)) <= 1)
+print(actions.y() - border)
+print(info_widget.y() - (actions.y() + actions.height()))
+print(row_widget.width() - border - (actions.x() + actions.width()))
+print(row_widget.open_folder_button.icon_size)
+print(hasattr(row_widget.open_folder_button, "hover_preview"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["5"] * 8 + ["8", "8", "8", "True", "True", "8", "4", "5", "18", "False"],
+        )
+
+    def test_clipflow_qt_thumbnail_hover_preview_tracks_cursor_and_flips_at_edges(self):
+        script = r'''
+from PySide6.QtCore import QPoint, QRect, QSize
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+size = QSize(384, 216)
+screen = QRect(0, 0, 600, 420)
+
+normal = ThumbnailPlaceholder.preview_geometry(QPoint(80, 300), size, screen)
+right_edge = ThumbnailPlaceholder.preview_geometry(QPoint(590, 300), size, screen)
+top_edge = ThumbnailPlaceholder.preview_geometry(QPoint(80, 40), size, screen)
+corner = ThumbnailPlaceholder.preview_geometry(QPoint(590, 40), size, screen)
+
+print(normal.left(), normal.bottom(), normal.width(), normal.height())
+print(right_edge.right() <= screen.right())
+print(right_edge.right() == 580)
+print(top_edge.top() == 50)
+print(corner.right() == 580)
+print(corner.top() == 50)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["90 290 384 216", "True", "True", "True", "True", "True"])
+
+    def test_clipflow_qt_row_thumbnail_and_favicon_alignment(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(760, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+thumb_pos = row_widget.thumbnail.pos()
+favicon_pos = row_widget.source_link_button.mapTo(row_widget, row_widget.source_link_button.rect().topLeft())
+title_pos = row_widget.title_label.mapTo(row_widget, row_widget.title_label.rect().topLeft())
+print(thumb_pos.x() == thumb_pos.y())
+print(favicon_pos.x() == title_pos.x())
+print(favicon_pos.y() + row_widget.source_link_button.height() == thumb_pos.y() + row_widget.thumbnail.height())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True"])
 
     def test_clipflow_qt_row_sets_thumbnail_url_on_placeholder(self):
         script = r'''
@@ -1087,15 +1407,125 @@ thumbnail = ThumbnailPlaceholder()
 thumbnail._set_pixmap(QPixmap(120, 80))
 thumbnail._show_preview()
 print(thumbnail._preview.testAttribute(Qt.WA_TransparentForMouseEvents))
+print(bool(thumbnail._preview.windowFlags() & Qt.WindowTransparentForInput))
+print(thumbnail._preview_label.width(), thumbnail._preview_label.height())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "384 216"])
 
-    def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
+    def test_clipflow_qt_thumbnail_preview_moves_from_mouse_event_global_position(self):
+        script = r'''
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+thumbnail = ThumbnailPlaceholder()
+positions = []
+
+def record_move(cursor_pos=None):
+    positions.append((cursor_pos.x(), cursor_pos.y()) if cursor_pos is not None else None)
+
+thumbnail._move_preview = record_move
+event = QMouseEvent(
+    QEvent.MouseMove,
+    QPointF(5, 5),
+    QPointF(5, 5),
+    QPointF(123, 456),
+    Qt.NoButton,
+    Qt.NoButton,
+    Qt.NoModifier,
+)
+thumbnail.mouseMoveEvent(event)
+print(positions[0])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["(123, 456)"])
+
+    def test_clipflow_qt_thumbnail_preview_keeps_only_one_active_preview(self):
         script = r'''
 from PySide6.QtCore import QPoint
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+first = ThumbnailPlaceholder()
+second = ThumbnailPlaceholder()
+first._set_pixmap(QPixmap(120, 80))
+second._set_pixmap(QPixmap(120, 80))
+
+first._show_preview(QPoint(120, 300))
+app.processEvents()
+print(first._preview.isVisible())
+
+second._show_preview(QPoint(140, 330))
+app.processEvents()
+print(first._preview.isVisible())
+print(second._preview.isVisible())
+
+second._hide_preview()
+print(ThumbnailPlaceholder._active_preview_owner is None)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "True", "True"])
+
+    def test_clipflow_qt_thumbnail_preview_leave_does_not_hide_while_cursor_still_inside_thumbnail(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+thumbnail = ThumbnailPlaceholder()
+thumbnail.show()
+thumbnail._set_pixmap(QPixmap(120, 80))
+thumbnail._show_preview()
+inside = thumbnail.mapToGlobal(QPoint(10, 10))
+outside = thumbnail.mapToGlobal(QPoint(-10, -10))
+thumbnail._hide_preview_if_cursor_left(inside)
+print(thumbnail._preview.isVisible())
+thumbnail._hide_preview_if_cursor_left(outside)
+print(thumbnail._preview.isVisible())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False"])
+
+    def test_clipflow_qt_source_link_button_centers_icon_without_edge_crop(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import SourceLinkButton
+
+app = QApplication([])
+button = SourceLinkButton()
+rect = button._icon_target_rect()
+print(button.width(), button.height())
+print(button.iconSize().width(), button.iconSize().height())
+print(rect.x(), rect.y(), rect.width(), rect.height())
+print(rect.left() == 0)
+print(rect.top() == 0)
+print(rect.right() == button.width() - 1)
+print(rect.bottom() == button.height() - 1)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["20 20", "20 20", "0 0 20 20", "True", "True", "True", "True"])
+
+    def test_clipflow_qt_list_toolbar_uses_compact_buttons_without_sort_label(self):
+        script = r'''
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
 
@@ -1105,19 +1535,227 @@ window.resize(1500, 1100)
 window.show()
 app.processEvents()
 
-label_top = window.sort_label.mapTo(window, QPoint(0, 0)).y()
+select_top = window.select_toggle.mapTo(window, QPoint(0, 0)).y()
 combo_top = window.sort_order_combo.mapTo(window, QPoint(0, 0)).y()
 button_top = window.sort_direction_button.mapTo(window, QPoint(0, 0)).y()
-print(window.sort_label.height())
+preference_top = window.preference_button.mapTo(window, QPoint(0, 0)).y()
+select_center = select_top + window.select_toggle.height() // 2
+combo_center = combo_top + window.sort_order_combo.height() // 2
+button_center = button_top + window.sort_direction_button.height() // 2
+preference_center = preference_top + window.preference_button.height() // 2
+QTest.mouseClick(window.sort_order_combo, Qt.LeftButton)
+app.processEvents()
+popup_width = window.sort_order_combo._active_popup.width()
+window.sort_order_combo._active_popup.close()
+app.processEvents()
+
+print(hasattr(window, "sort_label"))
+print(window.select_toggle.objectName())
+print(window.select_toggle.text())
+print(window.select_toggle.iconSize().width())
+print(window.select_toggle.height())
+print(window.select_toggle.width())
+print(window.select_toggle.width() == window.select_toggle.height())
+print("border: none" in window.select_toggle.styleSheet() or window.select_toggle.objectName() == "IconButton")
+QTest.mouseClick(window.select_toggle, Qt.LeftButton)
+app.processEvents()
+print(window.select_toggle.text())
+print(window.select_toggle.property("active"))
 print(window.sort_order_combo.height())
-print(abs(label_top - combo_top) <= 1)
-print(abs(label_top - button_top) <= 1)
+print(window.sort_order_combo.width())
+print(window.preference_button.height())
+print(window.preference_button.width())
+print(window.sort_direction_button.bordered)
+print(window.sort_order_combo.currentText())
+print(abs(select_center - combo_center) <= 1)
+print(abs(select_center - button_center) <= 1)
+print(abs(select_center - preference_center) <= 1)
+print(popup_width <= window.sort_order_combo.width() + 6)
 print(hasattr(window, "sort_direction_combo"))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["40", "40", "True", "True", "False"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "False", "IconButton", "", "18", "36", "36", "True", "True", "", "true",
+                "36", "96", "36", "64", "False", "다운로드순", "True", "True", "True", "True", "False",
+            ],
+        )
+
+    def test_clipflow_qt_list_toolbar_search_filters_titles_without_mutating_rows(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(760, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": "https://media.test/video",
+    "url": "https://media.test/video",
+    "title": "Video",
+    "candidates": [
+        {"id": "alpha", "source": "https://media.test/a", "url": "https://media.test/a", "title": "Alpha One", "display_title": "Alpha One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        {"id": "beta", "source": "https://media.test/b", "url": "https://media.test/b", "title": "Beta Two", "display_title": "Beta Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+
+print(window.search_input.maximumWidth())
+button_x_before = window.search_button.mapTo(window, window.search_button.rect().topLeft()).x()
+QTest.mouseClick(window.search_button, Qt.LeftButton)
+app.processEvents()
+window.search_animation.setCurrentTime(window.search_animation.duration())
+button_x_after = window.search_button.mapTo(window, window.search_button.rect().topLeft()).x()
+print(window.search_input.isVisible())
+print(window.search_input.maximumWidth())
+print(window.search_input.height())
+print(button_x_before == button_x_after)
+print(window.search_input.mapTo(window, window.search_input.rect().topLeft()).x() < button_x_after)
+
+window.search_input.setText("alpha")
+app.processEvents()
+visible_titles = [
+    row["widget"].title_label.text()
+    for row in window.rows
+    if row["widget"].isVisible()
+]
+print(visible_titles)
+print(len(window.rows))
+
+QTest.mouseClick(window.select_toggle, Qt.LeftButton)
+app.processEvents()
+QTest.mouseClick(window.select_all_button, Qt.LeftButton)
+app.processEvents()
+print(sorted((row["candidate"].get("id"), row.get("checked", False)) for row in window.rows))
+
+alpha_row = next(row for row in window.rows if row["candidate"].get("id") == "alpha")
+window.remove_row(alpha_row)
+app.processEvents()
+print([row["candidate"].get("id") for row in window.rows])
+window.search_input.clear()
+app.processEvents()
+print([row["widget"].title_label.text() for row in window.rows if row["widget"].isVisible()])
+
+window.search_input.setText("beta")
+app.processEvents()
+QTest.keyClick(window.search_input, Qt.Key_Escape)
+app.processEvents()
+window.search_animation.setCurrentTime(window.search_animation.duration())
+print(window.search_input.text())
+print(window.search_input.isVisible())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "0", "True", "180", "36", "True", "True", "['Alpha One']", "2",
+                "[('alpha', True), ('beta', False)]", "['beta']", "['Beta Two']", "", "False",
+            ],
+        )
+
+    def test_clipflow_qt_list_rows_use_five_pixel_spacing(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+print(window.row_layout.spacing())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["5"])
+
+    def test_clipflow_qt_restores_and_saves_window_size(self):
+        script = r'''
+from PySide6.QtCore import QSize, QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG, WINDOW_SIZE_SETTING
+
+app = QApplication([])
+settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+settings.setValue(WINDOW_SIZE_SETTING, QSize(640, 690))
+
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+print(window.size().width(), window.size().height())
+
+window.resize(670, 710)
+app.processEvents()
+window.close()
+app.processEvents()
+
+restored = ClipFlowWindow()
+print(restored.size().width(), restored.size().height())
+restored.close()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["640 690", "670 710"])
+
+    def test_clipflow_qt_list_header_and_rows_share_left_edge(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(760, 420)
+window.show()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+app.processEvents()
+row_widget = window.rows[0]["widget"]
+select_x = window.select_toggle.mapTo(window, QPoint(0, 0)).x()
+scroll_x = window.scroll_area.mapTo(window, QPoint(0, 0)).x()
+row_x = row_widget.mapTo(window, QPoint(0, 0)).x()
+print(select_x == scroll_x)
+print(select_x == row_x)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+
+    def test_clipflow_qt_shell_omits_brand_header_to_reclaim_space(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication, QLabel
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+
+print(bool(window.findChildren(QLabel, "WindowTitle")))
+print(hasattr(window, "brand_header"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["False", "False"])
 
     def test_clipflow_qt_input_controls_keep_shared_grid_edges(self):
         script = r'''
@@ -1154,30 +1792,35 @@ print(hasattr(window, "cookie_help_button"))
             ["42", "42", "저장 위치", "True", "True", "64", "False"],
         )
 
-    def test_clipflow_qt_folder_path_is_display_only(self):
+    def test_clipflow_qt_folder_path_is_editable_and_persisted_on_enter(self):
         script = r'''
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_qt import ClipFlowWindow, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG
+from PySide6.QtCore import QSettings
 
 app = QApplication([])
 window = ClipFlowWindow()
 window.show()
 app.processEvents()
-window.folder_input.selectAll()
 QTest.mouseClick(window.folder_input, Qt.LeftButton)
+app.processEvents()
+window.folder_input.selectAll()
+QTest.keyClicks(window.folder_input, "C:/ClipFlow/Typed")
+QTest.keyClick(window.folder_input, Qt.Key_Return)
 app.processEvents()
 
 print(window.folder_input.isReadOnly())
-print(int(window.folder_input.focusPolicy()) == int(Qt.NoFocus))
-print(window.folder_input.hasSelectedText())
+print(int(window.folder_input.focusPolicy()) == int(Qt.StrongFocus))
 print(window.folder_input.hasFocus())
+print(window.folder_input.text())
+print(QSettings(SETTINGS_ORG, SETTINGS_APP).value(SAVE_FOLDER_SETTING))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "False", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["False", "True", "True", "C:\\ClipFlow\\Typed", "C:\\ClipFlow\\Typed"])
 
     def test_clipflow_qt_persists_save_folder_with_qsettings(self):
         script = r'''
@@ -1800,7 +2443,7 @@ print("border-radius: 8px" in APP_STYLE)
 print(row_widget.progress_bar.isHidden())
 print(row_widget.property("progressActive"))
 print(row_widget.property("progressValue"))
-print(row_widget.progress_text.isHidden())
+print(row_widget.row_quality_label.isHidden())
 '''
         result = run_qt_script(script)
 
@@ -1901,12 +2544,11 @@ print(",".join(calls))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "actions,spinner,cache")
 
-    def test_clipflow_qt_row_action_overlay_has_square_left_edge(self):
+    def test_clipflow_qt_row_action_overlay_stays_transparent_behind_icons(self):
         script = r'''
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
-from tools import clipflow_theme as theme
 from tools.clipflow_rows import RowActionOverlay
 
 app = QApplication([])
@@ -1917,12 +2559,12 @@ overlay.resize(160, 70)
 pixmap = QPixmap(160, 70)
 pixmap.fill(QColor(0, 0, 0, 0))
 overlay.render(pixmap, QPoint(0, 0))
-print(QColor(pixmap.toImage().pixelColor(0, 35)).name().upper() == theme.SURFACE_SOFT)
+print(pixmap.toImage().pixelColor(0, 35).alpha())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True"])
+        self.assertEqual(result.stdout.splitlines(), ["0"])
 
     def test_clipflow_qt_scrollbar_space_is_reserved_but_handle_appears_only_when_scrollable(self):
         script = r'''
@@ -2131,6 +2773,56 @@ app.exec()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["3", "1"])
+
+    def test_clipflow_qt_download_concurrency_setting_limits_active_downloads(self):
+        script = r'''
+import time
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+base = "https://media.test/watch/"
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    time.sleep(0.35)
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(download_func=fake_download)
+window.download_concurrency = 2
+window.url_input.setText(base + "0")
+window._analysis_finished({
+    "webpage_url": base + "0",
+    "url": base + "0",
+    "title": "Batch",
+    "candidates": [
+        {"id": str(i), "source": base + str(i), "url": base + str(i), "title": f"Video {i}", "display_title": f"Video {i}", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": i + 1}
+        for i in range(3)
+    ],
+    "warnings": [],
+})
+for index in range(3):
+    window.select_row(index)
+    window._start_download()
+printed = {"done": False}
+
+def check():
+    if not printed["done"]:
+        print(len(getattr(window, "active_downloads", [])))
+        print(len(getattr(window, "queued_download_rows", [])))
+        printed["done"] = True
+    if not window.active_downloads and not window.queued_download_rows:
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(check)
+timer.start(50)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["2", "1"])
 
     def test_clipflow_qt_concurrent_downloads_keep_progress_on_distinct_repeated_analysis_rows(self):
         script = r'''
@@ -2703,7 +3395,7 @@ child_widget = window.rows[1]["widget"]
 parent_widget._set_hovered(True)
 print(parent_widget.row_quality_label.isHidden())
 print(parent_widget.row_quality_label.text())
-print(child_widget.row_quality_label.isVisible())
+print(child_widget.row_quality_label.isHidden())
 print(parent_widget.actions_widget.isVisible())
 print(parent_widget.remove_button.isVisible())
 '''
@@ -4452,7 +5144,7 @@ app.processEvents()
 window.url_input.setText(url)
 window._analysis_finished(fake_analysis())
 app.processEvents()
-for index in range(8):
+for index in range(14):
     candidate = {
         "id": f"filler-{index}",
         "source": f"https://media.test/filler/{index}",
@@ -4483,7 +5175,7 @@ for index in range(8):
         "progress_text": "",
         "output_path": "",
         "messages": [],
-        "created_order": 100 + index,
+        "created_order": -100 - index,
     })
 window._render_rows()
 app.processEvents()
@@ -4569,9 +5261,9 @@ print(height_reopened)
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["72", "72", "72"])
+        self.assertEqual(result.stdout.splitlines(), ["66", "66", "66"])
 
-    def test_clipflow_qt_long_titles_use_marquee_label(self):
+    def test_clipflow_qt_long_titles_wrap_to_two_lines(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
@@ -4595,23 +5287,21 @@ window = ClipFlowWindow(analyze_func=fake_analyze)
 window._analysis_finished(fake_analyze(url))
 row_widget = window.rows[0]["widget"]
 label = row_widget.title_label
-label.setFixedWidth(120)
-label.start_marquee_if_needed()
-label._advance_marquee()
 print(type(label).__name__)
-print(label._marquee_offset > 0)
-label.stop_marquee()
-print(label._marquee_offset)
+print(label.wordWrap())
+print(label.maximumHeight())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["MarqueeLabel", "True", "0"])
+        self.assertEqual(result.stdout.splitlines(), ["QLabel", "True", "34"])
 
     def test_clipflow_qt_tooltips_are_styled_and_positioned_above_icon_buttons(self):
         script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
-from tools.clipflow_icons import LucideIconButton
+from tools.clipflow_icons import CustomTooltip, LucideIconButton
 from tools.clipflow_theme import APP_STYLE
 
 app = QApplication([])
@@ -4621,13 +5311,28 @@ button.show()
 app.processEvents()
 position = button.tooltip_position()
 global_top = button.mapToGlobal(button.rect().topLeft()).y()
+tooltip = CustomTooltip.instance()
+tooltip.setText("폴더 열기")
+tooltip.adjustSize()
+effect = tooltip.graphicsEffect()
+pixmap = QPixmap(tooltip.size())
+pixmap.fill(Qt.transparent)
+tooltip.render(pixmap)
+image = pixmap.toImage()
+bubble = tooltip.bubble_geometry()
+shadow_pixel = image.pixelColor(bubble.right() + 4, bubble.center().y())
 print("QToolTip" in APP_STYLE)
 print(position.y() < global_top)
+print("background: #FFFFFF" in tooltip.styleSheet())
+print(effect.blurRadius() >= 18)
+print(tooltip.testAttribute(Qt.WA_TranslucentBackground))
+print(shadow_pixel.alpha() > 0)
+print(shadow_pixel.red() < 230)
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True", "True"])
 
 
 if __name__ == "__main__":

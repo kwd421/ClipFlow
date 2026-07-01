@@ -20,7 +20,7 @@ try:
     from tools.clipflow_rows import build_quality_options, row_kind
     from tools.clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
-        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
+        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
         PREF_FRAME_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
@@ -33,7 +33,7 @@ except ImportError:
     from clipflow_rows import build_quality_options, row_kind
     from clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
-        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
+        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
         PREF_FRAME_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
@@ -73,6 +73,18 @@ class SettingsMixin:
             "frame_rate": self.settings.value(PREF_FRAME_SETTING, PREFERENCE_DEFAULTS["frame_rate"], str),
         }
 
+    def _initial_download_concurrency(self):
+        saved = self.settings.value(DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_CONCURRENCY, int)
+        return max(1, min(3, int(saved or DOWNLOAD_CONCURRENCY)))
+
+    def _set_download_concurrency(self, value):
+        self.download_concurrency = max(1, min(3, int(value or DOWNLOAD_CONCURRENCY)))
+        self.settings.setValue(DOWNLOAD_CONCURRENCY_SETTING, self.download_concurrency)
+        if hasattr(self, "_start_queued_downloads"):
+            self._start_queued_downloads()
+        if hasattr(self, "_refresh_footer"):
+            self._refresh_footer()
+
     def _set_preferences(self, quality=None, output_format=None, codec=None, frame_rate=None):
         values = {
             "quality": quality or self.preference_values.get("quality") or PREFERENCE_DEFAULTS["quality"],
@@ -102,6 +114,9 @@ class SettingsMixin:
             )
 
     def _toggle_preferences_popup(self):
+        if getattr(self.preference_button, "_ignore_next_popup", False):
+            self.preference_button._ignore_next_popup = False
+            return
         popup = getattr(self, "preferences_popup", None)
         if popup and popup.isVisible():
             popup.close()
@@ -114,9 +129,9 @@ class SettingsMixin:
             f"QLabel#PreferencePopupLabel {{ color: {theme.MUTED}; font-size: 12px; font-weight: 600; }}"
         )
         layout = QGridLayout(popup)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(8)
+        layout.setContentsMargins(8, 7, 8, 8)
+        layout.setHorizontalSpacing(7)
+        layout.setVerticalSpacing(5)
 
         quality_combo = CleanComboBox()
         quality_combo.addItems(["최고화질", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
@@ -126,6 +141,11 @@ class SettingsMixin:
         codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
         frame_combo = CleanComboBox()
         frame_combo.addItems(["자동", "60fps", "30fps"])
+        concurrency_combo = CleanComboBox()
+        concurrency_combo.addItems(["1", "2", "3"])
+        concurrency_combo.setCurrentText(str(getattr(self, "download_concurrency", DOWNLOAD_CONCURRENCY)))
+        for combo in (quality_combo, format_combo, codec_combo, frame_combo, concurrency_combo):
+            combo.setObjectName("CompactComboBox")
         quality_combo.setCurrentText(preferences.quality)
         format_combo.setCurrentText(preferences.output_format)
         codec_combo.setCurrentText(preferences.codec)
@@ -151,17 +171,22 @@ class SettingsMixin:
                 ("포맷", format_combo),
                 ("코덱", codec_combo),
                 ("프레임", frame_combo),
+                ("병렬", concurrency_combo),
             )
         ):
             label = QLabel(label_text)
             label.setObjectName("PreferencePopupLabel")
             layout.addWidget(label, row, 0)
+            combo.setFixedWidth(140)
             layout.addWidget(combo, row, 1)
-            combo.currentIndexChanged.connect(apply_preferences)
+            if combo is concurrency_combo:
+                combo.currentIndexChanged.connect(lambda *_args, c=concurrency_combo: self._set_download_concurrency(c.currentText()))
+            else:
+                combo.currentIndexChanged.connect(apply_preferences)
 
         refresh_controls()
         popup.adjustSize()
-        popup.setFixedWidth(max(260, popup.sizeHint().width()))
+        popup.setFixedWidth(max(214, popup.sizeHint().width()))
         popup.adjustSize()
         anchor = self.preference_button.mapToGlobal(QPoint(self.preference_button.width(), self.preference_button.height() + 6))
         x = anchor.x() - popup.width()

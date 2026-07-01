@@ -2,8 +2,8 @@
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -27,7 +27,7 @@ try:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
+    from tools.clipflow_widgets import CleanCheckBox, SourceLinkButton, Spinner, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
     import clipflow_theme as theme
@@ -40,13 +40,25 @@ except ImportError:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
+    from clipflow_widgets import CleanCheckBox, SourceLinkButton, Spinner, ThumbnailPlaceholder
 
 
 ANALYZING_STATUS = "분석 중"
 ACTIVE_STATUSES = {ANALYZING_STATUS, "다운로드 중"}
 COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
+ROW_BORDER_WIDTH = 1
+ROW_INSET = 5
+ROW_META_INSET = 8
+ROW_META_GAP = 8
+META_ICON_SIZE = 14
+META_TEXT_HEIGHT = META_ICON_SIZE
+ROW_HEIGHT = 66
+TITLE_BLOCK_HEIGHT = 34
+ACTION_BUTTON_SIZE = 28
+ACTION_ICON_SIZE = 18
+ACTION_SPACING = 5
+ACTION_STRIP_WIDTH = ACTION_BUTTON_SIZE * 4 + ACTION_SPACING * 3
 
 
 def row_source_url(analysis, candidate):
@@ -118,10 +130,7 @@ def candidate_size_value(candidate):
 
 
 def candidate_size_label(candidate):
-    label = engine.display_size(candidate_size_value(candidate))
-    if label != "unknown" and candidate.get("size_source") == "clen_estimate":
-        return f"예상 {label}"
-    return label
+    return engine.display_size(candidate_size_value(candidate))
 
 
 def build_quality_options(qualities):
@@ -146,12 +155,7 @@ def build_quality_options(qualities):
 
 
 class RowActionOverlay(QFrame):
-    """Hover action strip on the right of a row.
-
-    Painted with a solid fill that exactly matches the row's current
-    background (selected vs hovered), so it covers the meta columns with no
-    visible seam or colour shift, leaving only the action icons on top.
-    """
+    """Hover action strip on the right of a row."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,24 +164,6 @@ class RowActionOverlay(QFrame):
 
     def paintEvent(self, event):
         del event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        # Inset top/right/bottom so the fill never overlaps the row's 2px
-        # painted border ring (which lives ~0.5–2.5px from the row edge). The
-        # fill colour matches the hovered row background, so the inset is
-        # seamless while leaving the coloured ring fully visible on hover.
-        rect = QRectF(self.rect()).adjusted(0, 3, -3, -3)
-        color = theme.SURFACE_SOFT
-        radius = 7.0
-        path = QPainterPath()
-        path.moveTo(rect.left(), rect.top())
-        path.lineTo(rect.right() - radius, rect.top())
-        path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
-        path.lineTo(rect.right(), rect.bottom() - radius)
-        path.quadTo(rect.right(), rect.bottom(), rect.right() - radius, rect.bottom())
-        path.lineTo(rect.left(), rect.bottom())
-        path.closeSubpath()
-        painter.fillPath(path, QColor(color))
 
 
 class DownloadRowWidget(QFrame):
@@ -190,7 +176,7 @@ class DownloadRowWidget(QFrame):
         self.setProperty("hovered", "false")
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
-        self.setFixedHeight(72)
+        self.setFixedHeight(ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._progress_cache_key = None
         self._progress_full_path = None
@@ -201,8 +187,8 @@ class DownloadRowWidget(QFrame):
 
     def _build(self):
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(9, 9, 44, 9)
-        outer.setSpacing(ROW_COLUMN_SPACING)
+        outer.setContentsMargins(ROW_INSET, ROW_INSET, ROW_INSET, ROW_INSET)
+        outer.setSpacing(ROW_INSET)
 
         self.select_checkbox = CleanCheckBox()
         self.select_checkbox.setObjectName("RowCheck")
@@ -217,9 +203,10 @@ class DownloadRowWidget(QFrame):
         self.item_widget = QWidget()
         self.item_widget.setMinimumWidth(MEDIA_MIN_WIDTH - THUMBNAIL_WIDTH - ROW_COLUMN_SPACING)
         self.item_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.item_widget.setFixedHeight(54)
         item_area = QVBoxLayout(self.item_widget)
         item_area.setContentsMargins(0, 0, 0, 0)
-        item_area.setSpacing(3)
+        item_area.setSpacing(0)
 
         title_line = QHBoxLayout()
         title_line.setContentsMargins(0, 0, 0, 0)
@@ -232,23 +219,75 @@ class DownloadRowWidget(QFrame):
         self.playlist_pill.setObjectName("PlaylistPill")
         self.playlist_pill.hide()
         title_line.addWidget(self.playlist_pill, 0, Qt.AlignVCenter)
-        self.title_label = MarqueeLabel()
+        self.title_label = QLabel()
         self.title_label.setObjectName("RowTitle")
-        self.title_label.setWordWrap(False)
+        self.title_label.setWordWrap(True)
+        self.title_label.setFixedHeight(TITLE_BLOCK_HEIGHT)
+        self.title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
         theme.apply_tracking(self.title_label, 0.1)
         title_line.addWidget(self.title_label, 1)
+        self.title_action_spacer = QWidget()
+        self.title_action_spacer.setFixedWidth(ACTION_STRIP_WIDTH + ROW_INSET)
+        self.title_action_spacer.hide()
+        title_line.addWidget(self.title_action_spacer, 0)
         item_area.addLayout(title_line)
 
         source_line = QHBoxLayout()
+        source_line.setContentsMargins(0, 0, 0, 0)
         source_line.setSpacing(6)
         self.source_link_button = SourceLinkButton()
         self.source_link_button.clicked.connect(self._open_source)
         source_line.addWidget(self.source_link_button)
         self.row_quality_label = QLabel()
         self.row_quality_label.setObjectName("MetaText")
+        self.row_quality_label.hide()
         source_line.addWidget(self.row_quality_label, 0, Qt.AlignVCenter)
         source_line.addStretch(1)
+
+        self.meta_widget = QWidget()
+        self.meta_widget.setFixedHeight(16 + max(0, ROW_META_INSET - ROW_INSET))
+        self.meta_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        meta_layout = QHBoxLayout(self.meta_widget)
+        meta_layout.setContentsMargins(0, 0, max(0, ROW_META_INSET - ROW_INSET), max(0, ROW_META_INSET - ROW_INSET))
+        meta_layout.setSpacing(ROW_META_GAP)
+        meta_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.info_widget = QWidget()
+        self.info_widget.setFixedHeight(16)
+        self.info_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        info_layout = QHBoxLayout(self.info_widget)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(4)
+        info_layout.setAlignment(Qt.AlignCenter)
+        self.info_icon = LucideIconWidget("clock", size=META_ICON_SIZE)
+        info_layout.addWidget(self.info_icon, 0, Qt.AlignVCenter)
+        self.info_label = QLabel()
+        self.info_label.setObjectName("MetaText")
+        self.info_label.setFixedHeight(META_TEXT_HEIGHT)
+        self.info_label.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(self.info_label, 0, Qt.AlignVCenter)
+        meta_layout.addWidget(self.info_widget)
+
+        self.size_widget = QWidget()
+        self.size_widget.setFixedHeight(16)
+        self.size_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        size_layout = QHBoxLayout(self.size_widget)
+        size_layout.setContentsMargins(0, 0, 0, 0)
+        size_layout.setSpacing(4)
+        size_layout.setAlignment(Qt.AlignCenter)
+        self.size_icon = LucideIconWidget("download", size=META_ICON_SIZE)
+        size_layout.addWidget(self.size_icon, 0, Qt.AlignVCenter)
+        self.size_label = QLabel()
+        self.size_label.setObjectName("MetaText")
+        self.size_label.setFixedHeight(META_TEXT_HEIGHT)
+        self.size_label.setAlignment(Qt.AlignCenter)
+        size_layout.addWidget(self.size_label, 0, Qt.AlignVCenter)
+        meta_layout.addWidget(self.size_widget)
+        source_line.addWidget(self.meta_widget, 0, Qt.AlignBottom)
+
+        item_area.addStretch(1)
         item_area.addLayout(source_line)
 
         progress_line = QHBoxLayout()
@@ -267,6 +306,7 @@ class DownloadRowWidget(QFrame):
         progress_line.addWidget(self.progress_bar, 1)
         progress_line.addWidget(self.progress_text, 0)
         item_area.addLayout(progress_line)
+        self.progress_text.hide()
 
         self.playlist_detail_label = QLabel("")
         self.playlist_detail_label.setObjectName("MetaText")
@@ -274,59 +314,49 @@ class DownloadRowWidget(QFrame):
         self.playlist_detail_label.hide()
         item_area.addWidget(self.playlist_detail_label)
 
-        outer.addWidget(self.item_widget, 1)
-
-        self.info_widget = QWidget()
-        self.info_widget.setFixedWidth(DURATION_WIDTH)
-        info_layout = QHBoxLayout(self.info_widget)
-        info_layout.setContentsMargins(0, 0, 0, 0)
-        info_layout.setSpacing(4)
-        info_layout.setAlignment(Qt.AlignCenter)
-        self.info_icon = LucideIconWidget("clock", size=18)
-        info_layout.addWidget(self.info_icon)
-        self.info_label = QLabel()
-        self.info_label.setObjectName("MetaText")
-        self.info_label.setAlignment(Qt.AlignCenter)
-        info_layout.addWidget(self.info_label)
-        outer.addWidget(self.info_widget, 0, Qt.AlignVCenter)
-
-        self.size_widget = QWidget()
-        self.size_widget.setFixedWidth(SIZE_WIDTH)
-        size_layout = QHBoxLayout(self.size_widget)
-        size_layout.setContentsMargins(0, 0, 0, 0)
-        size_layout.setSpacing(4)
-        size_layout.setAlignment(Qt.AlignCenter)
-        self.size_icon = LucideIconWidget("file-text", size=18)
-        size_layout.addWidget(self.size_icon)
-        self.size_label = QLabel()
-        self.size_label.setAlignment(Qt.AlignCenter)
-        size_layout.addWidget(self.size_label)
-        outer.addWidget(self.size_widget, 0, Qt.AlignVCenter)
+        outer.addWidget(self.item_widget, 1, Qt.AlignTop)
 
         self.actions_widget = RowActionOverlay(self)
         self.actions_widget.setObjectName("ActionOverlay")
-        self.actions_widget.setMinimumWidth(ACTIONS_WIDTH)
+        self.actions_widget.setMinimumWidth(ACTION_STRIP_WIDTH)
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(4)
+        actions.setSpacing(ACTION_SPACING)
         actions.setAlignment(Qt.AlignCenter)
 
-        self.open_folder_button = LucideIconButton("folder", size=38, icon_size=22)
+        self.open_folder_button = LucideIconButton(
+            "folder",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
         self.open_folder_button.setToolTip("폴더 열기")
         self.open_folder_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_folder_button)
 
-        self.remove_button = LucideIconButton("x", size=38, icon_size=22)
+        self.remove_button = LucideIconButton(
+            "x",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
         self.remove_button.setToolTip("목록에서 삭제")
         self.remove_button.clicked.connect(self._remove_row)
         actions.addWidget(self.remove_button)
 
-        self.delete_file_button = LucideIconButton("trash-2", size=38, icon_size=22, danger=True)
+        self.delete_file_button = LucideIconButton(
+            "trash-2",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+            danger=True,
+        )
         self.delete_file_button.setToolTip("파일 삭제")
         self.delete_file_button.clicked.connect(self._delete_file)
         actions.addWidget(self.delete_file_button)
 
-        self.more_button = LucideIconButton("more-vertical", size=38, icon_size=22)
+        self.more_button = LucideIconButton(
+            "more-vertical",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
         self.more_button.setToolTip("더보기")
         self.more_button.clicked.connect(self._show_more_menu)
         actions.addWidget(self.more_button)
@@ -334,16 +364,14 @@ class DownloadRowWidget(QFrame):
 
         self.spinner = Spinner(30, parent=self)
         self.spinner.hide()
+        self._actions_menu_open = False
 
     def mousePressEvent(self, event):
         if getattr(self.owner, "select_mode", False):
             self.select_checkbox.setChecked(not self.select_checkbox.isChecked())
         elif self.row.get("kind") == "playlist":
-            self.owner.select_row_for_widget(self)
             self._toggle_playlist()
-        else:
-            self.owner.select_row_for_widget(self)
-        super().mousePressEvent(event)
+        event.accept()
 
     def enterEvent(self, event):
         self._set_hovered(True)
@@ -356,6 +384,7 @@ class DownloadRowWidget(QFrame):
     def resizeEvent(self, event):
         self._position_actions()
         self._position_spinner()
+        self._refresh_title_alignment()
         self._clear_progress_path_cache()
         super().resizeEvent(event)
 
@@ -367,14 +396,11 @@ class DownloadRowWidget(QFrame):
         candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
         title = candidate.get("display_title") or candidate.get("title") or "media"
         self.title_label.setText(str(title))
-        self.title_label.setToolTip(str(title))
-        self.title_label.start_marquee_if_needed()
+        self.title_label.setToolTip("")
+        self._refresh_title_alignment()
         self.info_label.setText(row_info_text(candidate))
         self.size_label.setText(candidate_size_label(candidate))
-        if self.row.get("kind") == "playlist":
-            self.row_quality_label.setText("")
-        else:
-            self.row_quality_label.setText(f"· {quality_display_label(candidate)} · {format_display_label(candidate)}")
+        self.row_quality_label.setText("")
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
         self._refresh_source_button()
         self._refresh_playlist_detail()
@@ -434,24 +460,50 @@ class DownloadRowWidget(QFrame):
         self.owner.playlist_expansion_changed(self.row)
 
     def _position_actions(self):
-        inset = 1
-        left = self.info_widget.x() if self.info_widget.x() > 0 else self.width() - self.actions_widget.width()
-        width = self.width() - left - inset - 1
-        self.actions_widget.setGeometry(
-            max(0, left), inset, max(ACTIONS_WIDTH, width), max(0, self.height() - 2 * inset - 1)
-        )
+        actual_width = ACTION_STRIP_WIDTH
+        title_top = self.title_label.mapTo(self, self.title_label.rect().topLeft()).y()
+        if title_top <= 0:
+            title_top = ROW_BORDER_WIDTH + ROW_INSET
+        top = title_top + max(0, (TITLE_BLOCK_HEIGHT - ACTION_BUTTON_SIZE) // 2)
+        height = ACTION_BUTTON_SIZE
+        left = self.width() - ROW_BORDER_WIDTH - ROW_INSET - actual_width
+        self.actions_widget.setGeometry(max(0, left), top, actual_width, height)
         self.actions_widget.raise_()
 
     def _set_hovered(self, hovered):
-        self.setProperty("hovered", "true" if hovered else "false")
+        force_actions = bool(getattr(self, "_actions_menu_open", False))
+        visual_hovered = bool(hovered or force_actions)
+        self.setProperty("hovered", "true" if visual_hovered else "false")
         active = self.row.get("status") in ACTIVE_STATUSES
         analyzing = bool(self.row.get("analysis_loading")) or self.row.get("status") == ANALYZING_STATUS
-        show_actions = hovered and (not active or self.row.get("kind") == "playlist") and not analyzing
+        show_actions = visual_hovered and (not active or self.row.get("kind") == "playlist") and not analyzing
         self.actions_widget.setVisible(show_actions)
+        action_width = ACTION_STRIP_WIDTH
+        self.title_action_spacer.setFixedWidth(action_width + ROW_INSET)
+        self.title_action_spacer.setVisible(show_actions)
+        self.title_label.setContentsMargins(0, 0, 0, 0)
+        self.item_widget.layout().activate()
+        self._refresh_title_alignment()
         if show_actions:
             self._position_actions()
         self._refresh_actions()
         self._repolish()
+
+    def _title_uses_multiple_lines(self):
+        text = self.title_label.text()
+        if not text:
+            return False
+        width = max(1, self.title_label.width())
+        metrics = QFontMetrics(self.title_label.font())
+        if metrics.horizontalAdvance(text) <= width:
+            return False
+        bounds = metrics.boundingRect(QRect(0, 0, width, 1000), Qt.TextWordWrap, text)
+        return bounds.height() > metrics.lineSpacing() + 2
+
+    def _refresh_title_alignment(self):
+        self.title_label.setFixedHeight(TITLE_BLOCK_HEIGHT)
+        vertical_alignment = Qt.AlignTop if self._title_uses_multiple_lines() else Qt.AlignVCenter
+        self.title_label.setAlignment(Qt.AlignLeft | vertical_alignment)
 
     def _open_source(self):
         self.owner.open_source_for_row(self.row)
@@ -480,7 +532,13 @@ class DownloadRowWidget(QFrame):
         for label, fmt in (("음원 추출 (WAV)", "WAV"), ("음원 추출 (MP3)", "MP3")):
             action = menu.addAction(label)
             action.triggered.connect(lambda _checked=False, f=fmt: self.owner.extract_audio_for_row(self.row, f))
-        menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
+        self._actions_menu_open = True
+        self._set_hovered(True)
+        try:
+            menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
+        finally:
+            self._actions_menu_open = False
+            self._set_hovered(self.underMouse())
 
     def set_selected(self, selected):
         del selected
@@ -504,9 +562,13 @@ class DownloadRowWidget(QFrame):
             self.spinner.start()
         else:
             self.spinner.stop()
-        self.row_quality_label.setVisible(not loading and self.row.get("kind") != "playlist")
-        self.info_widget.setVisible(not loading)
-        self.size_widget.setVisible(not loading)
+        if loading:
+            self.row_quality_label.setText(detail or status)
+            self.row_quality_label.show()
+        else:
+            self.row_quality_label.hide()
+        self.info_widget.show()
+        self.size_widget.show()
         self._refresh_actions()
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
 
@@ -523,8 +585,8 @@ class DownloadRowWidget(QFrame):
             and self.row.get("progress_text") == display_text
             and self.property("progressActive") == active_value
             and self.property("progressValue") == progress_value
-            and self.progress_text.text() == display_text
-            and self.progress_text.isVisible() == bool(display_text)
+            and self.row_quality_label.text() == display_text
+            and self.row_quality_label.isVisible() == bool(display_text)
         ):
             return
         self.row["progress"] = bounded
@@ -533,8 +595,16 @@ class DownloadRowWidget(QFrame):
         self.progress_bar.hide()
         self.setProperty("progressActive", active_value)
         self.setProperty("progressValue", progress_value)
-        self.progress_text.setVisible(bool(display_text))
-        self.progress_text.setText(display_text)
+        if active and display_text:
+            self.row_quality_label.setText(display_text)
+            self.row_quality_label.show()
+        elif status == ERROR_STATUS and display_text:
+            self.row_quality_label.setText(display_text)
+            self.row_quality_label.show()
+        elif status not in ACTIVE_STATUSES:
+            self.row_quality_label.hide()
+        self.progress_text.hide()
+        self.progress_text.setText("")
         self.progress_text.setStyleSheet(
             f"color: {theme.DANGER};" if status == ERROR_STATUS and display_text else ""
         )

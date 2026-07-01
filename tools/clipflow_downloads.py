@@ -30,6 +30,12 @@ except ImportError:
 
 
 class DownloadMixin:
+    def _download_concurrency_limit(self):
+        try:
+            return max(1, min(3, int(getattr(self, "download_concurrency", DOWNLOAD_CONCURRENCY) or DOWNLOAD_CONCURRENCY)))
+        except (TypeError, ValueError):
+            return DOWNLOAD_CONCURRENCY
+
     def _start_download(self):
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
             self._set_status("다운로드할 항목을 선택하세요")
@@ -92,7 +98,7 @@ class DownloadMixin:
         if existing_output:
             self._mark_existing_output(row, existing_output)
             return
-        if len(self.active_downloads) >= DOWNLOAD_CONCURRENCY:
+        if len(self.active_downloads) >= self._download_concurrency_limit():
             self.queued_download_rows.append(row)
             widget = row.get("widget")
             if widget:
@@ -452,7 +458,7 @@ class DownloadMixin:
                 self._refresh_playlist_parent_status(row)
 
     def _start_queued_downloads(self):
-        while self.queued_download_rows and len(self.active_downloads) < DOWNLOAD_CONCURRENCY:
+        while self.queued_download_rows and len(self.active_downloads) < self._download_concurrency_limit():
             row = self.queued_download_rows.pop(0)
             if row not in self.rows or self._row_is_downloading(row):
                 continue

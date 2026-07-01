@@ -154,7 +154,7 @@ QToolButton#SourceLinkButton {{
     border: none;
     color: {MUTED};
     font-size: 12px;
-    padding: 2px 7px;
+    padding: 0px;
     border-radius: 6px;
 }}
 QToolButton#SourceLinkButton:hover {{
@@ -201,7 +201,7 @@ QLabel#SectionTitle {{
     color: {INK};
 }}
 QLabel#RowTitle {{
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 600;
     color: {INK};
 }}
@@ -257,6 +257,11 @@ QLineEdit, QComboBox {{
 }}
 QLineEdit:focus, QComboBox:focus {{
     border-color: {ACCENT};
+}}
+QComboBox#CompactComboBox {{
+    padding: 0px;
+    min-height: 30px;
+    border: none;
 }}
 QComboBox QAbstractItemView {{
     background: {SURFACE};
@@ -373,6 +378,25 @@ QPushButton#SecondaryButton:hover {{
     background: {SURFACE_SOFT};
     border-color: {BORDER_STRONG};
 }}
+QPushButton#IconButton {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 7px;
+    padding: 0px;
+}}
+QPushButton#IconButton:hover {{
+    background: {SURFACE_SOFT};
+    color: {INK};
+}}
+QPushButton#IconButton:pressed {{
+    background: {SURFACE_SOFT};
+    color: {INK};
+}}
+QPushButton#IconButton[active="true"] {{
+    background: {ACCENT_TINT};
+    color: {ACCENT};
+}}
 QPushButton#SecondaryButton:pressed {{
     background: {SURFACE_SOFT};
 }}
@@ -410,12 +434,13 @@ QToolButton:disabled {{
     color: {ICON_DISABLED};
 }}
 QToolTip {{
-    background: {INK};
-    color: {SURFACE};
-    border: none;
+    background: {SURFACE};
+    color: {INK};
+    border: 1px solid {BORDER_STRONG};
     border-radius: 7px;
-    padding: 6px 9px;
+    padding: 7px 10px;
     font-size: 12px;
+    font-weight: 500;
 }}
 QProgressBar {{
     border: none;
@@ -552,6 +577,8 @@ PREF_CODEC_SETTING = "download_codec"
 PREF_FRAME_SETTING = "download_frame"
 SORT_KEY_SETTING = "sort_key"
 SORT_DESC_SETTING = "sort_desc"
+WINDOW_SIZE_SETTING = "window_size"
+DOWNLOAD_CONCURRENCY_SETTING = "download_concurrency"
 
 PREFERENCE_DEFAULTS = {
     "quality": "최고화질",
@@ -559,7 +586,7 @@ PREFERENCE_DEFAULTS = {
     "codec": "자동",
     "frame_rate": "자동",
 }
-SORT_LABELS = {"latest": "최신순", "name": "이름순"}
+SORT_LABELS = {"latest": "다운로드순", "name": "이름순"}
 SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
 COOKIE_DISPLAY_TO_SOURCE = dict(zip(COOKIE_DISPLAY_CHOICES, COOKIE_CHOICES))
 COOKIE_SOURCE_TO_DISPLAY = dict(zip(COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES))

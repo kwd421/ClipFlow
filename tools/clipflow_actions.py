@@ -104,8 +104,10 @@ class ActionMixin:
 
     def _toggle_select_mode(self, *_args):
         self.select_mode = not getattr(self, "select_mode", False)
-        self.select_toggle.setText("완료" if self.select_mode else "선택")
+        self.select_toggle.setText("")
         self.select_toggle.setProperty("active", "true" if self.select_mode else "false")
+        if hasattr(self, "_refresh_select_toggle_icon"):
+            self._refresh_select_toggle_icon()
         self.select_toggle.style().unpolish(self.select_toggle)
         self.select_toggle.style().polish(self.select_toggle)
         self.select_actions.setVisible(self.select_mode)
@@ -122,7 +124,7 @@ class ActionMixin:
 
     def _select_all_rows(self):
         for row in self.rows:
-            row["checked"] = True
+            row["checked"] = bool(self._row_is_visible(row))
             widget = row.get("widget")
             if widget:
                 widget.set_select_mode(True)

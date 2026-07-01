@@ -3,8 +3,8 @@ import sys
 import time
 from collections import OrderedDict, deque
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QIcon
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -59,13 +60,13 @@ try:
     from tools.clipflow_theme import (
         ANALYZING_STATUS, AUTO_LABEL, COMPLETED_STATUS, DOWNLOAD_HISTORY_SETTING, DOWNLOAD_STATUS, ERROR_STATUS,
         READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
-        SORT_LABELS, WAITING_STATUS,
+        SORT_LABELS, WAITING_STATUS, WINDOW_SIZE_SETTING,
     )
 except ImportError:
     from clipflow_theme import (
         ANALYZING_STATUS, AUTO_LABEL, COMPLETED_STATUS, DOWNLOAD_HISTORY_SETTING, DOWNLOAD_STATUS, ERROR_STATUS,
         READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
-        SORT_LABELS, WAITING_STATUS,
+        SORT_LABELS, WAITING_STATUS, WINDOW_SIZE_SETTING,
     )
 
 
@@ -73,13 +74,38 @@ except ImportError:
 __all__ = [
     "ClipFlowWindow", "DeleteConfirmDialog", "default_save_folder", "local_file_url", "main",
     "SETTINGS_APP", "SETTINGS_ORG", "READY_STATUS", "COMPLETED_STATUS",
-    "DOWNLOAD_HISTORY_SETTING", "SAVE_FOLDER_SETTING",
+    "DOWNLOAD_HISTORY_SETTING", "SAVE_FOLDER_SETTING", "WINDOW_SIZE_SETTING",
 ]
 
 
 EVENT_MESSAGE_LIMIT = 500
+
+
+def checkbox_outline_pixmap(size, color, checked=False):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.7)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    inset = pen.widthF() / 2 + 0.5
+    painter.drawRoundedRect(QRectF(inset, inset, size - inset * 2, size - inset * 2), 3, 3)
+    if checked:
+        check_size = max(10, size - 5)
+        offset = (size - check_size) // 2
+        painter.drawPixmap(offset, offset, check_size, check_size, lucide_pixmap("check", check_size, color))
+    painter.end()
+    return pixmap
 DOWNLOAD_INFO_CACHE_LIMIT = 20
 DOWNLOAD_INFO_CACHE_TTL_SECONDS = 600.0
+LIST_TOOL_HEIGHT = 36
+LIST_TOOL_WIDTH = 64
+SORT_TOOL_WIDTH = 96
+SEARCH_INPUT_WIDTH = 180
+WINDOW_DEFAULT_SIZE = QSize(720, 760)
+WINDOW_MINIMUM_SIZE = QSize(560, 420)
 
 
 class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, DownloadMixin, QMainWindow):
@@ -130,6 +156,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self.download_func = download_func
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.preference_values = self._initial_preferences()
+        self.download_concurrency = self._initial_download_concurrency()
         self.sort_key = self.settings.value(SORT_KEY_SETTING, "latest", str) or "latest"
         if self.sort_key not in SORT_LABELS:
             self.sort_key = "latest"
@@ -158,20 +185,29 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._playlist_event_parent_id = ""
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
-        self.resize(720, 760)
-        self.setMinimumSize(560, 420)
+        self.setMinimumSize(WINDOW_MINIMUM_SIZE)
+        self.resize(self._initial_window_size())
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
         self._load_completed_history()
         self._refresh_primary_action()
 
+    def _initial_window_size(self):
+        size = self.settings.value(WINDOW_SIZE_SETTING, WINDOW_DEFAULT_SIZE, QSize)
+        if isinstance(size, QSize) and size.isValid():
+            return size.expandedTo(WINDOW_MINIMUM_SIZE)
+        return WINDOW_DEFAULT_SIZE
+
+    def closeEvent(self, event):
+        self.settings.setValue(WINDOW_SIZE_SETTING, self.size())
+        super().closeEvent(event)
+
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 16, 18, 12)
-        layout.setSpacing(14)
+        layout.setContentsMargins(18, 12, 18, 12)
+        layout.setSpacing(10)
 
-        layout.addWidget(self._build_header())
         layout.addWidget(self._build_input_panel())
         layout.addWidget(self._build_list_panel(), 1)
         self.setCentralWidget(root)
@@ -195,7 +231,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         row.addStretch(1)
         return header
 
+    def _refresh_select_toggle_icon(self):
+        checked = bool(getattr(self, "select_mode", False))
+        color = theme.ACCENT if checked else theme.MUTED
+        self.select_toggle.setIcon(QIcon(checkbox_outline_pixmap(18, color, checked=checked)))
+
     def eventFilter(self, obj, event):
+        if hasattr(self, "search_input") and obj is self.search_input and event.type() == event.Type.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self._set_search_expanded(False)
+                return True
         if hasattr(self, "scroll_area") and obj is self.scroll_area.viewport() and event.type() == event.Type.Resize:
             self._position_playlist_float_button()
             self._refresh_playlist_float_button()
@@ -270,6 +315,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.primary_button.clicked.connect(self._handle_primary_action)
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
+        self.folder_input.editingFinished.connect(self._save_folder_from_input)
         self.folder_button = QPushButton("저장 위치")
         self.folder_button.setObjectName("SecondaryButton")
         self.folder_button.setFixedSize(96, TOP_FIELD_HEIGHT)
@@ -314,8 +360,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         panel = QFrame()
         panel.setObjectName("ListPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(2, 4, 2, 4)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 0, 2, 2)
+        layout.setSpacing(6)
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -323,9 +369,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.count_label.setObjectName("CountChip")
         self.count_label.setAlignment(Qt.AlignCenter)
 
-        self.select_toggle = QPushButton("선택")
-        self.select_toggle.setObjectName("GhostButton")
+        self.select_toggle = QPushButton("")
+        self.select_toggle.setObjectName("IconButton")
         self.select_toggle.setProperty("active", "false")
+        self.select_toggle.setFixedSize(LIST_TOOL_HEIGHT, LIST_TOOL_HEIGHT)
+        self.select_toggle.setIconSize(QSize(18, 18))
+        self._refresh_select_toggle_icon()
         self.select_toggle.setCursor(Qt.PointingHandCursor)
         self.select_toggle.setToolTip("선택 모드")
         self.select_toggle.clicked.connect(self._toggle_select_mode)
@@ -347,30 +396,50 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         select_actions_layout.addWidget(self.remove_list_button)
         select_actions_layout.addWidget(self.remove_file_button)
         self.select_actions.hide()
-        self.sort_label = QLabel("정렬:")
-        self.sort_label.setObjectName("SortLabel")
-        self.sort_label.setFixedHeight(TOP_FIELD_HEIGHT - 2)
-        self.sort_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        self.search_button = LucideIconButton("search", size=LIST_TOOL_HEIGHT, icon_size=18)
+        self.search_button.setToolTip("제목 검색")
+        self.search_button.clicked.connect(self._toggle_search)
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("SearchInput")
+        self.search_input.setPlaceholderText("제목 검색")
+        self.search_input.setFixedHeight(LIST_TOOL_HEIGHT)
+        self.search_input.setStyleSheet(
+            "QLineEdit#SearchInput { min-height: 18px; max-height: 18px; padding: 8px 10px; }"
+        )
+        self.search_input.setMaximumWidth(0)
+        self.search_input.hide()
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.installEventFilter(self)
+        self.search_animation = QPropertyAnimation(self.search_input, b"maximumWidth", self)
+        self.search_animation.setDuration(180)
+        self.search_animation.setEasingCurve(QEasingCurve.OutCubic)
         self.sort_order_combo = CleanComboBox()
-        self.sort_order_combo.addItems(["최신순", "이름순"])
-        self.sort_order_combo.setCurrentText(SORT_LABELS.get(self.sort_key, "최신순"))
+        self.sort_order_combo.setObjectName("CompactComboBox")
+        self.sort_order_combo.setStyleSheet(
+            "QComboBox#CompactComboBox { min-height: 36px; max-height: 36px; padding: 0px; border: none; }"
+        )
+        self.sort_order_combo.addItems(["다운로드순", "이름순"])
+        self.sort_order_combo.setCurrentText(SORT_LABELS.get(self.sort_key, "다운로드순"))
         self.sort_order_combo.currentIndexChanged.connect(self._sort_changed)
         self.sort_order_combo.show_arrow = False
         self.sort_order_combo.text_alignment = Qt.AlignCenter
-        self.sort_order_combo.setMaximumWidth(120)
-        self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=40, icon_size=18, bordered=True)
+        self.sort_order_combo.setFixedSize(SORT_TOOL_WIDTH, LIST_TOOL_HEIGHT)
+        self.sort_order_combo.setMinimumSize(SORT_TOOL_WIDTH, LIST_TOOL_HEIGHT)
+        self.sort_order_combo.setMaximumSize(SORT_TOOL_WIDTH, LIST_TOOL_HEIGHT)
+        self.sort_direction_button = LucideIconButton(self._sort_direction_icon(), size=LIST_TOOL_HEIGHT, icon_size=20)
         self.sort_direction_button.clicked.connect(self._toggle_sort_direction)
         self._refresh_sort_direction_button()
-        self.preference_button = QPushButton("품질")
+        self.preference_button = QPushButton("옵션")
         self.preference_button.setObjectName("SecondaryButton")
-        self.preference_button.setFixedSize(74, TOP_FIELD_HEIGHT - 2)
+        self.preference_button.setFixedSize(LIST_TOOL_WIDTH, LIST_TOOL_HEIGHT)
         self.preference_button.setCursor(Qt.PointingHandCursor)
         self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
         self.preference_button.clicked.connect(self._toggle_preferences_popup)
         header.addWidget(self.select_toggle, 0, Qt.AlignVCenter)
         header.addWidget(self.select_actions, 0, Qt.AlignVCenter)
         header.addStretch(1)
-        header.addWidget(self.sort_label, 0, Qt.AlignVCenter)
+        header.addWidget(self.search_input, 0, Qt.AlignVCenter)
+        header.addWidget(self.search_button, 0, Qt.AlignVCenter)
         header.addWidget(self.sort_order_combo, 0, Qt.AlignVCenter)
         header.addWidget(self.sort_direction_button, 0, Qt.AlignVCenter)
         header.addWidget(self.preference_button, 0, Qt.AlignVCenter)
@@ -387,8 +456,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
-        self.row_layout.setContentsMargins(2, 2, 2, 2)
-        self.row_layout.setSpacing(10)
+        self.row_layout.setContentsMargins(0, 2, 0, 2)
+        self.row_layout.setSpacing(5)
         self.row_layout.addStretch(1)
         self.scroll_area.setWidget(self.row_container)
         self._refresh_scrollbar_activity()
@@ -457,6 +526,41 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         folder = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.folder_input.text())
         if folder:
             self._set_save_folder(folder)
+
+    def _save_folder_from_input(self):
+        text = self.folder_input.text().strip()
+        if text:
+            self._set_save_folder(text)
+
+    def _toggle_search(self):
+        self._set_search_expanded(not self.search_input.isVisible())
+
+    def _set_search_expanded(self, expanded):
+        expanded = bool(expanded)
+        self.search_animation.stop()
+        if expanded:
+            self.search_input.show()
+            self.search_animation.setStartValue(self.search_input.maximumWidth())
+            self.search_animation.setEndValue(SEARCH_INPUT_WIDTH)
+            self.search_animation.start()
+            self.search_input.setFocus(Qt.MouseFocusReason)
+            return
+        self.search_input.clear()
+        self.search_animation.setStartValue(self.search_input.maximumWidth())
+        self.search_animation.setEndValue(0)
+        self.search_animation.finished.connect(self._hide_collapsed_search)
+        self.search_animation.start()
+
+    def _hide_collapsed_search(self):
+        try:
+            self.search_animation.finished.disconnect(self._hide_collapsed_search)
+        except RuntimeError:
+            pass
+        if self.search_input.maximumWidth() <= 0:
+            self.search_input.hide()
+
+    def _on_search_text_changed(self, *_args):
+        self._render_rows()
 
     def _handle_primary_action(self):
         current_url = self.url_input.text().strip()
@@ -800,19 +904,19 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 if any(not child.get("child_loading") for child in self._playlist_children_for_parent(existing_parent)):
                     self._finalize_progressive_playlist_rows(existing_parent, analysis, grouped_rows, source_url)
                     self._sort_rows()
-                    self.selected_row_index = self.rows.index(existing_parent)
+                    self.selected_row_index = -1
                     self._render_rows()
                     return
                 self._update_playlist_rows(existing_parent, analysis, grouped_rows, source_url)
                 self._sort_rows()
-                self.selected_row_index = self.rows.index(existing_parent)
+                self.selected_row_index = -1
                 self._render_rows()
                 return
             parent = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url)
             children = self._playlist_child_rows_from_grouped(parent, grouped_rows, analysis, source_url)
             self.rows = [parent] + children + preserved_rows
             self._sort_rows()
-            self.selected_row_index = 0 if self.rows else -1
+            self.selected_row_index = -1
             self._render_rows()
             return
         new_rows = []
@@ -820,7 +924,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             new_rows.append(self._video_row_from_grouped(grouped_row, analysis, source_url))
         self.rows = new_rows + preserved_rows
         self._sort_rows()
-        self.selected_row_index = 0 if self.rows else -1
+        self.selected_row_index = -1
         self._render_rows()
 
     def _should_preserve_existing_row(self, row):
@@ -837,10 +941,27 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return str(output_ext or DEFAULT_OUTPUT_EXT).lower()
 
     def _row_is_visible(self, row):
+        if not self._row_matches_search(row):
+            return False
         if not row.get("is_playlist_child"):
             return True
         parent = self._parent_playlist_for_child(row)
         return bool(parent and parent.get("expanded"))
+
+    def _row_matches_search(self, row):
+        if not hasattr(self, "search_input"):
+            return True
+        query = self.search_input.text().strip().casefold()
+        if not query:
+            return True
+        candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        text_parts = [
+            candidate.get("display_title"),
+            candidate.get("title"),
+            row.get("title"),
+            row.get("playlist_title"),
+        ]
+        return query in " ".join(str(part or "") for part in text_parts).casefold()
 
     @Slot(dict)
     def _handle_engine_event(self, event):

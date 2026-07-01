@@ -2,8 +2,8 @@ import html as html_lib
 import re
 from urllib.parse import urljoin, urlparse
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
@@ -16,6 +16,10 @@ except ImportError:
     from clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
     from clipflow_theme import THUMBNAIL_WIDTH
     import clipflow_theme as theme
+
+
+THUMBNAIL_PREVIEW_SCALE = 4
+THUMBNAIL_PREVIEW_CURSOR_GAP = 10
 
 
 class Spinner(QWidget):
@@ -129,24 +133,24 @@ class ClearingUrlInput(QLineEdit):
 class PathDisplayInput(QLineEdit):
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
-        self.setReadOnly(True)
-        self.setFocusPolicy(Qt.NoFocus)
-        self.setCursor(Qt.ArrowCursor)
+        self.setReadOnly(False)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.IBeamCursor)
 
-    def mousePressEvent(self, event):
-        self.deselect()
-        self.clearFocus()
-        event.accept()
+    def _set_field_focus(self, focused):
+        box = self.parent()
+        if box is not None and box.objectName() == "FieldBox":
+            box.setProperty("focused", "true" if focused else "false")
+            box.style().unpolish(box)
+            box.style().polish(box)
 
-    def mouseMoveEvent(self, event):
-        event.accept()
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self._set_field_focus(True)
 
-    def mouseDoubleClickEvent(self, event):
-        self.deselect()
-        event.accept()
-
-    def keyPressEvent(self, event):
-        event.ignore()
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._set_field_focus(False)
 
 
 def _rounded_pixmap(pixmap, width, height, radius):
@@ -270,6 +274,7 @@ class MarqueeLabel(QLabel):
 class SourceLinkButton(AboveTooltipMixin, QToolButton):
     _network_manager = None
     _icon_cache = {}
+    _youtube_icon_cache = {}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,8 +286,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self._page_checked = False
         self.setObjectName("SourceLinkButton")
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.setIconSize(QSize(16, 16))
+        self.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.setIconSize(QSize(20, 20))
+        self.setFixedSize(20, 20)
         self.setAutoRaise(True)
         self._set_fallback_icon()
 
@@ -298,7 +304,7 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             return
         self.source_url = url
         domain = source_domain(url)
-        self.setText(domain)
+        self.setText("")
         self.setToolTip(f"{domain}\n원본 링크 열기" if domain else "")
         self.setEnabled(bool(url))
         self._set_fallback_icon()
@@ -306,6 +312,10 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             self._reply.abort()
             self._reply = None
         if not domain:
+            self.favicon_url = ""
+            return
+        if domain in {"youtube.com", "youtu.be"} or domain.endswith(".youtube.com"):
+            self.setIcon(QIcon(self._youtube_icon(20)))
             self.favicon_url = ""
             return
         cached = self._icon_cache.get(domain)
@@ -319,7 +329,49 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self._fetch_next_icon_candidate()
 
     def _set_fallback_icon(self):
-        self.setIcon(QIcon(lucide_pixmap("globe-2", 16, ICON_COLOR)))
+        self.setIcon(QIcon(lucide_pixmap("globe-2", 20, ICON_COLOR)))
+
+    def _icon_target_rect(self):
+        icon_size = self.iconSize()
+        draw_size = min(icon_size.width(), icon_size.height(), max(1, self.width()), max(1, self.height()))
+        return QRect((self.width() - draw_size) // 2, (self.height() - draw_size) // 2, draw_size, draw_size)
+
+    @classmethod
+    def _youtube_icon(cls, size):
+        cached = cls._youtube_icon_cache.get(size)
+        if cached:
+            return cached
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#FF0000"))
+        painter.drawRoundedRect(QRectF(0.5, 2, size - 1, size - 4), 4, 4)
+        play = QPainterPath()
+        play.moveTo(size * 0.40, size * 0.31)
+        play.lineTo(size * 0.40, size * 0.69)
+        play.lineTo(size * 0.72, size * 0.50)
+        play.closeSubpath()
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawPath(play)
+        painter.end()
+        cls._youtube_icon_cache[size] = pixmap
+        return pixmap
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.underMouse() and self.isEnabled():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.SURFACE_SOFT))
+            painter.drawRoundedRect(QRectF(self.rect()), 5, 5)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        rect = self._icon_target_rect()
+        pixmap = self.icon().pixmap(rect.size())
+        if not pixmap.isNull():
+            painter.drawPixmap(rect, pixmap)
 
     def _queue_icon_candidates(self, urls):
         for icon_url in urls:
@@ -434,7 +486,7 @@ class CleanComboBox(QComboBox):
         self.show_arrow = True
         self.text_alignment = Qt.AlignLeft
         self.setMinimumHeight(28)
-        self.setMaximumHeight(30)
+        self.setMaximumHeight(42)
         self.setCursor(Qt.PointingHandCursor)
 
     def paintEvent(self, event):
@@ -457,6 +509,7 @@ class CleanComboBox(QComboBox):
         text = self.currentText()
         text_font = painter.font()
         text_font.setPixelSize(13)
+        text_font.setWeight(QFont.DemiBold)
         painter.setFont(text_font)
         center = bool(self.text_alignment & Qt.AlignHCenter)
 
@@ -530,14 +583,14 @@ class CleanComboBox(QComboBox):
         popup.setStyleSheet(
             f"QPushButton#ComboOption {{"
             f" background: transparent; border: none; border-radius: 7px;"
-            f" padding: 9px 14px 9px 14px; color: {theme.INK};"
+            f" padding: 6px 10px 6px 10px; color: {theme.INK};"
             f" font-size: 13px; font-weight: 500; text-align: left; }}"
             f"QPushButton#ComboOption:hover {{ background: {theme.SURFACE_SOFT}; }}"
             f"QPushButton#ComboOption[selected=\"true\"] {{ color: {theme.ACCENT}; font-weight: 700; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(2)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(1)
         current = self.currentIndex()
         for index in range(self.count()):
             option = QPushButton(self.itemText(index), popup)
@@ -548,7 +601,7 @@ class CleanComboBox(QComboBox):
             option.clicked.connect(lambda _checked=False, idx=index, pop=popup: self._choose_option(idx, pop))
             layout.addWidget(option)
         popup.adjustSize()
-        popup.setFixedWidth(max(self.width(), popup.sizeHint().width(), 160))
+        popup.setFixedWidth(max(self.width(), popup.sizeHint().width()))
         popup.move(self.mapToGlobal(QPoint(0, self.height() + 6)))
         self._active_popup = popup
         popup.show()
@@ -565,11 +618,13 @@ class CleanComboBox(QComboBox):
 
 class ThumbnailPlaceholder(QFrame):
     _network_manager = None
+    _active_preview_owner = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("ThumbBox")
         self.setFixedSize(THUMBNAIL_WIDTH, 54)
+        self.setMouseTracking(True)
         self.icon = LucideIconWidget("play", size=22, color=theme.MUTED, parent=self)
         self.thumbnail_url = ""
         self._pixmap = QPixmap()
@@ -580,6 +635,10 @@ class ThumbnailPlaceholder(QFrame):
         self._preview_label = None
         self._preview_pixmap = QPixmap()
         self._preview_pixmap_key = None
+        self._preview_hide_timer = QTimer(self)
+        self._preview_hide_timer.setSingleShot(True)
+        self._preview_hide_timer.setInterval(90)
+        self._preview_hide_timer.timeout.connect(self._hide_preview_if_cursor_left)
 
     @classmethod
     def network_manager(cls):
@@ -654,6 +713,32 @@ class ThumbnailPlaceholder(QFrame):
             self._scaled_target_size = QSize(target_size.width(), target_size.height())
         return self._scaled_pixmap
 
+    @staticmethod
+    def preview_geometry(cursor_pos, preview_size, screen_rect):
+        width = preview_size.width()
+        height = preview_size.height()
+        gap = THUMBNAIL_PREVIEW_CURSOR_GAP
+        x = cursor_pos.x() + gap
+        y = cursor_pos.y() - height - gap + 1
+        if x + width - 1 > screen_rect.right():
+            x = cursor_pos.x() - width - gap + 1
+        if y < screen_rect.top():
+            y = cursor_pos.y() + gap
+        x = max(screen_rect.left(), min(x, screen_rect.right() - width + 1))
+        y = max(screen_rect.top(), min(y, screen_rect.bottom() - height + 1))
+        return QRect(x, y, width, height)
+
+    @staticmethod
+    def event_global_pos(event):
+        if hasattr(event, "globalPosition"):
+            return event.globalPosition().toPoint()
+        if hasattr(event, "globalPos"):
+            return event.globalPos()
+        return QCursor.pos()
+
+    def _preview_size(self):
+        return QSize(self.width() * THUMBNAIL_PREVIEW_SCALE, self.height() * THUMBNAIL_PREVIEW_SCALE)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._pixmap.isNull():
@@ -670,25 +755,44 @@ class ThumbnailPlaceholder(QFrame):
         painter.drawPixmap(x, y, scaled)
 
     def enterEvent(self, event):
-        self._show_preview()
+        self._preview_hide_timer.stop()
+        self._show_preview(self.event_global_pos(event))
         super().enterEvent(event)
 
+    def mouseMoveEvent(self, event):
+        self._preview_hide_timer.stop()
+        self._move_preview(self.event_global_pos(event))
+        super().mouseMoveEvent(event)
+
     def leaveEvent(self, event):
-        self._hide_preview()
+        self._schedule_preview_hide()
         super().leaveEvent(event)
 
     def hideEvent(self, event):
         self._hide_preview()
         super().hideEvent(event)
 
-    def _show_preview(self):
+    def _show_preview(self, cursor_pos=None):
         if self._pixmap.isNull():
             return
-        width, height = THUMBNAIL_WIDTH * 2, 54 * 2
+        active_owner = ThumbnailPlaceholder._active_preview_owner
+        if active_owner is not None and active_owner is not self:
+            if isValid(active_owner):
+                active_owner._hide_preview()
+            else:
+                ThumbnailPlaceholder._active_preview_owner = None
+        ThumbnailPlaceholder._active_preview_owner = self
+        self._preview_hide_timer.stop()
+        preview_size = self._preview_size()
+        width, height = preview_size.width(), preview_size.height()
         if self._preview is None:
-            self._preview = QFrame(None, Qt.ToolTip | Qt.FramelessWindowHint)
+            preview_flags = Qt.ToolTip | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+            if hasattr(Qt, "WindowTransparentForInput"):
+                preview_flags |= Qt.WindowTransparentForInput
+            self._preview = QFrame(None, preview_flags)
             self._preview.setAttribute(Qt.WA_TranslucentBackground, True)
             self._preview.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._preview.setAttribute(Qt.WA_ShowWithoutActivating, True)
             preview_layout = QVBoxLayout(self._preview)
             preview_layout.setContentsMargins(0, 0, 0, 0)
             self._preview_label = QLabel(self._preview)
@@ -701,14 +805,38 @@ class ThumbnailPlaceholder(QFrame):
             self._preview_pixmap_key = key
         self._preview_label.setPixmap(self._preview_pixmap)
         self._preview.adjustSize()
-        anchor = self.mapToGlobal(QPoint((self.width() - width) // 2, -height - 10))
-        self._preview.move(anchor)
+        self._move_preview(cursor_pos)
         self._preview.show()
         self._preview.raise_()
 
+    def _move_preview(self, cursor_pos=None):
+        if self._preview is None:
+            return
+        cursor_pos = cursor_pos or QCursor.pos()
+        screen = QGuiApplication.screenAt(cursor_pos) or QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        geometry = self.preview_geometry(cursor_pos, self._preview_size(), screen.availableGeometry())
+        self._preview.setGeometry(geometry)
+
     def _hide_preview(self):
+        self._preview_hide_timer.stop()
         if self._preview is not None:
             self._preview.hide()
+        if ThumbnailPlaceholder._active_preview_owner is self:
+            ThumbnailPlaceholder._active_preview_owner = None
+
+    def _schedule_preview_hide(self):
+        if self._preview is not None and self._preview.isVisible():
+            self._preview_hide_timer.start()
+
+    def _hide_preview_if_cursor_left(self, cursor_pos=None):
+        if self._preview is None:
+            return
+        cursor_pos = cursor_pos or QCursor.pos()
+        if self.rect().contains(self.mapFromGlobal(cursor_pos)):
+            return
+        self._hide_preview()
 
 
 class PrimaryActionButton(QPushButton):
