@@ -2,10 +2,10 @@ import html as html_lib
 import re
 from urllib.parse import urljoin, urlparse
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
 try:
@@ -22,6 +22,65 @@ THUMBNAIL_PREVIEW_SCALE = 4
 THUMBNAIL_PREVIEW_CURSOR_GAP = 10
 
 
+class RoundedFrame(QFrame):
+    def __init__(self, radius=8, border_width=1.4, background=None, border=None, parent=None):
+        super().__init__(parent)
+        self.radius = radius
+        self.border_width = border_width
+        self.background = background or theme.SURFACE
+        self.border = border or theme.GRAPHITE
+        self.setAttribute(Qt.WA_StyledBackground, False)
+
+    def set_colors(self, background=None, border=None):
+        if background is not None:
+            self.background = background
+        if border is not None:
+            self.border = border
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        inset = max(1.0, self.border_width / 2)
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        painter.setPen(QPen(QColor(self.border), self.border_width))
+        painter.setBrush(QColor(self.background))
+        painter.drawRoundedRect(rect, self.radius, self.radius)
+
+
+class OutlinedButton(QPushButton):
+    def __init__(self, text="", parent=None, radius=8, border_width=1.4):
+        super().__init__(text, parent)
+        self.radius = radius
+        self.border_width = border_width
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0px; }")
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        enabled = self.isEnabled()
+        selected = self.objectName() == "PrimaryPopupButton" or str(self.property("selected") or "").lower() == "true"
+        active = self.isDown() or self.underMouse()
+        bg = theme.GRAPHITE if enabled and selected else theme.SURFACE_SOFT if enabled and active else theme.SURFACE
+        border = theme.GRAPHITE if enabled else theme.BORDER_STRONG
+        text = theme.ON_ACCENT if enabled and selected else theme.INK if enabled else theme.MUTED_SOFT
+        inset = max(1.0, self.border_width / 2)
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        painter.setPen(QPen(QColor(border), self.border_width))
+        painter.setBrush(QColor(bg))
+        painter.drawRoundedRect(rect, self.radius, self.radius)
+        font = painter.font()
+        font.setPixelSize(13)
+        font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor(text))
+        painter.drawText(QRectF(self.rect()), Qt.AlignCenter, self.text())
+
+
 class Spinner(QWidget):
     """A small indeterminate loading spinner (rotating accent arc)."""
 
@@ -30,21 +89,29 @@ class Spinner(QWidget):
         self._size = size
         self.setFixedSize(size, size)
         self._angle = 0
+        self._elapsed = QElapsedTimer()
+        self._duration_ms = 900
         self._timer = QTimer(self)
-        self._timer.setInterval(70)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._advance)
 
     def start(self):
         if not self._timer.isActive():
+            self._elapsed.restart()
             self._timer.start()
         self.show()
 
     def stop(self):
         self._timer.stop()
+        self._elapsed.invalidate()
         self.hide()
 
     def _advance(self):
-        self._angle = (self._angle - 30) % 360
+        if self._elapsed.isValid():
+            self._angle = -(360.0 * (self._elapsed.elapsed() % self._duration_ms) / self._duration_ms) % 360
+        else:
+            self._angle = (self._angle - 30) % 360
         self.update()
 
     def paintEvent(self, event):
@@ -84,11 +151,11 @@ class CleanCheckBox(QCheckBox):
         rect = QRectF(x, y, size, size)
         if self.isChecked():
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(theme.ACCENT))
+            painter.setBrush(QColor(theme.GRAPHITE))
             painter.drawRoundedRect(rect, 5, 5)
             painter.drawPixmap(x + 2, y + 2, 14, 14, lucide_pixmap("check", 14, "#FFFFFF"))
         else:
-            border = theme.ACCENT if self.underMouse() else theme.FIELD_BORDER_HOVER
+            border = theme.GRAPHITE
             painter.setPen(QPen(QColor(border), 1.4))
             painter.setBrush(QColor(theme.SURFACE))
             painter.drawRoundedRect(rect, 5, 5)
@@ -100,6 +167,49 @@ class CleanCheckBox(QCheckBox):
     def leaveEvent(self, event):
         self.update()
         super().leaveEvent(event)
+
+
+class CleanSwitch(QAbstractButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(44, 28)
+
+    def sizeHint(self):
+        return QSize(44, 28)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        enabled = self.isEnabled()
+        checked = self.isChecked()
+        track_color = theme.GRAPHITE if checked and enabled else theme.SURFACE
+        border_color = theme.GRAPHITE if enabled else theme.BORDER_STRONG
+        knob_color = theme.ON_ACCENT if checked and enabled else (theme.MUTED_SOFT if not enabled else theme.SURFACE)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        painter.setPen(QPen(QColor(border_color), 1.4))
+        painter.setBrush(QColor(track_color))
+        painter.drawRoundedRect(rect, 9, 9)
+        knob_size = 18
+        knob_x = self.width() - knob_size - 4 if checked else 4
+        knob_rect = QRectF(knob_x, (self.height() - knob_size) / 2, knob_size, knob_size)
+        painter.setPen(QPen(QColor(theme.GRAPHITE if enabled else theme.BORDER_STRONG), 1.0) if not checked else Qt.NoPen)
+        painter.setBrush(QColor(knob_color))
+        painter.drawRoundedRect(knob_rect, 6, 6)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def changeEvent(self, event):
+        self.update()
+        super().changeEvent(event)
 
 
 class ClearingUrlInput(QLineEdit):
@@ -117,6 +227,8 @@ class ClearingUrlInput(QLineEdit):
     def _set_field_focus(self, focused):
         box = self.parent()
         if box is not None and box.objectName() == "FieldBox":
+            if hasattr(box, "set_colors"):
+                box.set_colors(border=theme.ACCENT if focused else theme.GRAPHITE)
             box.setProperty("focused", "true" if focused else "false")
             box.style().unpolish(box)
             box.style().polish(box)
@@ -249,6 +361,30 @@ class TimecodeInput(QWidget):
         self.set_selected_segment(0)
         event.accept()
 
+    def event(self, event):
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            self._handle_tab_key(event)
+            return True
+        return super().event(event)
+
+    def _handle_tab_key(self, event):
+        if self._selected_segment is None:
+            self.set_selected_segment(0)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Backtab:
+            if self._selected_segment > 0:
+                self.set_selected_segment(self._selected_segment - 1)
+            else:
+                self.focusPreviousChild()
+            event.accept()
+            return
+        if self._selected_segment < 2:
+            self.set_selected_segment(self._selected_segment + 1)
+        else:
+            self.editingComplete.emit()
+        event.accept()
+
     def keyPressEvent(self, event):
         key = event.key()
         text = event.text()
@@ -256,11 +392,11 @@ class TimecodeInput(QWidget):
             self._type_digit(text)
             event.accept()
             return
-        if key in (Qt.Key_Left, Qt.Key_Backtab):
+        if key == Qt.Key_Left:
             self.set_selected_segment(max(0, self.selected_segment() - 1))
             event.accept()
             return
-        if key in (Qt.Key_Right, Qt.Key_Tab):
+        if key == Qt.Key_Right:
             self.set_selected_segment(min(2, self.selected_segment() + 1))
             event.accept()
             return
@@ -338,7 +474,7 @@ class TimecodeInput(QWidget):
         for index, label in enumerate(labels):
             selected = index == self._selected_segment and self.hasFocus()
             rect = self._segment_rects[index]
-            painter.setPen(QPen(QColor(theme.ACCENT if selected else theme.FIELD_BORDER), 1))
+            painter.setPen(QPen(QColor(theme.ACCENT if selected else theme.GRAPHITE), 1.4))
             painter.setBrush(QColor(theme.ACCENT_TINT if selected else theme.SURFACE))
             painter.drawRoundedRect(rect, 7, 7)
             color = theme.MUTED if self._parts[index] is None else theme.INK
@@ -364,6 +500,14 @@ def _rounded_pixmap(pixmap, width, height, radius):
     painter.drawPixmap(x, y, scaled)
     painter.end()
     return result
+
+
+def _reply_bytes(reply):
+    if not reply or reply.error() != QNetworkReply.NoError:
+        return b""
+    if not reply.isOpen() or not reply.isReadable() or reply.bytesAvailable() <= 0:
+        return b""
+    return bytes(reply.readAll())
 
 
 def source_domain(url):
@@ -505,8 +649,10 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self.setEnabled(bool(url))
         self._set_fallback_icon()
         if self._reply:
-            self._reply.abort()
+            old_reply = self._reply
             self._reply = None
+            old_reply.abort()
+            old_reply.deleteLater()
         if not domain:
             self.favicon_url = ""
             return
@@ -617,8 +763,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             if reply.error() != QNetworkReply.NoError:
                 self._fetch_next_icon_candidate()
                 return
+            payload = _reply_bytes(reply)
             pixmap = QPixmap()
-            if pixmap.loadFromData(reply.readAll()) and not pixmap.isNull():
+            if payload and pixmap.loadFromData(payload) and not pixmap.isNull():
                 icon = QIcon(pixmap)
                 self._icon_cache[domain] = icon
                 if domain == source_domain(self.source_url):
@@ -637,8 +784,8 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             return
         self._reply = None
         try:
-            if reply.error() == QNetworkReply.NoError:
-                html_bytes = bytes(reply.readAll())
+            html_bytes = _reply_bytes(reply)
+            if html_bytes:
                 html_text = html_bytes[:524288].decode("utf-8", "ignore")
                 self._queue_icon_candidates(favicon_urls_from_html(html_text, page_url))
             self._fetch_next_icon_candidate()
@@ -657,15 +804,22 @@ class ComboPopup(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(QPen(QColor(theme.BORDER), 1))
+        outer = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        inner = outer.adjusted(1.4, 1.4, -1.4, -1.4)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.GRAPHITE))
+        painter.drawRoundedRect(outer, 10, 10)
         painter.setBrush(QColor(theme.SURFACE))
-        painter.drawRoundedRect(rect, 10, 10)
+        painter.drawRoundedRect(inner, 8.6, 8.6)
+        painter.setPen(QPen(QColor(theme.GRAPHITE), 1.4))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(outer.adjusted(0.7, 0.7, -0.7, -0.7), 9.3, 9.3)
 
     def closeEvent(self, event):
         parent = self.parent()
@@ -690,14 +844,14 @@ class CleanComboBox(QComboBox):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        rect = QRectF(self.rect()).adjusted(0.5, 1.0, -0.5, -1.0)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         enabled = self.isEnabled()
         hovered = self.underMouse()
-        border_color = theme.FIELD_BORDER_HOVER if enabled and hovered else theme.FIELD_BORDER
+        border_color = theme.GRAPHITE
         text_color = theme.INK if enabled else theme.MUTED_SOFT
         background = theme.SURFACE_SOFT if enabled and hovered else (theme.SURFACE if enabled else theme.SURFACE_SUNKEN)
 
-        painter.setPen(QPen(QColor(border_color if enabled else theme.BORDER), 1))
+        painter.setPen(QPen(QColor(border_color if enabled else theme.GRAPHITE), 1.4))
         painter.setBrush(QColor(background))
         painter.drawRoundedRect(rect, 8, 8)
 
@@ -854,8 +1008,10 @@ class ThumbnailPlaceholder(QFrame):
         self._preview_pixmap_key = None
         self.icon.show()
         if self._reply:
-            self._reply.abort()
+            old_reply = self._reply
             self._reply = None
+            old_reply.abort()
+            old_reply.deleteLater()
         if not url:
             self.update()
             return
@@ -869,18 +1025,22 @@ class ThumbnailPlaceholder(QFrame):
         request = QNetworkRequest(parsed)
         if referer:
             request.setRawHeader(b"Referer", str(referer).encode("utf-8"))
-        self._reply = self.network_manager().get(request)
-        self._reply.finished.connect(self._thumbnail_finished)
+        reply = self.network_manager().get(request)
+        self._reply = reply
+        reply.finished.connect(lambda reply=reply: self._thumbnail_finished(reply))
 
-    def _thumbnail_finished(self):
-        reply = self._reply
-        self._reply = None
+    def _thumbnail_finished(self, reply):
         if not reply:
             return
+        if reply is not self._reply:
+            reply.deleteLater()
+            return
+        self._reply = None
         try:
-            if reply.error() == QNetworkReply.NoError:
+            payload = _reply_bytes(reply)
+            if payload:
                 pixmap = QPixmap()
-                if pixmap.loadFromData(reply.readAll()):
+                if pixmap.loadFromData(payload):
                     self._set_pixmap(pixmap)
         finally:
             reply.deleteLater()
@@ -1040,8 +1200,11 @@ class PrimaryActionButton(QPushButton):
         super().__init__(parent)
         self._loading = False
         self._angle = 0
+        self._elapsed = QElapsedTimer()
+        self._duration_ms = 900
         self._timer = QTimer(self)
-        self._timer.setInterval(70)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._advance)
 
     def set_loading(self, loading):
@@ -1050,9 +1213,11 @@ class PrimaryActionButton(QPushButton):
             return
         self._loading = loading
         if loading:
+            self._elapsed.restart()
             self._timer.start()
         else:
             self._timer.stop()
+            self._elapsed.invalidate()
             self._angle = 0
         self.update()
 
@@ -1060,15 +1225,38 @@ class PrimaryActionButton(QPushButton):
         return self._loading
 
     def _advance(self):
-        self._angle = (self._angle - 28) % 360
+        if self._elapsed.isValid():
+            self._angle = -(360.0 * (self._elapsed.elapsed() % self._duration_ms) / self._duration_ms) % 360
+        else:
+            self._angle = (self._angle - 28) % 360
         self.update()
 
     def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._loading:
-            return
+        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        enabled = self.isEnabled()
+        pressed = self.isDown()
+        hovered = self.underMouse()
+        background = theme.GRAPHITE_PRESSED if enabled and pressed else theme.GRAPHITE_HOVER if enabled and hovered else theme.GRAPHITE if enabled else theme.GRAPHITE_DISABLED
+        border = theme.GRAPHITE if enabled else theme.BORDER_STRONG
+        inset = 0.7
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        painter.setPen(QPen(QColor(border), 1.4))
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(rect, 8, 8)
+        if not self._loading:
+            icon = self.icon()
+            if not icon.isNull():
+                size = self.iconSize()
+                mode = QIcon.Normal if enabled else QIcon.Disabled
+                pixmap = icon.pixmap(size, mode)
+                x = (self.width() - size.width()) // 2
+                y = (self.height() - size.height()) // 2
+                painter.drawPixmap(x, y, pixmap)
+            return
+        if not self._loading:
+            return
         pen = QPen(QColor(theme.ON_ACCENT), 2)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)

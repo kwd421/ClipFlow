@@ -6,6 +6,7 @@ imports below plus methods that remain on the window class or other mixins.
 """
 
 from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
 try:
@@ -84,6 +85,16 @@ class RenderMixin:
         self._refresh_primary_action()
         self._refresh_playlist_float_button()
         self._refresh_scrollbar_activity()
+        QTimer.singleShot(0, self._refresh_hovered_row_under_cursor)
+
+    def _refresh_hovered_row_under_cursor(self):
+        cursor_pos = QCursor.pos()
+        for row in self.rows:
+            widget = row.get("widget")
+            if not widget:
+                continue
+            hovered = widget.isVisible() and widget.rect().contains(widget.mapFromGlobal(cursor_pos))
+            widget._set_hovered(hovered)
 
     def _refresh_scrollbar_activity(self, *_args):
         if not hasattr(self, "scroll_area"):

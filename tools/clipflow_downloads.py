@@ -9,7 +9,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Slot
+from PySide6.QtCore import QThread, QTimer, Slot
 
 try:
     from tools import downloader_engine as engine
@@ -92,6 +92,18 @@ class DownloadMixin:
             return existing
         return None
 
+    def _segment_extract_source_path(self, row):
+        base = row.get("candidate") or {}
+        saved_output = row.get("output_path") or ""
+        if saved_output:
+            saved_path = Path(saved_output).expanduser()
+            if engine.completed_output_exists(saved_path, base):
+                return saved_path
+        existing = self._existing_output_path_for_row(row, base) if base else None
+        if existing and engine.completed_output_exists(existing, base):
+            return existing
+        return None
+
     def _local_audio_download_func_for_row(self, row, candidate):
         source_value = row.get("local_audio_source_path") or ""
         if not source_value:
@@ -114,6 +126,25 @@ class DownloadMixin:
 
         return convert_local_audio
 
+    def _local_segment_download_func_for_row(self, row, candidate):
+        source_value = row.get("local_segment_source_path") or ""
+        if not source_value:
+            return None
+        source_path = Path(source_value).expanduser()
+        if not source_path.is_file():
+            return None
+
+        def extract_local_segment(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+            del page_url, cookie_source, proxy_url
+            return engine.extract_existing_media_segment(
+                source_path,
+                candidate,
+                output_dir=output_dir,
+                on_event=on_event,
+            )
+
+        return extract_local_segment
+
     def start_download_for_row(self, row):
         if row not in self.rows:
             return
@@ -131,6 +162,14 @@ class DownloadMixin:
         if not candidate:
             self._set_status("다운로드할 항목을 선택하세요")
             return
+        try:
+            prepared_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else dict(candidate)
+        except ValueError as exc:
+            self._set_status(str(exc))
+            return
+        if prepared_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
+            self._apply_download_candidate_to_row(row, prepared_candidate)
+        candidate = prepared_candidate
 
         if self._row_is_downloading(row):
             self._set_status("이미 다운로드 중")
@@ -152,7 +191,7 @@ class DownloadMixin:
             self._refresh_footer()
             return
 
-        download_func = self._local_audio_download_func_for_row(row, candidate)
+        download_func = self._local_segment_download_func_for_row(row, candidate) or self._local_audio_download_func_for_row(row, candidate)
         if download_func:
             self._begin_download(row, candidate, download_func=download_func)
         else:
@@ -163,6 +202,9 @@ class DownloadMixin:
         return [row for row in self.rows if row.get("parent_playlist_id") == parent_id]
 
     def _start_playlist_children_downloads(self, parent):
+        parent.pop("_playlist_auto_download_paused", None)
+        if parent.get("analysis_loading"):
+            self._analysis_auto_download = True
         children = self._playlist_children_for_parent(parent)
         if not children:
             self._set_status("재생목록 하위 항목이 없습니다")
@@ -199,10 +241,10 @@ class DownloadMixin:
         if not children:
             self._refresh_playlist_parent_metadata(parent)
             if total:
-                parent["status"] = ANALYZING_STATUS
+                parent["status"] = PAUSED_STATUS if parent.get("_playlist_auto_download_paused") else ANALYZING_STATUS
                 parent["status_detail"] = f"0/{total}"
                 parent["progress"] = 0
-                parent["progress_text"] = ""
+                parent["progress_text"] = "0%" if parent.get("_playlist_auto_download_paused") else ""
             widget = parent.get("widget")
             if widget:
                 widget.refresh()
@@ -222,6 +264,10 @@ class DownloadMixin:
         elif active:
             status = DOWNLOAD_STATUS
             detail = f"{completed}/{total}"
+            progress_text = f"{progress}%"
+        elif parent.get("_playlist_auto_download_paused"):
+            status = PAUSED_STATUS
+            detail = f"{completed}/{total}" if total else ""
             progress_text = f"{progress}%"
         elif paused:
             status = PAUSED_STATUS
@@ -248,6 +294,11 @@ class DownloadMixin:
         candidate = candidate or self.selected_candidate_for_row_ref(row)
         if not candidate:
             return
+        resume_progress = 0
+        resume_progress_text = ""
+        if row.get("status") == PAUSED_STATUS:
+            resume_progress = max(0, min(99, engine.safe_int(row.get("progress"))))
+            resume_progress_text = row.get("progress_text") or (f"{resume_progress}%" if resume_progress else "")
         try:
             download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
         except ValueError as exc:
@@ -257,6 +308,8 @@ class DownloadMixin:
                 widget.set_status(READY_STATUS)
                 widget.set_progress(0, "")
             return
+        if download_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
+            self._apply_download_candidate_to_row(row, download_candidate)
         download_candidate["_clipflow_row_id"] = str(row.get("id") or "")
         self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)
@@ -266,8 +319,11 @@ class DownloadMixin:
         widget = row.get("widget")
         if widget:
             widget.set_status("다운로드 중")
-            widget.set_progress(0, "다운로드 준비 중")
-        self._set_status("다운로드 준비 중")
+            if resume_progress:
+                widget.set_progress(resume_progress, resume_progress_text or "이어받기 준비 중")
+            else:
+                widget.set_progress(0, "다운로드 준비 중")
+        self._set_status("이어받기 준비 중" if resume_progress else "다운로드 준비 중")
 
         page_url = row.get("source_url") or (self.analysis or {}).get("webpage_url") or self.url_input.text().strip()
         thread = QThread(self)
@@ -301,10 +357,13 @@ class DownloadMixin:
         if not row or row not in self.rows:
             return
         if row.get("kind") == "playlist":
+            row["_playlist_auto_download_paused"] = True
+            self._analysis_auto_download = False
             for child in self._playlist_children_for_parent(row):
                 if child.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS} or child in self.queued_download_rows:
                     self.pause_download_for_row(child)
             self._set_row_paused(row)
+            self._refresh_playlist_parent_status(row)
             self._refresh_parent_for_child(row)
             self._refresh_footer()
             return
@@ -377,17 +436,17 @@ class DownloadMixin:
         if not row or row not in self.rows:
             return
         if row.get("kind") == "playlist":
+            row.pop("_playlist_auto_download_paused", None)
+            if row.get("analysis_loading"):
+                self._analysis_auto_download = True
             for child in self._playlist_children_for_parent(row):
                 if child.get("status") == PAUSED_STATUS:
                     self.resume_download_for_row(child)
+            self._start_playlist_children_downloads(row)
             self._refresh_playlist_parent_status(row)
             return
         if row.get("status") == PAUSED_STATUS:
             row.pop("download_cancel_requested", None)
-            row["status"] = READY_STATUS
-            widget = row.get("widget")
-            if widget:
-                widget.set_status(READY_STATUS)
             self.start_download_for_row(row)
 
     def _sync_legacy_download_refs(self):
@@ -399,14 +458,22 @@ class DownloadMixin:
     def _existing_output_path_for_row(self, row, candidate):
         saved_output = row.get("output_path") or ""
         output_path = Path(saved_output)
+        row_output_dir = self._output_dir_for_row(row, candidate)
+        expected_output = engine.final_output_path_for_candidate(candidate, row_output_dir)
+        saved_matches_candidate = False
+        if saved_output and expected_output is not None:
+            try:
+                saved_matches_candidate = output_path.expanduser().resolve() == Path(expected_output).expanduser().resolve()
+            except OSError:
+                saved_matches_candidate = output_path.expanduser() == Path(expected_output).expanduser()
         if (
             saved_output
             and row.get("status") == "완료"
+            and saved_matches_candidate
             and engine.completed_output_exists(output_path, candidate)
             and not engine.output_is_too_small_for_candidate(output_path, candidate)
         ):
             return output_path
-        row_output_dir = self._output_dir_for_row(row, candidate)
         existing = engine.existing_output_path_for_candidate(candidate, row_output_dir)
         if existing:
             return existing
@@ -485,19 +552,44 @@ class DownloadMixin:
     def _mark_existing_output(self, row, output_path):
         row["output_path"] = str(output_path)
         self._apply_actual_output_size(row, output_path)
+        row["status"] = "완료"
+        row["status_detail"] = "이미 있는 파일"
         row["progress"] = 100
-        row["progress_text"] = ""
+        row["progress_text"] = "이미 있는 파일"
         widget = row.get("widget")
         if widget:
             widget.refresh()
-            widget.set_status("완료")
-            widget.set_progress(100, "완료")
+            widget.set_status("완료", "이미 있는 파일")
+            widget.set_progress(100, "이미 있는 파일")
             widget._refresh_actions()
+        if hasattr(self, "_next_row_sequence"):
+            row["created_order"] = self._next_row_sequence()
+        if hasattr(self, "_render_rows"):
+            self._render_rows()
+        if hasattr(self, "_scroll_row_to_top"):
+            self._scroll_row_to_top(row)
+        token = time.monotonic()
+        row["_existing_notice_token"] = token
+        QTimer.singleShot(3000, lambda: self._clear_existing_output_notice(row, token))
         self._save_completed_history()
         self._set_status(f"이미 파일 있음: {Path(output_path).name}")
         self._refresh_primary_action()
         self._refresh_footer()
         self._refresh_parent_for_child(row)
+
+    def _clear_existing_output_notice(self, row, token):
+        if not isinstance(row, dict) or row.get("_existing_notice_token") != token:
+            return
+        row.pop("_existing_notice_token", None)
+        if row.get("status") != "완료" or row.get("status_detail") != "이미 있는 파일":
+            return
+        row["status_detail"] = ""
+        row["progress_text"] = ""
+        widget = row.get("widget")
+        if widget:
+            widget.set_status("완료", "")
+            widget.set_progress(100, "")
+            widget._refresh_actions()
 
     @Slot(dict)
     def _download_finished(self, result):
@@ -630,7 +722,7 @@ class DownloadMixin:
             if existing_output:
                 self._mark_existing_output(row, existing_output)
                 continue
-            download_func = self._local_audio_download_func_for_row(row, candidate)
+            download_func = self._local_segment_download_func_for_row(row, candidate) or self._local_audio_download_func_for_row(row, candidate)
             if download_func:
                 self._begin_download(row, candidate, download_func=download_func)
             else:

@@ -399,6 +399,7 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(prepared["display_title"], "Video [00m10s-00m20s]")
         self.assertEqual(prepared["duration"], 10)
         self.assertEqual(prepared["source_duration"], 120)
+        self.assertEqual(prepared["source_filesize"], 1200)
         self.assertEqual(prepared["sort_bytes"], 100)
         self.assertEqual(prepared["filesize"], 100)
         self.assertEqual(prepared["size_source"], "clip_estimate")
@@ -578,6 +579,38 @@ class DownloaderEngineTests(unittest.TestCase):
                 ("18/best[ext=mp4]/best", None),
             ],
         )
+
+    def test_download_candidate_retries_without_cookies_after_browser_cookie_decrypt_error(self):
+        calls = []
+        events = []
+
+        class CookieDecryptFailThenOkYDL:
+            def __init__(self, options):
+                self.options = options
+                calls.append(options.get("cookiesfrombrowser"))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def download(self, urls):
+                if len(calls) == 1:
+                    raise RuntimeError("ERROR: Failed to decrypt with DPAPI")
+
+        result = engine.download_candidate(
+            "https://youtube.test/watch?v=one",
+            {"format_selector": "137+bestaudio[ext=m4a]/bestaudio/best", "output_ext": "mp4"},
+            "C:/Temp",
+            cookie_source="Chrome",
+            ydl_factory=CookieDecryptFailThenOkYDL,
+            on_event=lambda event: events.append(event),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [("chrome",), None])
+        self.assertTrue(any("쿠키 없이 다시 시도" in event.get("message", "") for event in events))
 
     def test_download_candidate_uses_analyzed_info_without_reextracting_url(self):
         calls = []
@@ -1056,6 +1089,51 @@ for line in sys.stdin:
             self.assertEqual(result["output_path"], str(output))
             self.assertEqual(calls[0][0], ["ffmpeg-test", "-y", "-i", str(source), "-vn", str(output)])
             self.assertTrue(any(event.get("type") == "file" and event.get("path") == str(output) for event in events))
+
+    def test_extract_existing_media_segment_uses_local_file_without_downloading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "Already Downloaded.mp4"
+            source.write_bytes(b"video")
+            calls = []
+            events = []
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+
+            def fake_runner(command, **kwargs):
+                calls.append((command, kwargs))
+                Path(command[-1]).write_bytes(b"segment")
+                return Completed()
+
+            result = engine.extract_existing_media_segment(
+                source,
+                {
+                    "title": "Already Downloaded",
+                    "display_title": "Already Downloaded [00m10s-00m20s]",
+                    "output_ext": "mp4",
+                    "clip_range": {"start": 10, "end": 20},
+                    "clip_cut_mode": "fast",
+                },
+                output_dir=temp,
+                on_event=events.append,
+                ffmpeg_exe="ffmpeg-test",
+                runner=fake_runner,
+            )
+
+            output = Path(result["output_path"])
+            self.assertEqual(output.name, "Already Downloaded [00m10s-00m20s].mp4")
+            self.assertEqual(output.read_bytes(), b"segment")
+
+        command = calls[0][0]
+        self.assertIn(str(source), command)
+        self.assertIn("-ss", command)
+        self.assertIn("10.0", command)
+        self.assertIn("-t", command)
+        self.assertIn("-c", command)
+        self.assertEqual(command[command.index("-c") + 1], "copy")
+        self.assertTrue(any(event.get("type") == "status" and event.get("message") == "Extracting selected segment" for event in events))
 
     def test_download_options_pass_browser_dom_referer_and_origin_headers(self):
         candidate = {
@@ -1750,6 +1828,64 @@ for line in sys.stdin:
         self.assertEqual(progress_events[-1]["percent"], 100)
         self.assertTrue(any(event.get("type") == "file" and event.get("path") == result["output_path"] for event in events))
 
+    def test_download_direct_media_segment_proxy_uses_original_source_size(self):
+        calls = []
+        proxy_totals = []
+        original_popen = engine.subprocess.Popen
+        original_range_supported = engine.direct_media_range_supported
+        original_proxy = engine.direct_media_parallel_proxy_url
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command):
+                self.stdout = iter(["out_time_ms=10000000\n", "total_size=1000\n", "progress=end\n"])
+                Path(command[-1]).write_bytes(b"segment")
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        @contextlib.contextmanager
+        def fake_proxy(url, headers, total, workers=None, part_size=None):
+            del url, headers, workers, part_size
+            proxy_totals.append(total)
+            yield "http://127.0.0.1:9999/media"
+
+        def fake_popen(command, **kwargs):
+            calls.append(command)
+            return FakeProcess(command)
+
+        try:
+            engine.direct_media_range_supported = lambda url, headers: True
+            engine.direct_media_parallel_proxy_url = fake_proxy
+            engine.subprocess.Popen = fake_popen
+            with tempfile.TemporaryDirectory() as temp:
+                engine.download_direct_media_segment(
+                    "https://cdn.example.test/video.mp4",
+                    {
+                        "title": "Clip",
+                        "output_ext": "mp4",
+                        "source": "https://chzzk.naver.com/video/1",
+                        "clip_range": {"start": 10, "end": 20},
+                        "filesize_approx": 10 * 1024 * 1024,
+                        "source_filesize": 100 * 1024 * 1024,
+                    },
+                    temp,
+                    ffmpeg_exe="ffmpeg-test",
+                )
+        finally:
+            engine.subprocess.Popen = original_popen
+            engine.direct_media_range_supported = original_range_supported
+            engine.direct_media_parallel_proxy_url = original_proxy
+
+        self.assertEqual(proxy_totals, [100 * 1024 * 1024])
+        self.assertIn("http://127.0.0.1:9999/media", calls[0])
+
     def test_download_direct_media_segment_accurate_mode_reencodes_for_keyframe_precise_cut(self):
         calls = []
 
@@ -1954,6 +2090,49 @@ for line in sys.stdin:
         finally:
             engine.urllib.request.urlopen = original_urlopen
 
+    def test_direct_media_single_resumes_existing_part_file(self):
+        original_urlopen = engine.urllib.request.urlopen
+        requested_ranges = []
+
+        class FakeResponse:
+            status = 206
+            headers = {"Content-Length": "5"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size):
+                del size
+                if not hasattr(self, "sent"):
+                    self.sent = True
+                    return b"world"
+                return b""
+
+        def fake_urlopen(request, timeout=30):
+            del timeout
+            requested_ranges.append(request.get_header("Range"))
+            return FakeResponse()
+
+        try:
+            engine.urllib.request.urlopen = fake_urlopen
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "Video.mp4"
+                output.with_name("Video.mp4.part").write_bytes(b"hello")
+                part = engine.download_direct_media_single(
+                    "https://cdn.example.test/video.mp4",
+                    output,
+                    {},
+                    total=10,
+                )
+                self.assertEqual(part.read_bytes(), b"helloworld")
+        finally:
+            engine.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual(requested_ranges, ["bytes=5-"])
+
     def test_large_direct_media_download_uses_parallel_range_requests(self):
         content = bytes((index % 251 for index in range(1024 * 1024)))
         events = []
@@ -2027,6 +2206,64 @@ for line in sys.stdin:
         self.assertGreater(len(ranges), 1)
         self.assertTrue(all(value.startswith("bytes=") for value in ranges))
         self.assertTrue(any(event.get("type") == "progress" and event.get("speed_text") for event in events))
+
+    def test_parallel_direct_media_resumes_existing_segment_part(self):
+        content = b"abcdefghij"
+        requested_ranges = []
+        original_urlopen = engine.urllib.request.urlopen
+        original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
+        original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.status = 206
+                self.headers = {"Content-Length": str(len(payload))}
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size):
+                if self.offset >= len(self.payload):
+                    return b""
+                chunk = self.payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        def fake_urlopen(request, timeout=30):
+            del timeout
+            range_header = request.get_header("Range")
+            requested_ranges.append(range_header)
+            start_text, end_text = range_header.removeprefix("bytes=").split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            return FakeResponse(content[start : end + 1])
+
+        try:
+            engine.urllib.request.urlopen = fake_urlopen
+            engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 5
+            engine.DIRECT_MEDIA_PARALLEL_WORKERS = 1
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "Video.mp4"
+                part = output.with_name("Video.mp4.part")
+                part.with_name("Video.mp4.part.0").write_bytes(b"abc")
+                result = engine.download_direct_media_parallel(
+                    "https://cdn.example.test/video.mp4",
+                    output,
+                    {},
+                    len(content),
+                )
+                self.assertEqual(result.read_bytes(), content)
+        finally:
+            engine.urllib.request.urlopen = original_urlopen
+            engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
+            engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
+
+        self.assertIn("bytes=3-4", requested_ranges)
 
     def test_parallel_direct_media_falls_back_when_range_request_is_ignored(self):
         content = b"x" * (512 * 1024)

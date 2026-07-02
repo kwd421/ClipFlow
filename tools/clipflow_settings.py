@@ -8,7 +8,7 @@ imports below plus methods that remain on the window class or other mixins.
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QStandardPaths
+from PySide6.QtCore import QPoint, QStandardPaths, Qt
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QLabel
 
 try:
@@ -16,12 +16,12 @@ try:
     from tools import downloader_engine as engine
     from tools import clipflow_theme as theme
     from tools.clipflow_dialogs import PreferencesDialog, _combo_text
-    from tools.clipflow_widgets import CleanComboBox, ComboPopup
+    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup
     from tools.clipflow_rows import build_quality_options, row_kind
     from tools.clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
         COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
-        PREF_FRAME_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
+        PREF_FRAME_SETTING, PREF_HDR_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
 except ImportError:
@@ -29,20 +29,21 @@ except ImportError:
     import downloader_engine as engine
     import clipflow_theme as theme
     from clipflow_dialogs import PreferencesDialog, _combo_text
-    from clipflow_widgets import CleanComboBox, ComboPopup
+    from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup
     from clipflow_rows import build_quality_options, row_kind
     from clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
         COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
-        PREF_FRAME_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
+        PREF_FRAME_SETTING, PREF_HDR_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
 
 
 PREFERENCE_TOOLTIPS = {
-    "품질": "선택한 해상도 이하에서 가장 좋은 후보를 고릅니다.",
+    "화질": "자동이면 가능한 가장 높은 해상도를 고릅니다. 숫자를 고르면 그 해상도 이하에서 가장 좋은 후보를 고릅니다.",
     "포맷": "저장할 파일 형식입니다. MP3/WAV/AAC는 음원만 저장합니다.",
-    "코덱": "가능하면 선택한 영상 코덱을 우선합니다. 음원 포맷에는 적용되지 않습니다.",
+    "코덱": "자동이면 코덱을 제한하지 않고 best 방식으로 고릅니다. 특정 코덱을 고르면 그 코덱을 우선합니다.",
+    "HDR": "끔이면 SDR 후보를 우선합니다. 켬이면 HDR 후보도 허용합니다.",
     "병렬": "동시에 받을 다운로드 개수입니다. 기본값은 3입니다.",
 }
 
@@ -74,11 +75,15 @@ class SettingsMixin:
                     widget.refresh()
 
     def _initial_preferences(self):
+        saved_quality = self.settings.value(PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS["quality"], str)
+        if str(saved_quality or "").strip() == "최고화질":
+            saved_quality = "자동"
         return {
-            "quality": self.settings.value(PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS["quality"], str),
+            "quality": saved_quality,
             "output_format": self.settings.value(PREF_FORMAT_SETTING, PREFERENCE_DEFAULTS["output_format"], str),
             "codec": self.settings.value(PREF_CODEC_SETTING, PREFERENCE_DEFAULTS["codec"], str),
             "frame_rate": self.settings.value(PREF_FRAME_SETTING, PREFERENCE_DEFAULTS["frame_rate"], str),
+            "hdr": self.settings.value(PREF_HDR_SETTING, PREFERENCE_DEFAULTS["hdr"], str),
         }
 
     def _initial_download_concurrency(self):
@@ -93,18 +98,23 @@ class SettingsMixin:
         if hasattr(self, "_refresh_footer"):
             self._refresh_footer()
 
-    def _set_preferences(self, quality=None, output_format=None, codec=None, frame_rate=None):
+    def _set_preferences(self, quality=None, output_format=None, codec=None, frame_rate=None, hdr=None):
+        quality_value = quality or self.preference_values.get("quality") or PREFERENCE_DEFAULTS["quality"]
+        if str(quality_value or "").strip() == "최고화질":
+            quality_value = "자동"
         values = {
-            "quality": quality or self.preference_values.get("quality") or PREFERENCE_DEFAULTS["quality"],
+            "quality": quality_value,
             "output_format": output_format or self.preference_values.get("output_format") or PREFERENCE_DEFAULTS["output_format"],
             "codec": codec or self.preference_values.get("codec") or PREFERENCE_DEFAULTS["codec"],
             "frame_rate": frame_rate or self.preference_values.get("frame_rate") or PREFERENCE_DEFAULTS["frame_rate"],
+            "hdr": hdr or self.preference_values.get("hdr") or PREFERENCE_DEFAULTS["hdr"],
         }
         self.preference_values = values
         self.settings.setValue(PREF_QUALITY_SETTING, values["quality"])
         self.settings.setValue(PREF_FORMAT_SETTING, values["output_format"])
         self.settings.setValue(PREF_CODEC_SETTING, values["codec"])
         self.settings.setValue(PREF_FRAME_SETTING, values["frame_rate"])
+        self.settings.setValue(PREF_HDR_SETTING, values["hdr"])
         self._preferences_changed()
 
     def _create_preferences_dialog(self):
@@ -119,6 +129,7 @@ class SettingsMixin:
                 output_format=preferences.output_format,
                 codec=preferences.codec,
                 frame_rate=preferences.frame_rate,
+                hdr=preferences.hdr,
             )
 
     def _toggle_preferences_popup(self):
@@ -134,31 +145,37 @@ class SettingsMixin:
         preferences = self.current_preferences()
         popup = ComboPopup(self.preference_button)
         popup.setStyleSheet(
-            f"QLabel#PreferencePopupLabel {{ color: {theme.MUTED}; font-size: 12px; font-weight: 600; }}"
+            f"QLabel#PreferencePopupLabel {{ color: {theme.GRAPHITE}; font-size: 15px; font-weight: 700; }}"
         )
         layout = QGridLayout(popup)
-        layout.setContentsMargins(8, 7, 8, 8)
-        layout.setHorizontalSpacing(7)
+        layout.setContentsMargins(10, 8, 10, 9)
+        layout.setHorizontalSpacing(9)
         layout.setVerticalSpacing(5)
 
         quality_combo = CleanComboBox()
-        quality_combo.addItems(["최고화질", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
+        quality_combo.addItems(["자동", "4320p", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
         format_combo = CleanComboBox()
         format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
         codec_combo = CleanComboBox()
         codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
+        hdr_switch = CleanSwitch()
+        hdr_switch.setChecked(str(preferences.hdr).strip() == "켬")
         concurrency_combo = CleanComboBox()
         concurrency_combo.addItems(["1", "2", "3"])
         concurrency_combo.setCurrentText(str(getattr(self, "download_concurrency", DOWNLOAD_CONCURRENCY)))
         for combo in (quality_combo, format_combo, codec_combo, concurrency_combo):
             combo.setObjectName("CompactComboBox")
+            combo.show_arrow = False
+            combo.text_alignment = Qt.AlignCenter
         quality_combo.setCurrentText(preferences.quality)
         format_combo.setCurrentText(preferences.output_format)
         codec_combo.setCurrentText(preferences.codec)
 
         def refresh_controls():
             audio_format = format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
+            quality_combo.setEnabled(not audio_format)
             codec_combo.setEnabled(not audio_format)
+            hdr_switch.setEnabled(not audio_format)
 
         def apply_preferences(*_args):
             refresh_controls()
@@ -167,14 +184,14 @@ class SettingsMixin:
                 output_format=_combo_text(format_combo),
                 codec=_combo_text(codec_combo),
                 frame_rate=PREFERENCE_DEFAULTS["frame_rate"],
+                hdr="켬" if hdr_switch.isChecked() else "끔",
             )
 
         for row, (label_text, combo) in enumerate(
             (
-                ("품질", quality_combo),
+                ("화질", quality_combo),
                 ("포맷", format_combo),
                 ("코덱", codec_combo),
-                ("병렬", concurrency_combo),
             )
         ):
             label = QLabel(label_text)
@@ -183,17 +200,38 @@ class SettingsMixin:
             if tooltip:
                 label.setToolTip(tooltip)
                 combo.setToolTip(tooltip)
+            label.setAlignment(Qt.AlignCenter)
             layout.addWidget(label, row, 0)
-            combo.setFixedWidth(140)
+            combo.setFixedWidth(88)
             layout.addWidget(combo, row, 1)
-            if combo is concurrency_combo:
-                combo.currentIndexChanged.connect(lambda *_args, c=concurrency_combo: self._set_download_concurrency(c.currentText()))
-            else:
-                combo.currentIndexChanged.connect(apply_preferences)
+            combo.currentIndexChanged.connect(apply_preferences)
+
+        hdr_row = 3
+        hdr_label = QLabel("HDR")
+        hdr_label.setObjectName("PreferencePopupLabel")
+        hdr_label.setAlignment(Qt.AlignCenter)
+        hdr_tooltip = PREFERENCE_TOOLTIPS["HDR"]
+        hdr_label.setToolTip(hdr_tooltip)
+        hdr_switch.setToolTip(hdr_tooltip)
+        layout.addWidget(hdr_label, hdr_row, 0)
+        layout.addWidget(hdr_switch, hdr_row, 1, Qt.AlignRight | Qt.AlignVCenter)
+        hdr_switch.toggled.connect(apply_preferences)
+
+        concurrency_row = 4
+        concurrency_label = QLabel("병렬")
+        concurrency_label.setObjectName("PreferencePopupLabel")
+        concurrency_label.setAlignment(Qt.AlignCenter)
+        concurrency_tooltip = PREFERENCE_TOOLTIPS["병렬"]
+        concurrency_label.setToolTip(concurrency_tooltip)
+        concurrency_combo.setToolTip(concurrency_tooltip)
+        layout.addWidget(concurrency_label, concurrency_row, 0)
+        concurrency_combo.setFixedWidth(88)
+        layout.addWidget(concurrency_combo, concurrency_row, 1)
+        concurrency_combo.currentIndexChanged.connect(lambda *_args, c=concurrency_combo: self._set_download_concurrency(c.currentText()))
 
         refresh_controls()
         popup.adjustSize()
-        popup.setFixedWidth(max(214, popup.sizeHint().width()))
+        popup.setFixedWidth(max(172, popup.sizeHint().width()))
         popup.adjustSize()
         anchor = self.preference_button.mapToGlobal(QPoint(self.preference_button.width(), self.preference_button.height() + 6))
         x = anchor.x() - popup.width()

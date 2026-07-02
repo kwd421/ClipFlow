@@ -33,7 +33,7 @@ def lucide_svg(name, color=ICON_COLOR):
 
 
 @lru_cache(maxsize=256)
-def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=2):
+def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=4):
     renderer = QSvgRenderer(lucide_svg(name, color).encode("utf-8"))
     pixel_size = int(size * scale)
     pixmap = QPixmap(pixel_size, pixel_size)
@@ -62,6 +62,7 @@ class LucideIconWidget(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.drawPixmap(0, 0, self.icon_size, self.icon_size, lucide_pixmap(self.icon_name, self.icon_size, self.color))
 
 
@@ -115,16 +116,17 @@ class LucideIconButton(QToolButton):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         if self.bordered:
             # Persistent bordered box so this reads as the same control family
             # as the adjacent combo box / secondary button.
             hovered = self.underMouse() and self.isEnabled()
-            border = theme.BORDER_STRONG if hovered else theme.FIELD_BORDER
+            border = theme.GRAPHITE
             background = theme.SURFACE_SOFT if hovered else theme.SURFACE
-            painter.setPen(QPen(QColor(border), 1))
+            painter.setPen(QPen(QColor(border), 1.4))
             painter.setBrush(QColor(background))
-            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.7, 0.7, -0.7, -0.7), 8, 8)
         elif self.background and self.isEnabled():
             painter.setPen(Qt.NoPen)
             background = self.hover_background if self.underMouse() and self.hover_background else self.background
@@ -176,7 +178,7 @@ class CustomTooltip(QWidget):
     SHADOW_MARGIN = 12
 
     def __init__(self):
-        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint)
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)

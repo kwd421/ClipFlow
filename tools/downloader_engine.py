@@ -10,6 +10,7 @@ import threading
 import time
 import queue
 import contextlib
+import http.server
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -42,6 +43,7 @@ SIZE_PROBE_LIMIT = 12
 DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_WORKERS = 4
+DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -195,6 +197,16 @@ def cookie_spec(cookie_source):
     if not source or source in {"none", "no", "없음"}:
         return None
     return COOKIE_SOURCES.get(source)
+
+
+def browser_cookie_error(exc):
+    text = str(exc or "").lower()
+    return (
+        "failed to decrypt with dpapi" in text
+        or "could not decrypt" in text and "cookie" in text
+        or "could not copy chrome cookie database" in text
+        or "browser cookies" in text and "decrypt" in text
+    )
 
 
 def normalize_proxy_url(proxy_url):
@@ -421,6 +433,15 @@ def clip_cut_mode(candidate):
     return "accurate" if str((candidate or {}).get("clip_cut_mode") or "").lower() == "accurate" else "fast"
 
 
+def ffmpeg_progress_speed_label(speed_text, cut_mode="fast"):
+    text = str(speed_text or "").strip()
+    if not text:
+        return ""
+    if text.endswith("x"):
+        return f"{'정확 컷 처리' if cut_mode == 'accurate' else '처리'} {text}"
+    return text
+
+
 def candidate_with_clip_range_metadata(candidate):
     prepared = dict(candidate or {})
     clip_range = clip_range_from_candidate(prepared)
@@ -450,6 +471,8 @@ def candidate_with_clip_range_metadata(candidate):
         prepared["duration"] = clip_duration
 
     original_size = candidate_expected_size(candidate)
+    if original_size and not prepared.get("source_filesize"):
+        prepared["source_filesize"] = original_size
     if original_size and original_duration and clip_duration:
         estimated = max(1, int(round(original_size * min(clip_duration, original_duration) / original_duration)))
         prepared["sort_bytes"] = estimated
@@ -578,6 +601,71 @@ def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_
         message = (completed.stderr or completed.stdout or "ffmpeg audio extraction failed").strip()
         raise RuntimeError(message)
 
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return result
+
+
+def extract_existing_media_segment(input_path, candidate, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+    input_path = Path(input_path).expanduser()
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Source file not found: {input_path}")
+    clip_range = clip_range_from_candidate(candidate)
+    if not clip_range:
+        raise RuntimeError("Clip range is required for segment extraction")
+    output_dir = Path(output_dir).expanduser() if output_dir else input_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Segment output path could not be determined.")
+    result = {"ok": True, "output_dir": str(output_dir), "output_path": str(output_path)}
+    if completed_output_exists(output_path, candidate):
+        emit_event(on_event, "status", message=f"File already exists: {output_path.name}")
+        emit_event(on_event, "file", path=str(output_path))
+        emit_event(on_event, "done", path=str(output_path))
+        return result
+
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for segment extraction")
+
+    part_path = output_path.with_name(output_path.name + ".part")
+    start = float(clip_range["start"])
+    end = clip_range.get("end")
+    duration = float(end - start) if end is not None else 0
+    output_format = normalized_output_ext((candidate or {}).get("output_ext")) or input_path.suffix.lstrip(".") or "mp4"
+    command = [str(ffmpeg_exe), "-y", "-hide_banner"]
+    if clip_cut_mode(candidate) == "accurate":
+        command += ["-i", str(input_path), "-ss", str(start)]
+    else:
+        command += ["-ss", str(start), "-i", str(input_path)]
+    if duration:
+        command += ["-t", str(duration)]
+    command += ["-map", "0"]
+    if clip_cut_mode(candidate) == "accurate":
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        command += ["-c", "copy"]
+    command += ["-movflags", "+faststart", "-f", output_format, str(part_path)]
+    emit_event(on_event, "status", message="Extracting selected segment")
+    completed = (runner or subprocess.run)(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+        message = (completed.stderr or completed.stdout or "ffmpeg segment extraction failed").strip()
+        raise RuntimeError(message)
+    if not completed_output_exists(part_path, candidate):
+        raise RuntimeError("ffmpeg segment extraction produced no output")
+    part_path.replace(output_path)
+    emit_event(on_event, "progress", percent=100, message="100.0%")
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_path))
     return result
@@ -1442,6 +1530,8 @@ def candidates_from_info(info, output_ext=None):
                     "fps": safe_int(fmt.get("fps")),
                     "vcodec": vcodec,
                     "acodec": acodec,
+                    "dynamic_range": str(fmt.get("dynamic_range") or video_info.get("dynamic_range") or ""),
+                    "color_transfer": str(fmt.get("color_transfer") or video_info.get("color_transfer") or ""),
                     "filesize": filesize,
                     "filesize_approx": filesize_approx,
                     "sort_bytes": sort_bytes,
@@ -1482,6 +1572,8 @@ def candidates_from_info(info, output_ext=None):
                     "fps": safe_int(video_info.get("fps")),
                     "vcodec": str(video_info.get("vcodec") or "unknown"),
                     "acodec": str(video_info.get("acodec") or "unknown"),
+                    "dynamic_range": str(video_info.get("dynamic_range") or ""),
+                    "color_transfer": str(video_info.get("color_transfer") or ""),
                     "filesize": filesize,
                     "filesize_approx": filesize_approx,
                     "sort_bytes": size,
@@ -2396,22 +2488,36 @@ def emit_direct_download_progress(on_event, downloaded, total, started_at):
 
 def download_direct_media_single(url, output_path, headers, total=0, on_event=None):
     part_path = output_path.with_name(output_path.name + ".part")
-    request = urllib.request.Request(url, headers=headers)
-    downloaded = 0
+    existing_size = part_path.stat().st_size if part_path.exists() else 0
+    if total and existing_size >= total:
+        return part_path
+    request_headers = dict(headers or {})
+    append = existing_size > 0
+    if append:
+        request_headers["Range"] = f"bytes={existing_size}-"
+    request = urllib.request.Request(url, headers=request_headers)
+    downloaded = existing_size if append else 0
     started_at = time.monotonic()
     last_progress = 0.0
-    with urllib.request.urlopen(request, timeout=30) as response, part_path.open("wb") as file:
-        total = total or safe_int(response.headers.get("Content-Length"))
-        while True:
-            chunk = response.read(1024 * 256)
-            if not chunk:
-                break
-            file.write(chunk)
-            downloaded += len(chunk)
-            now = time.monotonic()
-            if total and (now - last_progress >= 0.25 or downloaded >= total):
-                last_progress = now
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if append and safe_int(getattr(response, "status", 200)) != 206:
+            append = False
+            downloaded = 0
+        content_length = safe_int(response.headers.get("Content-Length"))
+        total = total or (existing_size + content_length if append and content_length else content_length)
+        with part_path.open("ab" if append else "wb") as file:
+            if downloaded and total:
                 emit_direct_download_progress(on_event, downloaded, total, started_at)
+            while True:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                file.write(chunk)
+                downloaded += len(chunk)
+                now = time.monotonic()
+                if total and (now - last_progress >= 0.25 or downloaded >= total):
+                    last_progress = now
+                    emit_direct_download_progress(on_event, downloaded, total, started_at)
     if total and downloaded != total:
         raise RuntimeError(f"Direct media download incomplete: downloaded {downloaded} bytes, expected {total}.")
     return part_path
@@ -2436,6 +2542,129 @@ def direct_media_range_supported(url, headers):
             return False
         content_range = str(getattr(response, "headers", {}).get("Content-Range", "") or "")
         return not content_range or content_range.lower().startswith("bytes ")
+
+
+def parse_http_range_header(range_header, total):
+    text = str(range_header or "").strip()
+    if not text:
+        return 0, max(0, total - 1), False
+    match = re.match(r"^bytes=(\d*)-(\d*)$", text)
+    if not match:
+        raise ValueError("Unsupported range header")
+    start_text, end_text = match.groups()
+    if not start_text and not end_text:
+        raise ValueError("Unsupported range header")
+    if start_text:
+        start = safe_int(start_text)
+        end = safe_int(end_text) if end_text else total - 1
+    else:
+        suffix = safe_int(end_text)
+        start = max(0, total - suffix)
+        end = total - 1
+    if start < 0 or end < start or start >= total:
+        raise ValueError("Invalid range")
+    return start, min(end, total - 1), True
+
+
+@contextlib.contextmanager
+def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size=None):
+    total = safe_int(total)
+    if total <= 0:
+        yield url
+        return
+    workers = max(1, safe_int(workers or DIRECT_MEDIA_PARALLEL_WORKERS))
+    part_size = max(1, safe_int(part_size or DIRECT_MEDIA_PROXY_PART_SIZE))
+    remote_headers = dict(headers or {})
+    stop_event = threading.Event()
+
+    def fetch_range(start, end):
+        if stop_event.is_set():
+            return b""
+        request = urllib.request.Request(url, headers={**remote_headers, "Range": f"bytes={start}-{end}"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if safe_int(getattr(response, "status", 206)) != 206:
+                raise DirectMediaRangeUnsupported("Direct media proxy range request was not honored.")
+            data = response.read()
+        expected = end - start + 1
+        if len(data) != expected:
+            raise RuntimeError(f"Direct media proxy range returned {len(data)} bytes, expected {expected}.")
+        return data
+
+    class RangeProxyHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format, *args):
+            return
+
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(total))
+            self.send_header("Content-Type", "video/mp4")
+            self.end_headers()
+
+        def do_GET(self):
+            try:
+                start, end, ranged = parse_http_range_header(self.headers.get("Range"), total)
+            except ValueError:
+                self.send_error(416)
+                return
+            length = end - start + 1
+            self.send_response(206 if ranged else 200)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(length))
+            if ranged:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+            self.end_headers()
+            self.stream_range(start, end)
+
+        def stream_range(self, start, end):
+            chunk_ranges = []
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + part_size - 1)
+                chunk_ranges.append((cursor, chunk_end))
+                cursor = chunk_end + 1
+            next_index = 0
+            pending = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                def submit_more():
+                    nonlocal next_index
+                    while next_index < len(chunk_ranges) and len(pending) < workers and not stop_event.is_set():
+                        chunk_start, chunk_end = chunk_ranges[next_index]
+                        pending[next_index] = executor.submit(fetch_range, chunk_start, chunk_end)
+                        next_index += 1
+
+                submit_more()
+                current = 0
+                try:
+                    while current < len(chunk_ranges) and not stop_event.is_set():
+                        future = pending.pop(current)
+                        data = future.result()
+                        if not data:
+                            break
+                        self.wfile.write(data)
+                        submit_more()
+                        current += 1
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+    class ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RangeProxyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/media"
+    finally:
+        stop_event.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def download_direct_media_parallel(url, output_path, headers, total, on_event=None):
@@ -2464,20 +2693,29 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
 
     def download_range(range_info):
         index, start, end, segment_path = range_info
-        range_headers = {**headers, "Range": f"bytes={start}-{end}"}
+        expected = end - start + 1
+        existing_size = segment_path.stat().st_size if segment_path.exists() else 0
+        if existing_size == expected:
+            report(expected)
+            return index, segment_path
+        resume_start = start + existing_size if 0 < existing_size < expected else start
+        mode = "ab" if resume_start > start else "wb"
+        range_headers = {**headers, "Range": f"bytes={resume_start}-{end}"}
         request = urllib.request.Request(url, headers=range_headers)
-        written = 0
-        with urllib.request.urlopen(request, timeout=30) as response, segment_path.open("wb") as file:
+        written = existing_size if mode == "ab" else 0
+        with urllib.request.urlopen(request, timeout=30) as response:
             if safe_int(getattr(response, "status", 206)) != 206:
                 raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
-            while True:
-                chunk = response.read(1024 * 512)
-                if not chunk:
-                    break
-                file.write(chunk)
-                written += len(chunk)
-                report(len(chunk))
-        expected = end - start + 1
+            with segment_path.open(mode) as file:
+                if mode == "ab":
+                    report(existing_size)
+                while True:
+                    chunk = response.read(1024 * 512)
+                    if not chunk:
+                        break
+                    file.write(chunk)
+                    written += len(chunk)
+                    report(len(chunk))
         if written != expected:
             raise RuntimeError(f"Direct media range returned {written} bytes, expected {expected}.")
         return index, segment_path
@@ -2549,6 +2787,22 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     end = clip_range.get("end")
     duration = float(end - start) if end is not None else 0
     cut_mode = clip_cut_mode(candidate)
+    input_url = url
+    proxy_cm = None
+    if runner is None:
+        total = safe_int((candidate or {}).get("source_filesize")) or candidate_expected_size(candidate)
+        if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
+            try:
+                if direct_media_range_supported(url, headers):
+                    proxy_cm = direct_media_parallel_proxy_url(url, headers, total)
+                    input_url = proxy_cm.__enter__()
+                    emit_event(on_event, "status", message="Preparing parallel segment stream")
+            except Exception as exc:
+                if proxy_cm is not None:
+                    proxy_cm.__exit__(*sys.exc_info())
+                    proxy_cm = None
+                input_url = url
+                emit_event(on_event, "log", message=f"Parallel segment stream unavailable: {exc}")
     command = [
         str(ffmpeg_exe),
         "-y",
@@ -2563,12 +2817,12 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         preseek = max(0.0, start - 5.0)
         if preseek:
             command += ["-ss", str(preseek)]
-        command += ["-i", url]
+        command += ["-i", input_url]
         offset = start - preseek
         if offset:
             command += ["-ss", str(offset)]
     else:
-        command += ["-ss", str(start), "-i", url]
+        command += ["-ss", str(start), "-i", input_url]
     if duration:
         command += ["-t", str(duration)]
     output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
@@ -2578,7 +2832,7 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     else:
         command += ["-c", "copy"]
     command += ["-movflags", "+faststart", "-f", output_format, str(part_path)]
-    emit_event(on_event, "status", message="Downloading selected segment")
+    emit_event(on_event, "status", message="Downloading selected segment" if cut_mode == "fast" else "Processing accurate segment")
     process = (runner or subprocess.Popen)(
         command,
         stdout=subprocess.PIPE,
@@ -2610,6 +2864,7 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     reader = threading.Thread(target=read_stdout, daemon=True)
     reader.start()
     timeout = DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT if no_progress_timeout is None else float(no_progress_timeout)
+    segment_started_at = time.monotonic()
     last_progress = time.monotonic()
     reader_done = False
     last_percent = -1.0
@@ -2628,10 +2883,18 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         last_percent = percent
         last_progress = time.monotonic()
         speed_text = str(progress_values.get("speed") or "").strip()
+        speed_label = ffmpeg_progress_speed_label(speed_text, cut_mode)
+        output_size = safe_int(progress_values.get("total_size"))
+        output_speed_label = ""
+        if output_size > 0:
+            output_elapsed = max(0.001, time.monotonic() - segment_started_at)
+            output_speed_label = f"{display_size(output_size / output_elapsed)}/s"
         eta_text = display_duration(max(0, int(round(duration - current)))) if duration else ""
         message = f"{percent:.1f}%"
-        if speed_text:
-            message = f"{message} {speed_text}"
+        if output_speed_label:
+            message = f"{message} {output_speed_label}"
+        if speed_label:
+            message = f"{message} {speed_label}"
         if eta_text:
             message = f"{message} ETA {eta_text}"
         emit_event(
@@ -2684,6 +2947,9 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         except OSError:
             pass
         raise
+    finally:
+        if proxy_cm is not None:
+            proxy_cm.__exit__(*sys.exc_info())
     if returncode != 0:
         try:
             part_path.unlink()
@@ -2729,17 +2995,37 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     if ydl_factory is None:
         ydl_factory = youtube_dl_factory()
     options = build_download_options(candidate, output_dir, cookie_source=cookie_source, on_event=on_event, proxy_url=proxy_url)
-    emit_event(on_event, "status", message="Starting download")
-    try:
-        with yt_dlp_ffmpeg_path_context(options):
-            with ydl_factory(options) as ydl:
-                download_info = candidate.get("_download_info") if isinstance(candidate, dict) else None
-                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(candidate):
+
+    def run_ydl_download(run_options, run_candidate):
+        with yt_dlp_ffmpeg_path_context(run_options):
+            with ydl_factory(run_options) as ydl:
+                download_info = run_candidate.get("_download_info") if isinstance(run_candidate, dict) else None
+                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(run_candidate):
                     ydl.process_video_result(json_ready_download_info(download_info), download=True)
                 else:
                     ydl.download([target_url])
+
+    emit_event(on_event, "status", message="Starting download")
+    try:
+        run_ydl_download(options, candidate)
         emit_event(on_event, "progress", percent=100, message="100.0%")
     except Exception as exc:
+        if cookie_spec(cookie_source) and browser_cookie_error(exc):
+            emit_event(on_event, "status", message="브라우저 쿠키를 읽지 못해 쿠키 없이 다시 시도합니다")
+            no_cookie_options = build_download_options(
+                candidate,
+                output_dir,
+                cookie_source="없음",
+                on_event=on_event,
+                proxy_url=proxy_url,
+            )
+            try:
+                run_ydl_download(no_cookie_options, candidate)
+                emit_event(on_event, "progress", percent=100, message="100.0%")
+                emit_event(on_event, "done", path=str(output_dir))
+                return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
+            except Exception as no_cookie_exc:
+                exc = no_cookie_exc
         if not should_retry_progressive_mp4(candidate, exc):
             raise
         fallback_candidate = dict(candidate)
@@ -2755,13 +3041,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
             proxy_url=proxy_url,
         )
         try:
-            with yt_dlp_ffmpeg_path_context(fallback_options):
-                with ydl_factory(fallback_options) as ydl:
-                    download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
-                    if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
-                        ydl.process_video_result(json_ready_download_info(download_info), download=True)
-                    else:
-                        ydl.download([target_url])
+            run_ydl_download(fallback_options, fallback_candidate)
             emit_event(on_event, "progress", percent=100, message="100.0%")
         except Exception as fallback_exc:
             if not (cookie_spec(cookie_source) and should_retry_progressive_mp4(fallback_candidate, fallback_exc, allow_progressive=True)):
@@ -2774,13 +3054,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
                 on_event=on_event,
                 proxy_url=proxy_url,
             )
-            with yt_dlp_ffmpeg_path_context(no_cookie_options):
-                with ydl_factory(no_cookie_options) as ydl:
-                    download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
-                    if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
-                        ydl.process_video_result(json_ready_download_info(download_info), download=True)
-                    else:
-                        ydl.download([target_url])
+            run_ydl_download(no_cookie_options, fallback_candidate)
             emit_event(on_event, "progress", percent=100, message="100.0%")
     emit_event(on_event, "done", path=str(output_dir))
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}

@@ -96,7 +96,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "mp4-1080")
 
-    def test_select_candidate_auto_format_prefers_h264_mp4_over_higher_av1_mp4(self):
+    def test_select_candidate_auto_quality_and_codec_prefers_highest_resolution(self):
         candidates = [
             {"id": "mp4-av1-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "av01", "acodec": "none", "sort_bytes": 300},
             {"id": "mp4-h264-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 200},
@@ -107,7 +107,59 @@ class CandidatePresenterTests(unittest.TestCase):
             presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동"),
         )
 
+        self.assertEqual(selected["id"], "mp4-av1-2160")
+
+    def test_select_candidate_codec_preference_can_choose_lower_resolution_match(self):
+        candidates = [
+            {"id": "mp4-av1-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "av01", "acodec": "none", "sort_bytes": 300},
+            {"id": "mp4-h264-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="H264", frame_rate="자동"),
+        )
+
         self.assertEqual(selected["id"], "mp4-h264-1080")
+
+    def test_select_candidate_hdr_off_filters_hdr_candidates(self):
+        candidates = [
+            {"id": "hdr-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "avc1", "dynamic_range": "HDR10", "sort_bytes": 300},
+            {"id": "sdr-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "dynamic_range": "SDR", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동", hdr="끔"),
+        )
+
+        self.assertEqual(selected["id"], "sdr-1080")
+
+    def test_select_candidate_hdr_on_allows_hdr_candidates(self):
+        candidates = [
+            {"id": "hdr-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "avc1", "dynamic_range": "HDR10", "sort_bytes": 300},
+            {"id": "sdr-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "dynamic_range": "SDR", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동", hdr="켬"),
+        )
+
+        self.assertEqual(selected["id"], "hdr-2160")
+
+    def test_select_candidate_hdr_on_falls_back_to_sdr_when_hdr_missing(self):
+        candidates = [
+            {"id": "sdr-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "avc1", "dynamic_range": "SDR", "sort_bytes": 300},
+            {"id": "sdr-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "dynamic_range": "SDR", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동", hdr="켬"),
+        )
+
+        self.assertEqual(selected["id"], "sdr-2160")
 
     def test_select_candidate_prefers_direct_https_over_manifest_at_same_quality(self):
         candidates = [

@@ -2,7 +2,7 @@
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtCore import QElapsedTimer, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -61,7 +61,7 @@ TITLE_BLOCK_HEIGHT = 34
 ACTION_BUTTON_SIZE = 28
 ACTION_ICON_SIZE = 18
 ACTION_SPACING = 5
-ACTION_STRIP_WIDTH = ACTION_BUTTON_SIZE * 4 + ACTION_SPACING * 3
+ACTION_STRIP_WIDTH = ACTION_BUTTON_SIZE * 5 + ACTION_SPACING * 4
 
 
 def row_source_url(analysis, candidate):
@@ -185,6 +185,13 @@ class DownloadRowWidget(QFrame):
         self._progress_full_path = None
         self._progress_partial_paths = {}
         self._progress_gradient = None
+        self._analysis_ring_offset = 0.0
+        self._analysis_ring_duration_ms = 2200
+        self._analysis_ring_elapsed = QElapsedTimer()
+        self._analysis_ring_timer = QTimer(self)
+        self._analysis_ring_timer.setTimerType(Qt.PreciseTimer)
+        self._analysis_ring_timer.setInterval(16)
+        self._analysis_ring_timer.timeout.connect(self._advance_analysis_ring)
         self._build()
         self.refresh()
 
@@ -345,6 +352,15 @@ class DownloadRowWidget(QFrame):
         self.resume_download_button.clicked.connect(self._resume_download)
         actions.addWidget(self.resume_download_button)
 
+        self.play_file_button = LucideIconButton(
+            "play",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
+        self.play_file_button.setToolTip("재생")
+        self.play_file_button.clicked.connect(self._play_file)
+        actions.addWidget(self.play_file_button)
+
         self.open_folder_button = LucideIconButton(
             "folder",
             size=ACTION_BUTTON_SIZE,
@@ -446,12 +462,14 @@ class DownloadRowWidget(QFrame):
         # Analysed / error rows expose only "remove from list".
         self.pause_download_button.setVisible(pauseable)
         self.resume_download_button.setVisible(paused)
+        self.play_file_button.setVisible(completed and has_output and self.row.get("kind") != "playlist")
         self.open_folder_button.setVisible(completed)
         self.delete_file_button.setVisible(completed or paused)
         self.more_button.setVisible(completed)
         self.remove_button.setVisible(not active and not paused)
         self.pause_download_button.setEnabled(pauseable)
         self.resume_download_button.setEnabled(paused)
+        self.play_file_button.setEnabled(completed and has_output and not active)
         self.open_folder_button.setEnabled(completed and not active)
         self.remove_button.setEnabled(not active)
         self.delete_file_button.setEnabled((completed or paused) and can_resolve_output and not active)
@@ -503,7 +521,10 @@ class DownloadRowWidget(QFrame):
         visual_hovered = bool(hovered or force_actions)
         self.setProperty("hovered", "true" if visual_hovered else "false")
         active = self.row.get("status") in ACTIVE_STATUSES
-        analyzing = bool(self.row.get("analysis_loading")) or self.row.get("status") == ANALYZING_STATUS
+        analyzing = self.row.get("status") == ANALYZING_STATUS or (
+            bool(self.row.get("analysis_loading"))
+            and self.row.get("status") not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}
+        )
         show_actions = visual_hovered and not analyzing
         self.actions_widget.setVisible(show_actions)
         action_width = ACTION_STRIP_WIDTH
@@ -558,13 +579,16 @@ class DownloadRowWidget(QFrame):
     def _resume_download(self):
         self.owner.resume_download_for_row(self.row)
 
+    def _play_file(self):
+        self.owner.play_file_for_row(self.row)
+
     def _delete_file(self):
         self.owner.delete_file_for_row(self.row)
 
     def _show_more_menu(self):
         menu = QMenu(self)
         if self.row.get("kind") != "playlist" or self.row.get("is_playlist_child"):
-            segment_action = menu.addAction("구간 다운로드...")
+            segment_action = menu.addAction("구간 추출...")
             segment_action.triggered.connect(lambda _checked=False: self.owner.download_segment_for_row(self.row))
         for label, fmt in (("음원 추출 (WAV)", "WAV"), ("음원 추출 (MP3)", "MP3")):
             action = menu.addAction(label)
@@ -587,19 +611,91 @@ class DownloadRowWidget(QFrame):
         self.style().polish(self)
         self.update()
 
+    def _advance_analysis_ring(self):
+        if self._analysis_ring_elapsed.isValid():
+            elapsed = self._analysis_ring_elapsed.elapsed() % self._analysis_ring_duration_ms
+            self._analysis_ring_offset = 4.0 * elapsed / self._analysis_ring_duration_ms
+        else:
+            self._analysis_ring_offset = (self._analysis_ring_offset + 0.08) % 4.0
+        self.update()
+
+    def _analysis_ring_point(self, rect, phase):
+        phase = float(phase or 0.0) % 4.0
+        side = int(phase)
+        t = phase - side
+        radius = min(10.0, rect.width() / 2.0, rect.height() / 2.0)
+        straight_fraction = 0.82
+        corner_t = 0.0 if t < straight_fraction else (t - straight_fraction) / (1.0 - straight_fraction)
+
+        left, right = rect.left(), rect.right()
+        top, bottom = rect.top(), rect.bottom()
+        if side == 0:
+            if t < straight_fraction:
+                x = (left + radius) + (right - 2 * radius - left) * (t / straight_fraction)
+                return QPointF(x, top)
+            angle = math.radians(-90.0 + 90.0 * corner_t)
+            return QPointF(right - radius + radius * math.cos(angle), top + radius + radius * math.sin(angle))
+        if side == 1:
+            if t < straight_fraction:
+                y = (top + radius) + (bottom - 2 * radius - top) * (t / straight_fraction)
+                return QPointF(right, y)
+            angle = math.radians(90.0 * corner_t)
+            return QPointF(right - radius + radius * math.cos(angle), bottom - radius + radius * math.sin(angle))
+        if side == 2:
+            if t < straight_fraction:
+                x = (right - radius) - (right - 2 * radius - left) * (t / straight_fraction)
+                return QPointF(x, bottom)
+            angle = math.radians(90.0 + 90.0 * corner_t)
+            return QPointF(left + radius + radius * math.cos(angle), bottom - radius + radius * math.sin(angle))
+        if t < straight_fraction:
+            y = (bottom - radius) - (bottom - 2 * radius - top) * (t / straight_fraction)
+            return QPointF(left, y)
+        angle = math.radians(180.0 + 90.0 * corner_t)
+        return QPointF(left + radius + radius * math.cos(angle), top + radius + radius * math.sin(angle))
+
+    def _analysis_dash_path(self, rect):
+        return self._ring_segment_path(rect, float(self._analysis_ring_offset or 0.0), 0.46)
+
+    def _ring_segment_path(self, rect, start_phase, length_phase):
+        path = QPainterPath()
+        length_phase = max(0.0, min(4.0, float(length_phase or 0.0)))
+        if length_phase <= 0.0:
+            return path
+        samples = max(4, int(18 * length_phase))
+        start = float(start_phase or 0.0) % 4.0
+        for index in range(samples + 1):
+            phase = (start + length_phase * index / samples) % 4.0
+            point = self._analysis_ring_point(rect, phase)
+            if index == 0:
+                path.moveTo(point)
+            else:
+                previous_phase = (start + length_phase * (index - 1) / samples) % 4.0
+                if previous_phase > phase:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+        return path
+
     def set_status(self, status, detail=""):
         self.row["status"] = status
         self.row["status_detail"] = detail
         self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
         self.setProperty("errored", "true" if status == ERROR_STATUS else "false")
-        loading = status == ANALYZING_STATUS or bool(self.row.get("download_starting"))
-        if loading:
-            self._position_spinner()
-            self.spinner.raise_()
-            self.spinner.start()
+        analyzing = status == ANALYZING_STATUS or (
+            bool(self.row.get("analysis_loading"))
+            and status not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}
+        )
+        self.setProperty("analyzing", "true" if analyzing else "false")
+        if analyzing:
+            if not self._analysis_ring_timer.isActive():
+                self._analysis_ring_elapsed.restart()
+                self._analysis_ring_timer.start()
         else:
-            self.spinner.stop()
-        if loading:
+            self._analysis_ring_timer.stop()
+            self._analysis_ring_elapsed.invalidate()
+        starting = bool(self.row.get("download_starting"))
+        self.spinner.stop()
+        if analyzing or starting or (status == COMPLETED_STATUS and detail):
             self.row_quality_label.setText(detail or status)
             self.row_quality_label.show()
         else:
@@ -613,10 +709,12 @@ class DownloadRowWidget(QFrame):
         bounded = max(0, min(100, int(float(value or 0))))
         status = self.row.get("status")
         active = status in ACTIVE_STATUSES
+        paused = status == PAUSED_STATUS
         error_detail = status == ERROR_STATUS and self.row.get("status_detail")
-        display_text = text if active else (self.row.get("status_detail") if error_detail else "")
-        active_value = "true" if active else "false"
-        progress_value = str(bounded if active else 0)
+        completed_detail = status == COMPLETED_STATUS and self.row.get("status_detail")
+        display_text = text if active or paused else (self.row.get("status_detail") if error_detail or completed_detail else "")
+        active_value = "true" if active or paused else "false"
+        progress_value = str(bounded if active or paused else 0)
         if (
             self.row.get("progress") == bounded
             and self.row.get("progress_text") == display_text
@@ -632,10 +730,10 @@ class DownloadRowWidget(QFrame):
         self.progress_bar.hide()
         self.setProperty("progressActive", active_value)
         self.setProperty("progressValue", progress_value)
-        if active and display_text:
+        if (active or paused) and display_text:
             self.row_quality_label.setText(display_text)
             self.row_quality_label.show()
-        elif status == ERROR_STATUS and display_text:
+        elif status in {ERROR_STATUS, COMPLETED_STATUS} and display_text:
             self.row_quality_label.setText(display_text)
             self.row_quality_label.show()
         elif status not in ACTIVE_STATUSES:
@@ -712,7 +810,8 @@ class DownloadRowWidget(QFrame):
         super().paintEvent(event)
         completed = self.property("completed") == "true"
         errored = self.property("errored") == "true"
-        if self.property("progressActive") != "true" and not completed and not errored:
+        analyzing = self.property("analyzing") == "true"
+        if self.property("progressActive") != "true" and not analyzing and not completed and not errored:
             return
         _rect, full, gradient = self._progress_paths()
 
@@ -721,24 +820,30 @@ class DownloadRowWidget(QFrame):
 
         if errored:
             # Full red ring so a failed row is obvious at a glance.
-            painter.setPen(QPen(QColor(theme.DANGER), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setPen(QPen(QColor(theme.DANGER), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
             return
 
+        if analyzing:
+            painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            pen = QPen(QColor(theme.ACCENT_SOFT if self.property("hovered") == "true" else theme.ACCENT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(self._analysis_dash_path(_rect))
+            return
+
         if completed:
-            # Full rounded ring at the same width as the download progress arc,
-            # so a finished row reads like a "100% green" version of it.
             hovered = self.property("hovered") == "true"
-            color = theme.SUCCESS_BORDER_STRONG if hovered else theme.SUCCESS_BORDER
-            painter.setPen(QPen(QColor(color), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            color = theme.GRAPHITE_HOVER if hovered else theme.GRAPHITE
+            painter.setPen(QPen(QColor(color), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
             return
 
         progress = max(0, min(100, int(self.property("progressValue") or 0)))
-        painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(full)
         if progress <= 0:
             return
-        partial = self._progress_partial_path(full, progress)
-        painter.setPen(QPen(QBrush(gradient), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        partial = self._ring_segment_path(_rect, 3.82, 4.0 * progress / 100.0)
+        painter.setPen(QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(partial)
