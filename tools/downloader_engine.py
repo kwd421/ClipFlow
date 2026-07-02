@@ -304,9 +304,9 @@ def display_size(num_bytes):
     units = ["B", "KB", "MB", "GB"]
     value = float(size)
     for unit in units:
-        if value < 1024 or unit == units[-1]:
+        if value < 1000 or unit == units[-1]:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
-        value /= 1024
+        value /= 1000
     return f"{size} B"
 
 

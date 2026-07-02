@@ -164,6 +164,51 @@ print(not second_popup.isVisible())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True"])
 
+    def test_clipflow_qt_clean_combo_popup_respects_center_alignment(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import CleanComboBox
+
+app = QApplication([])
+combo = CleanComboBox()
+combo.addItems(["1", "2", "3"])
+combo.text_alignment = Qt.AlignCenter
+combo.show()
+combo.showPopup()
+app.processEvents()
+print(combo._active_popup.styleSheet())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("text-align: center", result.stdout)
+
+    def test_clipflow_qt_clean_switch_animates_knob_between_states(self):
+        script = r'''
+from PySide6.QtCore import QAbstractAnimation, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import CleanSwitch
+
+app = QApplication([])
+switch = CleanSwitch()
+switch.show()
+app.processEvents()
+print(switch.cursor().shape() == Qt.PointingHandCursor)
+print(switch.knob_progress())
+QTest.mouseClick(switch, Qt.LeftButton)
+app.processEvents()
+print(switch._knob_animation.state() == QAbstractAnimation.Running)
+QTest.qWait(switch._knob_animation.duration() + 30)
+print(switch.knob_progress())
+print(switch.isChecked())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "0.0", "True", "1.0", "True"])
+
     def test_clipflow_qt_sort_combo_hides_inline_arrow(self):
         script = r'''
 from PySide6.QtCore import Qt
@@ -343,7 +388,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
-from tools.clipflow_widgets import CleanComboBox
+from tools.clipflow_widgets import CleanComboBox, CleanSwitch
 
 app = QApplication([])
 window = ClipFlowWindow()
@@ -364,6 +409,7 @@ print("HDR" in labels)
 print("프레임" in labels)
 print(all(combo.toolTip() for combo in combos))
 print(all(label.toolTip() for label in popup.findChildren(QLabel) if label.text() in {"화질", "포맷", "코덱", "HDR", "병렬"}))
+print(popup.findChild(CleanSwitch).cursor().shape() == Qt.PointingHandCursor)
 print(combos[-1].currentText())
 button_right = window.preference_button.mapToGlobal(QPoint(window.preference_button.width(), 0)).x()
 print(abs(popup.geometry().right() - button_right) <= 1)
@@ -382,7 +428,7 @@ print(window.preferences_popup is None)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "4", "True", "옵션", "True", "True", "True", "False", "True", "True", "3", "True", "720p", "WEBM", "2", "True"],
+            ["True", "4", "True", "옵션", "True", "True", "True", "False", "True", "True", "True", "3", "True", "720p", "WEBM", "2", "True"],
         )
 
     def test_clipflow_qt_audio_format_disables_video_preferences(self):
@@ -1470,6 +1516,7 @@ print(corner.top() == 50)
         script = r'''
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_rows import ROW_INSET, ROW_LEADING_INSET
 
 url = "https://media.test/video"
 
@@ -1491,7 +1538,8 @@ row_widget = window.rows[0]["widget"]
 thumb_pos = row_widget.thumbnail.pos()
 favicon_pos = row_widget.source_link_button.mapTo(row_widget, row_widget.source_link_button.rect().topLeft())
 title_pos = row_widget.title_label.mapTo(row_widget, row_widget.title_label.rect().topLeft())
-print(thumb_pos.x() == thumb_pos.y())
+border = 1
+print(thumb_pos.x() - border == ROW_LEADING_INSET and thumb_pos.y() - border == ROW_INSET)
 print(favicon_pos.x() == title_pos.x())
 print(favicon_pos.y() + row_widget.source_link_button.height() == thumb_pos.y() + row_widget.thumbnail.height())
 '''
@@ -1635,6 +1683,29 @@ print(thumbnail._preview.isVisible())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "False"])
+
+    def test_clipflow_qt_thumbnail_preview_hides_when_app_deactivates(self):
+        script = r'''
+from PySide6.QtCore import QEvent, QPoint
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+thumbnail = ThumbnailPlaceholder()
+thumbnail._set_pixmap(QPixmap(120, 80))
+thumbnail._show_preview(QPoint(120, 300))
+app.processEvents()
+print(thumbnail._preview.isVisible())
+app.sendEvent(app, QEvent(QEvent.ApplicationDeactivate))
+app.processEvents()
+print(thumbnail._preview.isVisible())
+print(ThumbnailPlaceholder._active_preview_owner is None)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "True"])
 
     def test_clipflow_qt_source_link_button_centers_icon_without_edge_crop(self):
         script = r'''
@@ -2591,11 +2662,13 @@ print(hasattr(preferences, "cancel_button"))
 print(hasattr(preferences, "ok_button"))
 print(preferences.cancel_button.mapTo(preferences, preferences.cancel_button.rect().topLeft()).x() < preferences.ok_button.mapTo(preferences, preferences.ok_button.rect().topLeft()).x())
 print(delete_dialog.cancel_button.mapTo(delete_dialog, delete_dialog.cancel_button.rect().topLeft()).x() < delete_dialog.ok_button.mapTo(delete_dialog, delete_dialog.ok_button.rect().topLeft()).x())
+print(delete_dialog.cancel_button.width() >= 64)
+print(delete_dialog.ok_button.width() >= 64)
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True"])
 
     def test_clipflow_qt_spinner_advances_clockwise_and_row_uses_border_progress(self):
         script = r'''
@@ -4879,13 +4952,23 @@ print(window.clip_start_input.display_text())
 print(window.clip_end_input.display_text())
 print(len(window.clip_range_popup.findChildren(QComboBox)))
 print([button.text() for button in window.clip_range_popup.findChildren(QPushButton)])
+start_rects = window.clip_start_input._segment_rects
+fast_left = window.clip_cut_fast.mapTo(window.clip_range_popup, window.clip_cut_fast.rect().topLeft()).x()
+accurate_right = window.clip_cut_accurate.mapTo(window.clip_range_popup, window.clip_cut_accurate.rect().topRight()).x()
+input_left = window.clip_start_input.mapTo(window.clip_range_popup, window.clip_start_input.rect().topLeft()).x()
+input_right = window.clip_start_input.mapTo(window.clip_range_popup, window.clip_start_input.rect().topRight()).x()
+print(input_left + start_rects[0].left() - 1 == fast_left)
+print(input_right == accurate_right)
+print(start_rects[0].left() > 0)
+print(window.clip_start_input.cursor().shape() == Qt.PointingHandCursor)
+print(all(button.cursor().shape() == Qt.PointingHandCursor for button in window.clip_range_popup.findChildren(QPushButton)))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["None", "True", "시작시간", "종료시간", "HH:MM:SS", "HH:MM:SS", "0", "['빠른 컷', '정확 컷', '초기화', '적용']"],
+            ["None", "True", "시작시간", "종료시간", "HH:MM:SS", "HH:MM:SS", "0", "['빠른 컷', '정확 컷', '초기화', '적용']", "True", "True", "True", "True", "True"],
         )
 
     def test_clipflow_qt_clip_range_popup_enter_applies(self):
@@ -6580,27 +6663,22 @@ global_top = button.mapToGlobal(button.rect().topLeft()).y()
 tooltip = CustomTooltip.instance()
 tooltip.setText("폴더 열기")
 tooltip.adjustSize()
-effect = tooltip.graphicsEffect()
 pixmap = QPixmap(tooltip.size())
 pixmap.fill(Qt.transparent)
 tooltip.render(pixmap)
-image = pixmap.toImage()
 bubble = tooltip.bubble_geometry()
-shadow_pixel = image.pixelColor(bubble.right() + 4, bubble.center().y())
 print("QToolTip" in APP_STYLE)
 print(position.y() < global_top)
 print("background: #FFFFFF" in tooltip.styleSheet())
-print(effect.blurRadius() >= 18)
-print(tooltip.testAttribute(Qt.WA_TranslucentBackground))
-print(shadow_pixel.alpha() > 0)
-print(shadow_pixel.red() < 230)
-print(bool(tooltip.windowFlags() & Qt.ToolTip))
-print(bool(tooltip.windowFlags() & Qt.WindowStaysOnTopHint))
+print(tooltip.windowFlags() & Qt.NoDropShadowWindowHint == Qt.NoDropShadowWindowHint)
+print(not bool(tooltip.windowFlags() & Qt.WindowStaysOnTopHint))
+print(tooltip.graphicsEffect() is None)
+print(tooltip.size() == bubble.size())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True", "True", "True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True", "True"])
 
     def test_clipflow_qt_tooltip_sits_close_to_hovered_icon(self):
         script = r'''

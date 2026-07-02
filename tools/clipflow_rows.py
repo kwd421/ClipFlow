@@ -52,6 +52,8 @@ COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
 ROW_BORDER_WIDTH = 1
 ROW_INSET = 5
+ROW_LEADING_INSET = 5
+ROW_CHECK_COLUMN_WIDTH = 20
 ROW_META_INSET = 8
 ROW_META_GAP = 8
 META_ICON_SIZE = 14
@@ -197,7 +199,7 @@ class DownloadRowWidget(QFrame):
 
     def _build(self):
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(ROW_INSET, ROW_INSET, ROW_INSET, ROW_INSET)
+        outer.setContentsMargins(ROW_LEADING_INSET, ROW_INSET, ROW_INSET, ROW_INSET)
         outer.setSpacing(ROW_INSET)
 
         self.select_checkbox = CleanCheckBox()
@@ -205,7 +207,14 @@ class DownloadRowWidget(QFrame):
         self.select_checkbox.setCursor(Qt.PointingHandCursor)
         self.select_checkbox.hide()
         self.select_checkbox.toggled.connect(self._on_check_toggled)
-        outer.addWidget(self.select_checkbox, 0, Qt.AlignVCenter)
+        self.select_slot = QWidget()
+        self.select_slot.setFixedWidth(ROW_CHECK_COLUMN_WIDTH)
+        self.select_slot.hide()
+        select_layout = QHBoxLayout(self.select_slot)
+        select_layout.setContentsMargins(0, 0, 0, 0)
+        select_layout.setSpacing(0)
+        select_layout.addWidget(self.select_checkbox, 0, Qt.AlignCenter)
+        outer.addWidget(self.select_slot, 0, Qt.AlignVCenter)
 
         self.thumbnail = ThumbnailPlaceholder()
         outer.addWidget(self.thumbnail, 0, Qt.AlignVCenter)
@@ -562,6 +571,7 @@ class DownloadRowWidget(QFrame):
         self.owner.on_row_check_changed()
 
     def set_select_mode(self, enabled):
+        self.select_slot.setVisible(bool(enabled))
         self.select_checkbox.setVisible(bool(enabled))
         self.select_checkbox.blockSignals(True)
         self.select_checkbox.setChecked(bool(enabled) and bool(self.row.get("checked")))

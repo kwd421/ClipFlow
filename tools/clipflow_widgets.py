@@ -2,7 +2,7 @@ import html as html_lib
 import re
 from urllib.parse import urljoin, urlparse
 
-from PySide6.QtCore import QElapsedTimer, QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, Property, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
@@ -175,9 +175,34 @@ class CleanSwitch(QAbstractButton):
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(44, 28)
+        self._knob_progress = 1.0 if self.isChecked() else 0.0
+        self._knob_animation = QPropertyAnimation(self, b"knobProgress", self)
+        self._knob_animation.setDuration(140)
+        self._knob_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.toggled.connect(self._animate_knob)
 
     def sizeHint(self):
         return QSize(44, 28)
+
+    def knob_progress(self):
+        return self._knob_progress
+
+    def set_knob_progress(self, value):
+        self._knob_progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    knobProgress = Property(float, knob_progress, set_knob_progress)
+
+    def _animate_knob(self, checked):
+        target = 1.0 if checked else 0.0
+        if not self.isVisible():
+            self._knob_animation.stop()
+            self.set_knob_progress(target)
+            return
+        self._knob_animation.stop()
+        self._knob_animation.setStartValue(self._knob_progress)
+        self._knob_animation.setEndValue(target)
+        self._knob_animation.start()
 
     def paintEvent(self, event):
         del event
@@ -193,7 +218,7 @@ class CleanSwitch(QAbstractButton):
         painter.setBrush(QColor(track_color))
         painter.drawRoundedRect(rect, 9, 9)
         knob_size = 18
-        knob_x = self.width() - knob_size - 4 if checked else 4
+        knob_x = 4 + (self.width() - knob_size - 8) * self._knob_progress
         knob_rect = QRectF(knob_x, (self.height() - knob_size) / 2, knob_size, knob_size)
         painter.setPen(QPen(QColor(theme.GRAPHITE if enabled else theme.BORDER_STRONG), 1.0) if not checked else Qt.NoPen)
         painter.setBrush(QColor(knob_color))
@@ -274,7 +299,7 @@ class TimecodeInput(QWidget):
         super().__init__(parent)
         self.setObjectName("BareInput")
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.IBeamCursor)
+        self.setCursor(Qt.PointingHandCursor)
         self._parts = [None, None, None]
         self._selected_segment = None
         self._entry_buffer = ""
@@ -445,11 +470,12 @@ class TimecodeInput(QWidget):
         metrics = painter.fontMetrics()
         box_width = 34
         box_height = min(28, max(24, self.height() - 4))
+        paint_inset = 1
         unit_gap = 4
-        group_gap = 8
         unit_widths = [metrics.horizontalAdvance(unit) for unit in ("h", "m", "s")]
-        total = box_width * 3 + unit_gap * 3 + sum(unit_widths) + group_gap * 2
-        x = (self.width() - total) / 2
+        fixed_width = box_width * 3 + unit_gap * 3 + sum(unit_widths)
+        group_gap = max(8, (self.width() - paint_inset - fixed_width) / 2)
+        x = paint_inset
         y = (self.height() - box_height) // 2
         rects = []
         for index, unit_width in enumerate(unit_widths):
@@ -930,11 +956,12 @@ class CleanComboBox(QComboBox):
         # Self-painted popup (see ComboPopup) + explicit per-popup stylesheet,
         # because Qt.Popup windows do not inherit the app stylesheet on macOS.
         popup = ComboPopup(self)
+        option_alignment = "center" if self.text_alignment & Qt.AlignHCenter else "left"
         popup.setStyleSheet(
             f"QPushButton#ComboOption {{"
             f" background: transparent; border: none; border-radius: 7px;"
             f" padding: 6px 10px 6px 10px; color: {theme.INK};"
-            f" font-size: 13px; font-weight: 500; text-align: left; }}"
+            f" font-size: 13px; font-weight: 500; text-align: {option_alignment}; }}"
             f"QPushButton#ComboOption:hover {{ background: {theme.SURFACE_SOFT}; }}"
             f"QPushButton#ComboOption[selected=\"true\"] {{ color: {theme.ACCENT}; font-weight: 700; }}"
         )
@@ -969,9 +996,11 @@ class CleanComboBox(QComboBox):
 class ThumbnailPlaceholder(QFrame):
     _network_manager = None
     _active_preview_owner = None
+    _preview_event_filter = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._install_preview_event_filter()
         self.setObjectName("ThumbBox")
         self.setFixedSize(THUMBNAIL_WIDTH, 54)
         self.setMouseTracking(True)
@@ -995,6 +1024,25 @@ class ThumbnailPlaceholder(QFrame):
         if cls._network_manager is None:
             cls._network_manager = QNetworkAccessManager()
         return cls._network_manager
+
+    @classmethod
+    def _install_preview_event_filter(cls):
+        app = QGuiApplication.instance()
+        if app is None or cls._preview_event_filter is not None:
+            return
+        event_filter = _ThumbnailPreviewEventFilter(app)
+        app.installEventFilter(event_filter)
+        cls._preview_event_filter = event_filter
+
+    @classmethod
+    def hide_active_preview(cls):
+        active_owner = cls._active_preview_owner
+        if active_owner is None:
+            return
+        if isValid(active_owner):
+            active_owner._hide_preview()
+        else:
+            cls._active_preview_owner = None
 
     def set_thumbnail_url(self, url, referer=""):
         url = str(url or "").strip()
@@ -1193,6 +1241,13 @@ class ThumbnailPlaceholder(QFrame):
         if self.rect().contains(self.mapFromGlobal(cursor_pos)):
             return
         self._hide_preview()
+
+
+class _ThumbnailPreviewEventFilter(QObject):
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.ApplicationDeactivate, QEvent.WindowDeactivate):
+            ThumbnailPlaceholder.hide_active_preview()
+        return False
 
 
 class PrimaryActionButton(QPushButton):

@@ -4,7 +4,7 @@ from functools import lru_cache
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLabel, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QToolButton, QVBoxLayout, QWidget
 
 try:
     from tools import clipflow_theme as theme
@@ -175,10 +175,13 @@ class CustomTooltip(QWidget):
     """
 
     _instance = None
-    SHADOW_MARGIN = 12
+    TOOLTIP_MARGIN = 0
 
     def __init__(self):
-        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
+        super().__init__(
+            None,
+            Qt.ToolTip | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint,
+        )
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -190,23 +193,16 @@ class CustomTooltip(QWidget):
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN + 4,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
         )
         layout.setSpacing(0)
         self._bubble = QLabel(self)
         self._bubble.setObjectName("CustomTooltipBubble")
         self._bubble.setWordWrap(False)
         layout.addWidget(self._bubble)
-        shadow = QGraphicsDropShadowEffect(self._bubble)
-        shadow.setBlurRadius(18)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(20, 22, 30, 44))
-        self._bubble.setGraphicsEffect(shadow)
-        self._shadow = shadow
 
     def setText(self, text):
         self._bubble.setText(text)
@@ -216,9 +212,6 @@ class CustomTooltip(QWidget):
 
     def bubble_geometry(self):
         return self._bubble.geometry()
-
-    def graphicsEffect(self):
-        return self._shadow
 
     @classmethod
     def instance(cls):
