@@ -11,11 +11,11 @@ PLATFORMS = [
     ("chzzk", "https://chzzk.naver.com/clips/z0DUTFaKDZ", "yt-dlp"),
     ("instagram", "https://www.instagram.com/reel/C5-rS1Xr0ZU/", "yt-dlp"),
     ("vimeo", "https://vimeo.com/76979871", "yt-dlp"),
-    ("tiktok", "https://www.tiktok.com/@scout2015/video/6718339390849673477", "yt-dlp"),
+    ("tiktok", "https://vm.tiktok.com/ZMh8xPqKb/", "yt-dlp"),
     ("pornhub", "https://www.pornhub.com/view_video.php?viewkey=6861453eadd37", "dom"),
     ("xvideos", "https://www.xvideos.com/video.klvdubb4d47/49079845/0/full_version_https_bit.ly_36cjbb4", "dom"),
     ("redtube", "https://www.redtube.com/198689351", "dom"),
-    ("xhamster", "https://xhamster.com/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom"),
+    ("xhamster", "https://xhamster.desi/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom"),
 ]
 
 
@@ -32,8 +32,24 @@ def pick_verify_candidate(candidates, expected_path="yt-dlp"):
         candidate
         for candidate in candidates
         if not candidate.get("is_manifest")
+        and not engine.is_browser_remote_media_api_url(candidate.get("url"))
         and str(candidate.get("url") or "").lower().startswith(("http://", "https://"))
     ]
+    remote_mp4_api = [
+        candidate
+        for candidate in candidates
+        if not candidate.get("is_manifest")
+        and engine.is_browser_remote_media_api_url(candidate.get("url"))
+        and "/media/mp4" in str(candidate.get("url") or "").lower()
+    ]
+    if remote_mp4_api:
+        return min(
+            remote_mp4_api,
+            key=lambda candidate: (
+                safe_int(candidate.get("sort_bytes")) or 10**18,
+                safe_int(candidate.get("height")) or 9999,
+            ),
+        )
     if direct_mp4:
         return min(
             direct_mp4,
@@ -42,6 +58,9 @@ def pick_verify_candidate(candidates, expected_path="yt-dlp"):
                 safe_int(candidate.get("height")) or 9999,
             ),
         )
+    manifest = [candidate for candidate in candidates if candidate.get("is_manifest")]
+    if manifest:
+        return max(manifest, key=lambda candidate: safe_int(candidate.get("height")) or 0)
     return candidates[-1]
 
 

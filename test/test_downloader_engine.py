@@ -1758,11 +1758,62 @@ for line in sys.stdin:
             {"quality": "720", "videoUrl": "https://cdn.example.test/720.mp4"},
         ]
 
-        with mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
+        with mock.patch.object(
+            engine,
+            "refresh_browser_dom_candidate_media",
+            side_effect=lambda page_url, candidate, on_event=None: dict(candidate),
+        ), mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
             prepared = engine.prepare_browser_dom_candidate("https://www.redtube.com/198689351", candidate)
 
         self.assertEqual(prepared["url"], "https://cdn.example.test/480.mp4")
         self.assertFalse(prepared["is_manifest"])
+
+    def test_pick_refreshed_browser_dom_candidate_prefers_direct_mp4_over_remote_api(self):
+        candidates = [
+            {"height": 480, "url": "https://www.example.test/video/get_media?s=token", "is_manifest": False},
+            {"height": 480, "url": "https://cdn.example.test/480.mp4", "is_manifest": False},
+            {"height": 480, "url": "https://cdn.example.test/480/master.m3u8", "is_manifest": True},
+        ]
+        picked = engine._pick_refreshed_browser_dom_candidate(candidates, 480)
+        self.assertEqual(picked["url"], "https://cdn.example.test/480.mp4")
+
+    def test_prepare_browser_dom_candidate_refreshes_remote_api_to_manifest(self):
+        page_url = "https://www.pornhub.com/view_video.php?viewkey=abc"
+        candidate = {
+            "format_id": "browser-480",
+            "url": "https://www.pornhub.com/video/get_media?s=token",
+            "height": 480,
+            "source": page_url,
+        }
+        refreshed_dom = """
+        <html><head><title>Refresh Video</title></head><body>
+        <script>
+        var flashvars = {"mediaDefinitions":[
+          {"format":"mp4","videoUrl":"/video/get_media?s=new","remote":true},
+          {"format":"hls","videoUrl":"https://cdn.example.test/480/master.m3u8","quality":"480","height":480}
+        ]};
+        </script>
+        """ + ("<!-- padding -->" * 40)
+
+        with mock.patch.object(engine, "fetch_dom_html_with_urllib", return_value=refreshed_dom), mock.patch.object(
+            engine, "fetch_dom_for_fallback", return_value=refreshed_dom
+        ):
+            prepared = engine.prepare_browser_dom_candidate(page_url, candidate)
+
+        self.assertEqual(prepared["url"], "https://cdn.example.test/480/master.m3u8")
+        self.assertTrue(prepared["is_manifest"])
+
+    def test_is_browser_dom_manifest_candidate_detects_hls_entries(self):
+        self.assertTrue(
+            engine.is_browser_dom_manifest_candidate(
+                {"format_id": "browser-480", "url": "https://cdn.example.test/master.m3u8", "is_manifest": True}
+            )
+        )
+        self.assertFalse(
+            engine.is_browser_dom_manifest_candidate(
+                {"format_id": "browser-480", "url": "https://cdn.example.test/video.mp4", "is_manifest": False}
+            )
+        )
 
     def test_browser_dom_download_pipeline_writes_file(self):
         sample_mp4 = "https://filesamples.com/samples/video/mp4/sample_640x360.mp4"

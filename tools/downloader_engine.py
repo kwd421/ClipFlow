@@ -45,6 +45,7 @@ DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_WORKERS = 4
 DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
+BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
     "google chrome": ("chrome",),
@@ -2583,6 +2584,88 @@ def _browser_remote_media_payload_is_empty(payload):
     return True
 
 
+def _pick_refreshed_browser_dom_candidate(candidates, target_height=0, prefer_direct=True, prefer_remote_api=False):
+    candidates = list(candidates or [])
+    if not candidates:
+        return None
+    direct = [
+        candidate
+        for candidate in candidates
+        if not candidate.get("is_manifest")
+        and not is_browser_remote_media_api_url(candidate.get("url"))
+        and str(candidate.get("url") or "").lower().startswith(("http://", "https://"))
+    ]
+    remote_api = [
+        candidate
+        for candidate in candidates
+        if not candidate.get("is_manifest") and is_browser_remote_media_api_url(candidate.get("url"))
+    ]
+    manifest = [candidate for candidate in candidates if candidate.get("is_manifest")]
+    pools = []
+    if prefer_remote_api and remote_api:
+        pools.append(remote_api)
+    if prefer_direct and direct:
+        pools.append(direct)
+    if manifest:
+        pools.append(manifest)
+    if remote_api and not prefer_remote_api:
+        pools.append(remote_api)
+    if not pools:
+        pools.append(candidates)
+    for pool in pools:
+        if target_height:
+            exact = [candidate for candidate in pool if safe_int(candidate.get("height")) == target_height]
+            if exact:
+                return exact[0]
+        return pool[0]
+    return None
+
+
+def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
+    candidate = dict(candidate or {})
+    media_url = absolute_browser_media_url(candidate.get("url"), page_url)
+    needs_refresh = (
+        is_browser_remote_media_api_url(media_url)
+        or candidate.get("is_manifest")
+        or ".m3u8" in media_url.lower()
+        or ".mpd" in media_url.lower()
+    )
+    if not needs_refresh:
+        return candidate
+    emit_event(on_event, "status", message="브라우저 DOM 미디어 URL 새로고침 중")
+    dom = ""
+    try:
+        dom = fetch_dom_html_with_urllib(page_url, timeout=20)
+    except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+        dom = ""
+    if not dom_html_looks_usable(dom):
+        dom = fetch_dom_for_fallback(page_url, on_event=on_event, timeout=45)
+    analysis = analyze_browser_dom_media(
+        page_url,
+        dom,
+        output_ext=candidate.get("output_ext"),
+        on_event=on_event,
+    )
+    original_is_remote_api = is_browser_remote_media_api_url(media_url) and not candidate.get("is_manifest")
+    prefer_manifest_refresh = original_is_remote_api and needs_browser_profile_for_remote_media(media_url)
+    refreshed = _pick_refreshed_browser_dom_candidate(
+        analysis.get("candidates") or [],
+        safe_int(candidate.get("height")),
+        prefer_direct=not original_is_remote_api or prefer_manifest_refresh,
+        prefer_remote_api=original_is_remote_api and not prefer_manifest_refresh,
+    )
+    if not refreshed:
+        return candidate
+    for key in ("url", "height", "is_manifest", "protocol", "ext", "source_ext", "output_ext", "resolution"):
+        if key in refreshed and refreshed.get(key) not in (None, ""):
+            candidate[key] = refreshed[key]
+    if refreshed.get("title") and not candidate.get("title"):
+        candidate["title"] = refreshed["title"]
+    if refreshed.get("display_title") and not candidate.get("display_title"):
+        candidate["display_title"] = refreshed["display_title"]
+    return candidate
+
+
 def fetch_json_via_browser(media_url, page_url=None, on_event=None, timeout=45):
     browser = find_browser_executable()
     if not browser:
@@ -2661,7 +2744,11 @@ def prepare_browser_dom_candidate(page_url, candidate, on_event=None):
     candidate = dict(candidate or {})
     if not str(candidate.get("format_id") or "").startswith("browser-"):
         return candidate
+    candidate = refresh_browser_dom_candidate_media(page_url, candidate, on_event=on_event)
     media_url = absolute_browser_media_url(candidate.get("url"), page_url)
+    if candidate.get("is_manifest") or ".m3u8" in media_url.lower() or ".mpd" in media_url.lower():
+        candidate["url"] = media_url
+        return candidate
     if not is_browser_remote_media_api_url(media_url):
         if media_url and media_url != candidate.get("url"):
             candidate["url"] = media_url
@@ -3143,6 +3230,14 @@ def is_chzzk_direct_mp4_candidate(candidate):
     )
 
 
+def is_browser_dom_manifest_candidate(candidate):
+    format_id = str((candidate or {}).get("format_id") or "")
+    if not format_id.startswith("browser-"):
+        return False
+    media_url = str((candidate or {}).get("url") or "").lower()
+    return bool((candidate or {}).get("is_manifest")) or ".m3u8" in media_url or ".mpd" in media_url
+
+
 def direct_media_request_headers(candidate):
     headers = {
         "User-Agent": USER_AGENT,
@@ -3463,6 +3558,124 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     }
 
 
+def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, runner=None, no_progress_timeout=None):
+    output_dir = Path(output_dir).expanduser()
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Browser DOM manifest output path could not be determined.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = output_path.with_name(output_path.name + ".part")
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for browser DOM manifest downloads")
+    headers = direct_media_request_headers(candidate)
+    header_arg = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-hide_banner",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-headers",
+        header_arg,
+        "-i",
+        url,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        output_format,
+        str(part_path),
+    ]
+    emit_event(on_event, "status", message="Downloading browser manifest stream")
+    process = (runner or subprocess.Popen)(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        **_hidden_subprocess_kwargs(),
+    )
+    progress_values = {}
+    line_queue = queue.Queue()
+
+    def read_stdout():
+        stream = getattr(process, "stdout", None)
+        try:
+            if hasattr(stream, "readline"):
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        break
+                    line_queue.put(line)
+            elif stream is not None:
+                for line in stream:
+                    line_queue.put(line)
+        finally:
+            line_queue.put(None)
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+    timeout = BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT if no_progress_timeout is None else float(no_progress_timeout)
+    started_at = time.monotonic()
+    last_progress = time.monotonic()
+    reader_done = False
+    stderr_text = ""
+
+    while True:
+        try:
+            line = line_queue.get(timeout=0.2)
+        except queue.Empty:
+            line = None
+        if line is None and reader_done:
+            break
+        if line is None:
+            if process.poll() is not None:
+                reader_done = True
+            if time.monotonic() - last_progress > timeout:
+                process.kill()
+                raise RuntimeError(f"Browser DOM manifest download stalled for {int(timeout)} seconds.")
+            continue
+        if line is None:
+            reader_done = True
+            continue
+        stderr_text += line
+        key, _, value = line.partition("=")
+        if key:
+            progress_values[key.strip()] = value.strip()
+        if progress_values.get("progress") == "continue" or progress_values.get("out_time_ms"):
+            last_progress = time.monotonic()
+            raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
+            current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
+            duration = safe_int((candidate or {}).get("duration"))
+            if duration:
+                percent = max(0, min(100, current * 100 / duration))
+                emit_event(on_event, "progress", percent=percent, message=f"{percent:.1f}%")
+        if process.poll() is not None:
+            reader_done = True
+
+    return_code = process.wait()
+    reader.join(timeout=1)
+    if return_code != 0:
+        raise RuntimeError((stderr_text or "Browser DOM manifest download failed.").strip())
+    if not part_path.exists() or part_path.stat().st_size <= 0:
+        raise RuntimeError("Browser DOM manifest download produced an empty file.")
+    part_path.replace(output_path)
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return {
+        "ok": True,
+        "output_dir": str(output_dir),
+        "output_path": str(output_path),
+        "target_url": url,
+    }
+
+
 def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, runner=None, no_progress_timeout=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
@@ -3685,6 +3898,8 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         candidate = prepare_browser_dom_candidate(page_url or target_url, candidate, on_event=on_event)
     if candidate.get("format_selector") == "best" and candidate.get("url"):
         target_url = candidate["url"]
+    if is_browser_dom_manifest_candidate(candidate):
+        return download_browser_dom_manifest(target_url, candidate, output_dir, on_event=on_event)
     if is_chzzk_direct_mp4_candidate(candidate):
         if clip_range_from_candidate(candidate):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
