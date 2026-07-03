@@ -3789,6 +3789,24 @@ print(dialog.exec())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "1"])
 
+    def test_clipflow_qt_outlined_button_keeps_stable_popup_size(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import OutlinedButton
+
+app = QApplication([])
+button = OutlinedButton("단일 영상")
+button.show()
+app.processEvents()
+print(button.sizeHint().height() >= 34)
+print(button.height() >= 34)
+print(button.sizeHint().width() > button.sizeHint().height())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True"])
+
     def test_clipflow_qt_playlist_delete_dialog_names_playlist_and_child_file_count(self):
         script = r'''
 from pathlib import Path

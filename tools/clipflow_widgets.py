@@ -56,7 +56,16 @@ class OutlinedButton(QPushButton):
         self.border_width = border_width
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
+        self.setMinimumHeight(34)
         self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0px; }")
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        metrics = self.fontMetrics()
+        text_width = metrics.horizontalAdvance(self.text() or "")
+        width = max(hint.width(), text_width + 24)
+        height = max(hint.height(), 34, metrics.height() + 16)
+        return QSize(width, height)
 
     def paintEvent(self, event):
         del event
