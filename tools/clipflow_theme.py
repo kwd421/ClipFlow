@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
@@ -554,7 +555,17 @@ def configure_app_font(app):
     _FONT_CONFIGURED = True
 
 
+def _app_icon_asset_path():
+    return Path(__file__).resolve().parents[1] / "assets" / "icons" / "app_icon.png"
+
+
 def create_app_icon(size=64):
+    asset = _app_icon_asset_path()
+    if asset.exists():
+        pixmap = QPixmap(str(asset))
+        if not pixmap.isNull():
+            return QIcon(pixmap)
+
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)

@@ -1,8 +1,4 @@
-"""Generate ClipFlow.icns from the in-app 'Cf' logo (create_app_icon).
-
-Run: QT_QPA_PLATFORM=offscreen python build-helper/make_icon.py
-Produces build-helper/ClipFlow.icns (via a temporary .iconset + iconutil).
-"""
+"""Generate ClipFlow icon files from the app icon asset/runtime icon."""
 
 import os
 import subprocess
@@ -15,14 +11,40 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from tools.clipflow_theme import configure_app_font, create_app_icon
+from tools.clipflow_theme import _app_icon_asset_path, configure_app_font, create_app_icon
+
+
+def _write_qt_master_png(master_png):
+    app = QApplication(sys.argv)
+    configure_app_font(app)
+    icon = create_app_icon(1024)
+    pixmap = icon.pixmap(1024, 1024)
+    pixmap.save(str(master_png), "PNG")
+    app.quit()
+
+
+def _load_master_image():
+    from PIL import Image
+
+    asset = _app_icon_asset_path()
+    if asset.exists():
+        return Image.open(asset).convert("RGBA")
+
+    out_dir = Path(__file__).resolve().parent
+    master_png = out_dir / "ClipFlow-master.png"
+    _write_qt_master_png(master_png)
+    try:
+        return Image.open(master_png).convert("RGBA")
+    finally:
+        if master_png.exists():
+            master_png.unlink()
 
 
 def main():
-    app = QApplication(sys.argv)
-    configure_app_font(app)
+    from PIL import Image
 
     out_dir = Path(__file__).resolve().parent
+    master = _load_master_image()
     iconset = out_dir / "ClipFlow.iconset"
     iconset.mkdir(exist_ok=True)
 
@@ -40,15 +62,10 @@ def main():
         ("icon_512x512@2x.png", 1024),
     ]
     for name, size in specs:
-        icon = create_app_icon(size)
-        pixmap = icon.pixmap(size, size)
-        pixmap.save(str(iconset / name), "PNG")
+        resized = master.resize((size, size), Image.LANCZOS)
+        resized.save(iconset / name, "PNG")
 
-    # Windows .ico (cross-platform via Pillow) from the largest master PNG.
     try:
-        from PIL import Image
-
-        master = Image.open(iconset / "icon_512x512@2x.png").convert("RGBA")
         ico = out_dir / "ClipFlow.ico"
         master.save(
             str(ico),
@@ -59,11 +76,24 @@ def main():
     except Exception as exc:  # noqa: BLE001 - icon generation is best-effort
         print("skip .ico:", exc)
 
-    # macOS .icns via iconutil (only available on macOS).
-    if sys.platform == "darwin":
+    try:
         icns = out_dir / "ClipFlow.icns"
-        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
+        master.save(
+            str(icns),
+            format="ICNS",
+            sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)],
+        )
         print("wrote", icns)
+    except Exception as exc:  # noqa: BLE001 - icon generation is best-effort
+        print("skip .icns:", exc)
+
+    if sys.platform == "darwin":
+        try:
+            icns = out_dir / "ClipFlow.icns"
+            subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
+            print("refreshed", icns)
+        except Exception as exc:  # noqa: BLE001 - best-effort macOS refinement
+            print("skip iconutil .icns:", exc)
 
 
 if __name__ == "__main__":

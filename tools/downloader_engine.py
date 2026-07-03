@@ -596,6 +596,7 @@ def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_
         text=True,
         encoding="utf-8",
         errors="replace",
+        **_hidden_subprocess_kwargs(),
     )
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout or "ffmpeg audio extraction failed").strip()
@@ -654,6 +655,7 @@ def extract_existing_media_segment(input_path, candidate, output_dir=None, on_ev
         text=True,
         encoding="utf-8",
         errors="replace",
+        **_hidden_subprocess_kwargs(),
     )
     if completed.returncode != 0:
         try:
@@ -2841,6 +2843,7 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **_hidden_subprocess_kwargs(),
     )
     output_lines = []
     progress_values = {}
@@ -3122,6 +3125,15 @@ def _download_worker_environment():
 
 def _download_worker_creationflags():
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
+
+def _hidden_subprocess_kwargs():
+    kwargs = {"creationflags": _download_worker_creationflags()}
+    if os.name == "nt" and hasattr(subprocess, "STARTUPINFO") and hasattr(subprocess, "STARTF_USESHOWWINDOW"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
 
 
 class PersistentDownloadProcess:

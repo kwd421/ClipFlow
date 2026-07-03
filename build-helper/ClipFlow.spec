@@ -24,6 +24,7 @@ else:
     EXE_ICON = None
 
 datas = [
+    (str(ROOT / "assets" / "icons" / "app_icon.png"), "assets/icons"),
     (str(ROOT / "assets" / "icons" / "lucide"), "assets/icons/lucide"),
 ]
 binaries = []

@@ -1823,6 +1823,7 @@ for line in sys.stdin:
         self.assertIn("-headers", command)
         format_index = command.index("-f")
         self.assertEqual(command[format_index + 1], "mp4")
+        self.assertEqual(calls[0][1].get("creationflags"), engine._download_worker_creationflags())
         progress_events = [event for event in events if event.get("type") == "progress"]
         self.assertTrue(progress_events)
         self.assertEqual(progress_events[-1]["percent"], 100)

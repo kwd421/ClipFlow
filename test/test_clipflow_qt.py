@@ -265,6 +265,37 @@ print("|".join(default_favicon_urls("https://www.media.example.test/posts/1")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ClipFlow smoke launch OK", result.stdout)
 
+    def test_clipflow_qt_app_icon_uses_transparent_canvas(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_theme import create_app_icon
+
+app = QApplication([])
+image = create_app_icon(128).pixmap(128, 128).toImage()
+corners = [
+    image.pixelColor(0, 0).alpha(),
+    image.pixelColor(127, 0).alpha(),
+    image.pixelColor(0, 127).alpha(),
+    image.pixelColor(127, 127).alpha(),
+]
+xs = []
+ys = []
+for y in range(128):
+    for x in range(128):
+        if image.pixelColor(x, y).alpha() > 0:
+            xs.append(x)
+            ys.append(y)
+print(corners)
+print(bool(xs))
+edge = image.pixelColor(64, 10)
+print(edge.alpha() > 0)
+print(max(edge.red(), edge.green(), edge.blue()) < 40)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["[0, 0, 0, 0]", "True", "True", "True"])
+
     def test_clipflow_qt_polished_shell_removes_format_and_log_controls(self):
         script = r'''
 from PySide6.QtWidgets import QApplication, QFrame
