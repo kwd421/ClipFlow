@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 from tools import downloader_engine as engine
+
+
+def verify_cookie_source():
+    return os.environ.get("CLIPFLOW_VERIFY_COOKIE_SOURCE") or os.environ.get("UMP4_VERIFY_COOKIE_SOURCE") or "없음"
 
 PLATFORMS = [
     ("youtube", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "yt-dlp"),
@@ -87,7 +92,7 @@ def verify_platform(name, url, expected_path, out_root):
         "elapsed_seconds": 0,
     }
     try:
-        analysis = engine.analyze_url(url, cookie_source="없음")
+        analysis = engine.analyze_url(url, cookie_source=verify_cookie_source())
         row["analyze_ok"] = True
         row["source"] = analysis.get("source")
         row["title"] = analysis.get("title")
@@ -101,7 +106,7 @@ def verify_platform(name, url, expected_path, out_root):
         out_dir = out_root / name / str(int(time.time() * 1000))
         out_dir.mkdir(parents=True, exist_ok=True)
         before = time.time()
-        engine.download_candidate(url, candidate, out_dir, cookie_source="없음")
+        engine.download_candidate(url, candidate, out_dir, cookie_source=verify_cookie_source())
         newest = engine.newest_file(out_dir, candidate.get("output_ext") or "mp4", since=before - 2)
         if not newest or not newest.exists():
             raise RuntimeError("Download finished but no output file was found.")

@@ -284,8 +284,16 @@ def cookiesfrombrowser_spec(cookie_source):
     browser_key = spec[0]
     profiles = browser_cookie_profile_dirs(browser_key)
     if len(profiles) == 1:
-        return (browser_key, profiles[0].name)
+        return (browser_key, str(profiles[0]))
     return spec
+
+
+def cookiesfile_from_env():
+    cookie_file = str(os.environ.get("CLIPFLOW_COOKIES_FILE") or os.environ.get("UMP4_COOKIES_FILE") or "").strip()
+    if not cookie_file:
+        return None
+    path = Path(cookie_file).expanduser()
+    return str(path) if path.is_file() else None
 
 
 def browser_cookie_error(exc):
@@ -1846,9 +1854,13 @@ def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_u
         },
         "logger": EventLogger(on_event),
     }
-    spec = cookiesfrombrowser_spec(cookie_source)
-    if spec:
-        options["cookiesfrombrowser"] = spec
+    cookie_file = cookiesfile_from_env()
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+    else:
+        spec = cookiesfrombrowser_spec(cookie_source)
+        if spec:
+            options["cookiesfrombrowser"] = spec
     proxy = effective_proxy_url(proxy_url)
     if proxy:
         options["proxy"] = proxy
@@ -2704,40 +2716,6 @@ def fetch_json_via_browser(media_url, page_url=None, on_event=None, timeout=45):
     if _browser_remote_media_payload_is_empty(payload):
         raise RuntimeError("Browser remote media resolution returned no playable entries.")
     return payload
-
-
-def expand_browser_remote_media_entries(items, page_url, on_event=None):
-    expanded = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        media_url = absolute_browser_media_url(item.get("videoUrl") or item.get("url"), page_url)
-        item_format = str(item.get("format") or "").lower()
-        is_remote = bool(item.get("remote")) or is_browser_remote_media_api_url(media_url)
-        if is_remote and media_url:
-            try:
-                payload = fetch_json_via_browser(media_url, page_url=page_url, on_event=on_event)
-            except Exception:
-                continue
-            entries = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                entry_url = absolute_browser_media_url(entry.get("videoUrl") or entry.get("url"), page_url)
-                if not entry_url:
-                    continue
-                merged = dict(item)
-                merged.update(entry)
-                merged["videoUrl"] = entry_url
-                merged["remote"] = False
-                merged["source"] = item.get("source") or "remote-media"
-                expanded.append(merged)
-            continue
-        if media_url:
-            merged = dict(item)
-            merged["videoUrl"] = media_url
-            expanded.append(merged)
-    return expanded
 
 
 def prepare_browser_dom_candidate(page_url, candidate, on_event=None):

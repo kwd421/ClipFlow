@@ -1710,26 +1710,6 @@ for line in sys.stdin:
         self.assertTrue(engine.is_browser_remote_media_api_url("https://www.pornhub.com/video/get_media?s=abc"))
         self.assertFalse(engine.is_browser_remote_media_api_url("https://cdn.example.test/video.mp4"))
 
-    def test_expand_browser_remote_media_entries_resolves_api_payload(self):
-        items = [
-            {
-                "format": "mp4",
-                "videoUrl": "/media/mp4?s=token",
-                "remote": True,
-            }
-        ]
-        payload = [
-            {"format": "mp4", "quality": "480", "videoUrl": "https://cdn.example.test/480.mp4"},
-            {"format": "mp4", "quality": "720", "videoUrl": "https://cdn.example.test/720.mp4"},
-        ]
-
-        with mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
-            expanded = engine.expand_browser_remote_media_entries(items, "https://www.redtube.com/123")
-
-        self.assertEqual(len(expanded), 2)
-        self.assertEqual(expanded[0]["videoUrl"], "https://cdn.example.test/480.mp4")
-        self.assertEqual(expanded[1]["quality"], "720")
-
     def test_analyze_browser_dom_media_includes_remote_mp4_api_candidates(self):
         html = """
         <html><head><title>Remote API Video</title></head><body>
