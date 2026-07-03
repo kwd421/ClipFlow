@@ -2,6 +2,7 @@ import os
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import QToolTip
 
 APP_NAME = "ClipFlow"
 DEFAULT_OUTPUT_EXT = "MP4"
@@ -34,8 +35,6 @@ SURFACE_RAISED = "#FFFFFF"
 SURFACE_SUNKEN = "#FFFFFF"
 BORDER = "#EAEAEA"
 BORDER_STRONG = "#D4D4D8"
-FIELD_BORDER = "#E4E4E7"
-FIELD_BORDER_HOVER = "#C4C4CC"
 
 INK = "#171717"
 INK_SOFT = "#3F3F46"
@@ -48,6 +47,8 @@ GRAPHITE_HOVER = "#000000"
 GRAPHITE_PRESSED = "#2A2A2A"
 GRAPHITE_DISABLED = "#F4F4F5"
 ON_ACCENT = "#FFFFFF"
+FIELD_BORDER = GRAPHITE
+FIELD_BORDER_HOVER = GRAPHITE
 
 # Blue is an information accent only (focus ring, progress, links, selection).
 ACCENT = "#0070F3"
@@ -67,8 +68,8 @@ DANGER_PRESSED = "#B91C1C"
 DANGER_TINT = "#FDECED"
 DANGER_TINT_STRONG = "#FBD5D7"
 
-ICON = "#71717A"
-ICON_HOVER = "#171717"
+ICON = GRAPHITE
+ICON_HOVER = GRAPHITE
 ICON_ACTIVE = ACCENT
 ICON_DISABLED = "#C4C4CC"
 
@@ -82,7 +83,7 @@ QDialog {{
 }}
 QFrame#Panel {{
     background: {SURFACE};
-    border: 1px solid {BORDER};
+    border: 1px solid {GRAPHITE};
     border-radius: 12px;
 }}
 QFrame#ListPanel {{
@@ -145,6 +146,12 @@ QLabel#Eyebrow {{
 }}
 QFrame#FooterDivider {{
     background: {BORDER};
+    border: none;
+    max-height: 1px;
+    min-height: 1px;
+}}
+QFrame#InputDivider {{
+    background: {GRAPHITE};
     border: none;
     max-height: 1px;
     min-height: 1px;
@@ -223,7 +230,7 @@ QLabel#PlaylistPill {{
     font-weight: 700;
 }}
 QLabel#FieldIcon {{
-    color: {MUTED};
+    color: {GRAPHITE};
     font-size: 16px;
 }}
 QLabel#FormatValue, QLabel#QualityValue {{
@@ -299,7 +306,7 @@ QMenu::separator {{
 }}
 QFrame#ComboPopup {{
     background: {SURFACE};
-    border: 1px solid {BORDER};
+    border: 1px solid {GRAPHITE};
     border-radius: 10px;
 }}
 QPushButton#ComboOption {{
@@ -353,7 +360,7 @@ QPushButton:pressed {{
 QPushButton:disabled {{
     background: {GRAPHITE_DISABLED};
     color: {MUTED_SOFT};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {GRAPHITE};
 }}
 QPushButton#SecondaryButton {{
     background: {SURFACE};
@@ -376,11 +383,11 @@ QPushButton#DangerButton:pressed {{
 }}
 QPushButton#SecondaryButton:hover {{
     background: {SURFACE_SOFT};
-    border-color: {BORDER_STRONG};
+    border-color: {GRAPHITE};
 }}
 QPushButton#IconButton {{
     background: transparent;
-    color: {MUTED};
+    color: {GRAPHITE};
     border: none;
     border-radius: 7px;
     padding: 0px;
@@ -402,7 +409,7 @@ QPushButton#SecondaryButton:pressed {{
 }}
 QPushButton#GhostButton {{
     background: transparent;
-    color: {MUTED};
+    color: {GRAPHITE};
     border: none;
     border-radius: 7px;
     padding: 6px 12px;
@@ -436,7 +443,7 @@ QToolButton:disabled {{
 QToolTip {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {GRAPHITE};
     border-radius: 7px;
     padding: 7px 10px;
     font-size: 12px;
@@ -528,6 +535,8 @@ def preferred_font_family(default_family=""):
 def apply_tracking(widget, spacing, weight=None):
     """Apply absolute letter-spacing (and optional weight) to a widget's font."""
     font = widget.font()
+    if font.pointSize() <= 0 and font.pixelSize() <= 0:
+        font.setPointSize(10)
     font.setLetterSpacing(QFont.AbsoluteSpacing, spacing)
     if weight is not None:
         font.setWeight(weight)
@@ -539,7 +548,9 @@ def configure_app_font(app):
     if _FONT_CONFIGURED:
         return
     selected_family = preferred_font_family(app.font().family())
-    app.setFont(QFont(selected_family, 10))
+    font = QFont(selected_family, 10)
+    app.setFont(font)
+    QToolTip.setFont(font)
     _FONT_CONFIGURED = True
 
 
@@ -575,16 +586,18 @@ PREF_QUALITY_SETTING = "download_quality"
 PREF_FORMAT_SETTING = "download_format"
 PREF_CODEC_SETTING = "download_codec"
 PREF_FRAME_SETTING = "download_frame"
+PREF_HDR_SETTING = "download_hdr"
 SORT_KEY_SETTING = "sort_key"
 SORT_DESC_SETTING = "sort_desc"
 WINDOW_SIZE_SETTING = "window_size"
 DOWNLOAD_CONCURRENCY_SETTING = "download_concurrency"
 
 PREFERENCE_DEFAULTS = {
-    "quality": "최고화질",
+    "quality": "자동",
     "output_format": "자동",
     "codec": "자동",
     "frame_rate": "자동",
+    "hdr": "끔",
 }
 SORT_LABELS = {"latest": "다운로드순", "name": "이름순"}
 SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}

@@ -16,6 +16,7 @@ class DownloadPreferences:
     output_format: str = "자동"
     codec: str = "자동"
     frame_rate: str = "자동"
+    hdr: str = "끔"
 
 
 def candidate_group_key(candidate):
@@ -127,6 +128,21 @@ def _stable_audio_codec_score(candidate):
     return 0
 
 
+def _is_hdr_candidate(candidate):
+    values = [
+        candidate.get("dynamic_range"),
+        candidate.get("color_transfer"),
+        candidate.get("format_note"),
+        candidate.get("note"),
+    ]
+    text = " ".join(str(value or "").lower() for value in values)
+    return any(token in text for token in ("hdr", "hlg", "pq", "smpte2084", "arib-std-b67"))
+
+
+def _hdr_enabled(value):
+    return str(value or "").strip().lower() in {"켜", "켬", "on", "true", "1", "hdr"}
+
+
 def _downloadable_score(candidate):
     return 0 if candidate.get("download_risk") else 1
 
@@ -153,6 +169,9 @@ def _best_candidate(candidates, preferences):
     target_fps = _target_fps(preferences.frame_rate)
     target_codec = str(preferences.codec or "").strip().upper()
     codec_auto = target_codec in {"", "자동", "AUTO"}
+    quality_auto = _is_best_quality(preferences.quality)
+    if not _hdr_enabled(getattr(preferences, "hdr", "끔")) and any(not _is_hdr_candidate(candidate) for candidate in candidates):
+        candidates = [candidate for candidate in candidates if not _is_hdr_candidate(candidate)]
     if target_height and any(engine.safe_int(candidate.get("height")) <= target_height for candidate in candidates):
         candidates = [
             candidate
@@ -171,8 +190,10 @@ def _best_candidate(candidates, preferences):
         fps = engine.safe_int(candidate.get("fps"))
         size = engine.safe_int(candidate.get("sort_bytes"))
         codec = _codec_name(candidate)
-        codec_score = _stable_video_codec_score(candidate) if codec_auto else (1 if codec == target_codec else 0)
+        codec_score = 0 if codec_auto and quality_auto else _stable_video_codec_score(candidate) if codec_auto else (1 if codec == target_codec else 0)
         direct_score = 1 if not candidate.get("is_manifest") and size > 0 else 0
+        if codec_auto and quality_auto:
+            return (_downloadable_score(candidate), height, fps, direct_score, _stable_audio_codec_score(candidate), size, codec_score)
         return (_downloadable_score(candidate), codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
 
     return max(candidates, key=score) if candidates else None

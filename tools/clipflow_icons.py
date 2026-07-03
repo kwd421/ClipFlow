@@ -4,7 +4,7 @@ from functools import lru_cache
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLabel, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QToolButton, QVBoxLayout, QWidget
 
 try:
     from tools import clipflow_theme as theme
@@ -33,7 +33,7 @@ def lucide_svg(name, color=ICON_COLOR):
 
 
 @lru_cache(maxsize=256)
-def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=2):
+def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=4):
     renderer = QSvgRenderer(lucide_svg(name, color).encode("utf-8"))
     pixel_size = int(size * scale)
     pixmap = QPixmap(pixel_size, pixel_size)
@@ -62,6 +62,7 @@ class LucideIconWidget(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.drawPixmap(0, 0, self.icon_size, self.icon_size, lucide_pixmap(self.icon_name, self.icon_size, self.color))
 
 
@@ -115,16 +116,17 @@ class LucideIconButton(QToolButton):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         if self.bordered:
             # Persistent bordered box so this reads as the same control family
             # as the adjacent combo box / secondary button.
             hovered = self.underMouse() and self.isEnabled()
-            border = theme.BORDER_STRONG if hovered else theme.FIELD_BORDER
+            border = theme.GRAPHITE
             background = theme.SURFACE_SOFT if hovered else theme.SURFACE
-            painter.setPen(QPen(QColor(border), 1))
+            painter.setPen(QPen(QColor(border), 1.4))
             painter.setBrush(QColor(background))
-            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.7, 0.7, -0.7, -0.7), 8, 8)
         elif self.background and self.isEnabled():
             painter.setPen(Qt.NoPen)
             background = self.hover_background if self.underMouse() and self.hover_background else self.background
@@ -173,10 +175,13 @@ class CustomTooltip(QWidget):
     """
 
     _instance = None
-    SHADOW_MARGIN = 12
+    TOOLTIP_MARGIN = 0
 
     def __init__(self):
-        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint)
+        super().__init__(
+            None,
+            Qt.ToolTip | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint,
+        )
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -188,23 +193,16 @@ class CustomTooltip(QWidget):
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN,
-            self.SHADOW_MARGIN + 4,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
+            self.TOOLTIP_MARGIN,
         )
         layout.setSpacing(0)
         self._bubble = QLabel(self)
         self._bubble.setObjectName("CustomTooltipBubble")
         self._bubble.setWordWrap(False)
         layout.addWidget(self._bubble)
-        shadow = QGraphicsDropShadowEffect(self._bubble)
-        shadow.setBlurRadius(18)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(20, 22, 30, 44))
-        self._bubble.setGraphicsEffect(shadow)
-        self._shadow = shadow
 
     def setText(self, text):
         self._bubble.setText(text)
@@ -214,9 +212,6 @@ class CustomTooltip(QWidget):
 
     def bubble_geometry(self):
         return self._bubble.geometry()
-
-    def graphicsEffect(self):
-        return self._shadow
 
     @classmethod
     def instance(cls):
@@ -233,17 +228,20 @@ def show_tooltip_above(widget, text):
     tip = CustomTooltip.instance()
     tip.setText(text)
     tip.adjustSize()
+    tip.show()
+    if tip.layout() is not None:
+        tip.layout().activate()
     origin = widget.mapToGlobal(QPoint(0, 0))
-    x = origin.x() + (widget.width() - tip.width()) // 2
-    y = origin.y() - tip.height() - 2
+    bubble = tip.bubble_geometry()
+    x = origin.x() + widget.width() // 2 - (bubble.x() + bubble.width() // 2)
+    y = origin.y() - bubble.bottom() - 4
     screen = widget.screen()
     if screen is not None:
         available = screen.availableGeometry()
         x = max(available.left() + 4, min(x, available.right() - tip.width() - 4))
         if y < available.top() + 4:
-            y = origin.y() + widget.height() + 2
+            y = origin.y() + widget.height() - bubble.y() + 4
     tip.move(x, y)
-    tip.show()
     tip.raise_()
 
 

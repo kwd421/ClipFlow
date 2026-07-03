@@ -106,7 +106,7 @@ notarize_and_staple_app() {
     xcrun notarytool submit "$notary_zip" --wait "${notary_args[@]}"
     xcrun stapler staple "$app_path"
     xcrun stapler validate "$app_path"
-    spctl -a -vv "$app_path"
+    spctl -a -t exec -vv "$app_path"
 }
 
 if [[ "$(uname -s)" == "Darwin" && -z "${CLIPFLOW_CODESIGN_IDENTITY:-}" ]]; then

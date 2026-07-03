@@ -40,6 +40,8 @@ class PlaylistMixin:
         if not parent:
             return
         if event_type == "playlist_entry_loading":
+            if parent.get("_playlist_auto_download_paused"):
+                return
             self._ensure_playlist_loading_child(parent, event.get("index"), event.get("title"), event.get("source_url") or event.get("url"))
             self._render_rows()
             return
@@ -47,8 +49,9 @@ class PlaylistMixin:
             if hasattr(self, "_remember_download_infos"):
                 self._remember_download_infos(event.get("analysis"))
             entry_rows = self._replace_playlist_loading_with_entry(parent, event)
+            self._refresh_playlist_parent_status(parent)
             self._render_rows()
-            if self._analysis_auto_download:
+            if self._analysis_auto_download and not parent.get("_playlist_auto_download_paused"):
                 for entry_row in entry_rows or []:
                     self.start_download_for_row(entry_row)
             return
@@ -217,6 +220,8 @@ class PlaylistMixin:
         return insert_index
 
     def _ensure_next_playlist_loading(self, parent, child_index):
+        if parent.get("_playlist_auto_download_paused"):
+            return
         count = engine.safe_int((parent.get("candidate") or {}).get("playlist_count") or (parent.get("candidate") or {}).get("item_count"))
         next_index = child_index + 1
         if count and next_index > count:
@@ -498,6 +503,10 @@ class PlaylistMixin:
         candidate["duration"] = sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children)
         candidate["sort_bytes"] = sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children)
         candidate["size_source"] = self._playlist_size_source([child.get("candidate") or {} for child in children])
+        if not candidate.get("thumbnail"):
+            thumbnail = next(((child.get("candidate") or {}).get("thumbnail") for child in children if (child.get("candidate") or {}).get("thumbnail")), "")
+            if thumbnail:
+                candidate["thumbnail"] = thumbnail
         candidate["item_count"] = count
         candidate["playlist_count"] = count
         parent["playlist_entries"] = [

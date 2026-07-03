@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -39,6 +39,26 @@ class ActionMixin:
         source_url = row.get("source_url") or ""
         if source_url:
             self.open_url_func(source_url)
+
+    def play_file_for_row(self, row):
+        target = self._play_target_for_row(row)
+        if target:
+            self._open_path(target)
+            return
+        self._set_status("재생할 파일이 없습니다")
+
+    def _play_target_for_row(self, row):
+        if row.get("kind") == "playlist":
+            return None
+        saved_output = row.get("output_path") or ""
+        output_path = Path(saved_output)
+        if saved_output and output_path.is_file():
+            return output_path
+        candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        existing_output = self._existing_output_path_for_row(row, candidate)
+        if existing_output and existing_output.is_file():
+            return existing_output
+        return None
 
     def open_folder_for_row(self, row):
         reveal_target = None
@@ -91,6 +111,7 @@ class ActionMixin:
             return
         if row in self.rows:
             index = self.rows.index(row)
+            transfer_hover = self._row_has_hover(row)
             if row.get("kind") == "playlist":
                 parent_id = row.get("id")
                 self.rows = [
@@ -102,7 +123,27 @@ class ActionMixin:
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
+            if transfer_hover:
+                self._queue_hover_row_at_index(index)
             self._save_completed_history()
+
+    def _row_has_hover(self, row):
+        widget = row.get("widget") if isinstance(row, dict) else None
+        if not widget:
+            return False
+        return widget.property("hovered") == "true" or widget.underMouse()
+
+    def _queue_hover_row_at_index(self, index):
+        QTimer.singleShot(0, lambda: self._hover_row_at_index(index))
+
+    def _hover_row_at_index(self, index):
+        if index < 0 or not self.rows:
+            return
+        target_index = min(index, len(self.rows) - 1)
+        for row_index, row in enumerate(self.rows):
+            widget = row.get("widget")
+            if widget:
+                widget._set_hovered(row_index == target_index and widget.isVisible())
 
     def _toggle_select_mode(self, *_args):
         self.select_mode = not getattr(self, "select_mode", False)
@@ -151,11 +192,15 @@ class ActionMixin:
         if delete_files:
             for row in removable:
                 self._delete_paths_for_row(row)
+        removed_indexes = [self.rows.index(row) for row in removable if row in self.rows]
+        transfer_hover = any(self._row_has_hover(row) for row in removable)
         keep = [row for row in self.rows if row not in removable]
         self.rows = keep
         if self.selected_row_index >= len(self.rows):
             self.selected_row_index = len(self.rows) - 1
         self._render_rows()
+        if transfer_hover and removed_indexes:
+            self._queue_hover_row_at_index(min(removed_indexes))
         self._save_completed_history()
 
     def _confirm_selected(self, count, delete_files):
@@ -186,6 +231,8 @@ class ActionMixin:
         cancel.setObjectName("SecondaryButton")
         confirm = QPushButton("삭제")
         confirm.setObjectName("DangerButton" if delete_files else "")
+        confirm.setDefault(True)
+        confirm.setAutoDefault(True)
         cancel.clicked.connect(dialog.reject)
         confirm.clicked.connect(dialog.accept)
         buttons.addWidget(cancel)
@@ -279,6 +326,8 @@ class ActionMixin:
         return list(dict.fromkeys(paths))
 
     def _remove_rows_after_file_delete(self, row):
+        index = self.rows.index(row) if row in self.rows else -1
+        transfer_hover = self._row_has_hover(row)
         if row.get("kind") == "playlist":
             parent_id = row.get("id")
             self.rows = [
@@ -299,6 +348,8 @@ class ActionMixin:
         if self.selected_row_index >= len(self.rows):
             self.selected_row_index = len(self.rows) - 1
         self._render_rows()
+        if transfer_hover:
+            self._queue_hover_row_at_index(index)
 
     def _create_delete_confirm_dialog(self, output_path, row=None):
         if row and row.get("kind") == "playlist":
