@@ -171,6 +171,23 @@ class RowActionOverlay(QFrame):
         del event
 
 
+class RowBorderOverlay(QFrame):
+    """Transparent overlay used to paint the active row border above child widgets."""
+
+    def __init__(self, row_widget):
+        super().__init__(row_widget)
+        self._row_widget = row_widget
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        self._row_widget._paint_active_border(painter)
+
+
 class DownloadRowWidget(QFrame):
     def __init__(self, owner, row):
         super().__init__()
@@ -185,6 +202,7 @@ class DownloadRowWidget(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._progress_cache_key = None
         self._progress_full_path = None
+        self._progress_band_path = None
         self._progress_partial_paths = {}
         self._progress_gradient = None
         self._analysis_ring_offset = 0.0
@@ -196,6 +214,21 @@ class DownloadRowWidget(QFrame):
         self._analysis_ring_timer.timeout.connect(self._advance_analysis_ring)
         self._build()
         self.refresh()
+
+    def _uses_custom_border(self):
+        return (
+            self.property("progressActive") == "true"
+            or self.property("analyzing") == "true"
+            or self.property("completed") == "true"
+            or self.property("errored") == "true"
+        )
+
+    def _sync_custom_border_property(self):
+        desired = "true" if self._uses_custom_border() else "false"
+        if self.property("customBorder") == desired:
+            return
+        self.setProperty("customBorder", desired)
+        self._repolish()
 
     def _build(self):
         outer = QHBoxLayout(self)
@@ -410,6 +443,9 @@ class DownloadRowWidget(QFrame):
 
         self.spinner = Spinner(30, parent=self)
         self.spinner.hide()
+        self.border_overlay = RowBorderOverlay(self)
+        self.border_overlay.setGeometry(self.rect())
+        self.border_overlay.raise_()
         self._actions_menu_open = False
 
     def mousePressEvent(self, event):
@@ -430,6 +466,8 @@ class DownloadRowWidget(QFrame):
     def resizeEvent(self, event):
         self._position_actions()
         self._position_spinner()
+        self.border_overlay.setGeometry(self.rect())
+        self.border_overlay.raise_()
         self._refresh_title_alignment()
         self._clear_progress_path_cache()
         super().resizeEvent(event)
@@ -714,6 +752,8 @@ class DownloadRowWidget(QFrame):
         self.size_widget.show()
         self._refresh_actions()
         self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
+        self._sync_custom_border_property()
+        self.border_overlay.update()
 
     def set_progress(self, value, text=""):
         bounded = max(0, min(100, int(float(value or 0))))
@@ -753,28 +793,39 @@ class DownloadRowWidget(QFrame):
         self.progress_text.setStyleSheet(
             f"color: {theme.DANGER};" if status == ERROR_STATUS and display_text else ""
         )
+        self._sync_custom_border_property()
         # A repaint is enough for the painted progress ring; avoid a full style
         # unpolish/polish on every progress tick (called dozens of times/sec).
-        self.update()
+        self.border_overlay.update()
 
     def _clear_progress_path_cache(self):
         self._progress_cache_key = None
         self._progress_full_path = None
+        self._progress_band_path = None
         self._progress_partial_paths.clear()
         self._progress_gradient = None
 
     def _progress_paths(self):
-        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        rect = QRectF(self.rect()).adjusted(2.0, 2.0, -2.0, -2.0)
         key = (round(rect.width(), 2), round(rect.height(), 2))
         if self._progress_cache_key != key:
             self._progress_cache_key = key
             self._progress_full_path = QPainterPath()
             self._progress_full_path.addRoundedRect(rect, 10.0, 10.0)
+            outer = QPainterPath()
+            outer.addRoundedRect(rect.adjusted(-0.7, -0.7, 0.7, 0.7), 10.7, 10.7)
+            inner = QPainterPath()
+            inner.addRoundedRect(rect.adjusted(0.7, 0.7, -0.7, -0.7), 9.3, 9.3)
+            self._progress_band_path = outer.subtracted(inner)
             self._progress_gradient = QLinearGradient(rect.topLeft(), rect.topRight())
             self._progress_gradient.setColorAt(0.0, QColor(theme.ACCENT))
             self._progress_gradient.setColorAt(1.0, QColor(theme.ACCENT_SOFT))
             self._progress_partial_paths.clear()
         return rect, self._progress_full_path, self._progress_gradient
+
+    def _progress_band(self):
+        self._progress_paths()
+        return self._progress_band_path
 
     def _progress_partial_path(self, full, progress):
         progress = max(0, min(100, int(progress)))
@@ -818,6 +869,9 @@ class DownloadRowWidget(QFrame):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        self.border_overlay.raise_()
+
+    def _paint_active_border(self, painter):
         completed = self.property("completed") == "true"
         errored = self.property("errored") == "true"
         analyzing = self.property("analyzing") == "true"
@@ -825,18 +879,13 @@ class DownloadRowWidget(QFrame):
             return
         _rect, full, gradient = self._progress_paths()
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-
         if errored:
             # Full red ring so a failed row is obvious at a glance.
-            painter.setPen(QPen(QColor(theme.DANGER), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(full)
+            painter.fillPath(self._progress_band(), QColor(theme.DANGER))
             return
 
         if analyzing:
-            painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(full)
+            painter.fillPath(self._progress_band(), QColor(theme.ACCENT_TINT))
             pen = QPen(QColor(theme.ACCENT_SOFT if self.property("hovered") == "true" else theme.ACCENT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(pen)
             painter.drawPath(self._analysis_dash_path(_rect))
@@ -845,13 +894,11 @@ class DownloadRowWidget(QFrame):
         if completed:
             hovered = self.property("hovered") == "true"
             color = theme.GRAPHITE_HOVER if hovered else theme.GRAPHITE
-            painter.setPen(QPen(QColor(color), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(full)
+            painter.fillPath(self._progress_band(), QColor(color))
             return
 
         progress = max(0, min(100, int(self.property("progressValue") or 0)))
-        painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(full)
+        painter.fillPath(self._progress_band(), QColor(theme.ACCENT_TINT))
         if progress <= 0:
             return
         partial = self._ring_segment_path(_rect, 3.82, 4.0 * progress / 100.0)

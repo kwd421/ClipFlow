@@ -2007,8 +2007,8 @@ def size_from_browser_dom(dom):
         return 0
     value = float(match.group(1))
     unit = match.group(2).upper()
-    multiplier = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}.get(unit, 1)
-    return int(value * multiplier)
+    multiplier = {"B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3}.get(unit, 1)
+    return int(round(value * multiplier))
 
 
 def html_attrs(tag):

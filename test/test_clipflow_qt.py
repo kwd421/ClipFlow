@@ -2862,6 +2862,45 @@ print(row_widget.property("progressValue"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["true", "0"])
 
+    def test_clipflow_qt_active_row_border_stays_continuous_at_top_left_corner(self):
+        script = r'''
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ANALYZING_STATUS, ClipFlowWindow, DOWNLOAD_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": "https://media.test/watch/corner",
+    "url": "https://media.test/watch/corner",
+    "title": "Corner",
+    "candidates": [{"id": "corner", "source": "https://media.test/watch/corner", "url": "https://media.test/watch/corner", "title": "Corner", "display_title": "Corner", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1}],
+    "warnings": [],
+})
+row_widget = window.rows[0]["widget"]
+row_widget.resize(680, 66)
+row_widget.show()
+app.processEvents()
+
+for status, progress, text in (
+    (DOWNLOAD_STATUS, 39, "39%"),
+    (ANALYZING_STATUS, 0, ""),
+):
+    row_widget.set_status(status)
+    row_widget.set_progress(progress, text)
+    row_widget._analysis_ring_offset = 3.82
+    app.processEvents()
+    pixmap = QPixmap(row_widget.size())
+    pixmap.fill(QColor("#FFFFFF"))
+    row_widget.render(pixmap)
+    corner = pixmap.toImage().pixelColor(5, 4)
+    print(max(corner.red(), corner.green(), corner.blue()) < 250)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True"])
+
     def test_clipflow_qt_row_resize_repositions_actions_spinner_and_clears_progress_cache(self):
         script = r'''
 from PySide6.QtCore import QSize

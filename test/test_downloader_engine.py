@@ -1472,7 +1472,7 @@ for line in sys.stdin:
         self.assertEqual(candidate["duration"], 3417)
         self.assertEqual(candidate["thumbnail"], "https://media.example.test/thumb.webp")
         self.assertEqual(candidate["height"], 1080)
-        self.assertEqual(candidate["sort_bytes"], 1_117_645_701)
+        self.assertEqual(candidate["sort_bytes"], 1_065_870_000)
         self.assertEqual(candidate["size_source"], "metadata")
 
     def test_analyze_uses_browser_dom_fallback_after_tls_reset(self):

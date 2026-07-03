@@ -112,6 +112,9 @@ QFrame#DownloadRow[selected="true"] {{
     background: {SURFACE};
     border-color: {BORDER};
 }}
+QFrame#DownloadRow[customBorder="true"] {{
+    border-color: transparent;
+}}
 QFrame#DownloadRow[hovered="true"] {{
     background: {SURFACE_SOFT};
     border-color: {BORDER_STRONG};
@@ -119,6 +122,9 @@ QFrame#DownloadRow[hovered="true"] {{
 QFrame#DownloadRow[selected="true"][hovered="true"] {{
     background: {SURFACE_SOFT};
     border-color: {BORDER_STRONG};
+}}
+QFrame#DownloadRow[customBorder="true"][hovered="true"] {{
+    border-color: transparent;
 }}
 QWidget#RowContainer {{
     background: transparent;
