@@ -65,7 +65,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ClipFlow ${{ env.CLIPFLOW_VERSION }}
-          body: Windows ClipFlow release with WinSparkle automatic update support.
+          body_path: docs/ClipFlow-${{ env.CLIPFLOW_VERSION }}.md
           files: dist/ClipFlow-${{ env.CLIPFLOW_VERSION }}.exe
           fail_on_unmatched_files: true
 

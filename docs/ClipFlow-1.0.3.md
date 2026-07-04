@@ -1,3 +1,9 @@
 # ClipFlow 1.0.3
 
-Windows ClipFlow release with WinSparkle automatic update support.
+## 변경 사항
+
+- Windows 빌드에 WinSparkle 기반 자동 업데이트 파이프라인을 처음 연결했습니다.
+
+## 알려진 문제
+
+- 이 빌드에는 **WinSparkle.dll이 exe에 포함되지 않아** 시작 시 업데이트 확인과 알림이 동작하지 않을 수 있습니다. **1.0.4**에서 수정되었습니다.

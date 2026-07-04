@@ -185,11 +185,9 @@ if (-not (Test-Path $appcastPath)) {
 Update-WindowsAppcast -AppcastPath $appcastPath -ItemXml $itemXml
 
 $releaseNotesPath = Join-Path $docsDir "ClipFlow-$Version.md"
-@"
-# ClipFlow $Version
-
-Windows ClipFlow release with WinSparkle automatic update support.
-"@ | Set-Content -Path $releaseNotesPath -Encoding utf8
+if (-not (Test-Path $releaseNotesPath)) {
+    throw "Missing release notes: docs/ClipFlow-$Version.md. Write version notes on main before tagging v$Version."
+}
 
 New-Item -ItemType File -Force -Path (Join-Path $docsDir ".nojekyll") | Out-Null
 
@@ -204,7 +202,7 @@ if (-not $SkipUpload) {
         gh release create $Tag $releaseExe `
             --repo $Repo `
             --title "ClipFlow $Version" `
-            --notes "Windows ClipFlow release with WinSparkle automatic update support."
+            --notes-file $releaseNotesPath
     }
 }
 
