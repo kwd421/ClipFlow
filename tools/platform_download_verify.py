@@ -73,6 +73,49 @@ def safe_int(value):
     return engine.safe_int(value)
 
 
+def verify_assets(url, candidate, mp4_path, favicon_urls=None):
+    stem = mp4_path.stem
+    out_dir = mp4_path.parent
+    referer = url or candidate.get("referer") or candidate.get("source")
+    thumbnail_url = str(candidate.get("thumbnail") or "").strip()
+    row = {
+        "thumbnail_ok": False,
+        "thumbnail_url": thumbnail_url,
+        "thumbnail_path": "",
+        "thumbnail_bytes": 0,
+        "favicon_ok": False,
+        "favicon_url": "",
+        "favicon_path": "",
+        "favicon_bytes": 0,
+        "asset_error": "",
+    }
+    errors = []
+    if not thumbnail_url.lower().startswith(("http://", "https://")):
+        errors.append("Candidate thumbnail URL is missing.")
+    else:
+        try:
+            saved = engine.save_thumbnail_asset(thumbnail_url, out_dir, stem, referer=referer)
+            row["thumbnail_ok"] = True
+            row["thumbnail_path"] = saved.get("path") or ""
+            row["thumbnail_bytes"] = safe_int(saved.get("bytes"))
+            row["thumbnail_url"] = saved.get("url") or thumbnail_url
+        except Exception as exc:
+            errors.append(f"thumbnail: {exc}")
+
+    try:
+        saved = engine.save_favicon_asset(url, out_dir, stem, candidate_urls=favicon_urls)
+        row["favicon_ok"] = True
+        row["favicon_path"] = saved.get("path") or ""
+        row["favicon_bytes"] = safe_int(saved.get("bytes"))
+        row["favicon_url"] = saved.get("url") or ""
+    except Exception as exc:
+        errors.append(f"favicon: {exc}")
+
+    if errors:
+        row["asset_error"] = "; ".join(errors)
+    return row
+
+
 def verify_platform(name, url, expected_path, out_root):
     started = time.time()
     row = {
@@ -83,9 +126,17 @@ def verify_platform(name, url, expected_path, out_root):
         "ok": False,
         "analyze_ok": False,
         "download_ok": False,
+        "thumbnail_ok": False,
+        "favicon_ok": False,
         "source": None,
         "title": None,
         "candidate_count": 0,
+        "thumbnail_url": "",
+        "thumbnail_path": "",
+        "thumbnail_bytes": 0,
+        "favicon_url": "",
+        "favicon_path": "",
+        "favicon_bytes": 0,
         "file_path": "",
         "file_bytes": 0,
         "error": "",
@@ -113,9 +164,24 @@ def verify_platform(name, url, expected_path, out_root):
         row["download_ok"] = True
         row["file_path"] = str(newest)
         row["file_bytes"] = newest.stat().st_size
-        row["ok"] = row["file_bytes"] > 50_000
-        if not row["ok"]:
-            row["error"] = f"Output file too small: {row['file_bytes']} bytes"
+        assets = verify_assets(url, candidate, newest, analysis.get("favicon_urls"))
+        row.update(assets)
+        row["ok"] = (
+            row["file_bytes"] > 50_000
+            and row["thumbnail_ok"]
+            and row["favicon_ok"]
+        )
+        if not row["ok"] and not row["error"]:
+            problems = []
+            if row["file_bytes"] <= 50_000:
+                problems.append(f"Output file too small: {row['file_bytes']} bytes")
+            if not row["thumbnail_ok"]:
+                problems.append("Thumbnail was not saved.")
+            if not row["favicon_ok"]:
+                problems.append("Favicon was not saved.")
+            if assets.get("asset_error"):
+                problems.append(assets["asset_error"])
+            row["error"] = "; ".join(problems)
     except Exception as exc:
         row["error"] = str(exc)
     row["elapsed_seconds"] = round(time.time() - started, 2)
@@ -132,7 +198,11 @@ def main():
     print(json.dumps({"passed": passed, "total": len(results), "summary": str(summary_path)}, ensure_ascii=False))
     for row in results:
         status = "OK" if row["ok"] else "FAIL"
-        print(f"{status} {row['platform']}: {row.get('file_bytes', 0)} bytes source={row.get('source')} err={row.get('error','')[:120]}")
+        print(
+            f"{status} {row['platform']}: mp4={row.get('file_bytes', 0)} "
+            f"thumb={row.get('thumbnail_bytes', 0)} favicon={row.get('favicon_bytes', 0)} "
+            f"source={row.get('source')} err={row.get('error','')[:120]}"
+        )
 
 
 if __name__ == "__main__":

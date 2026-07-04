@@ -1705,6 +1705,56 @@ for line in sys.stdin:
             )
         )
 
+    def test_thumbnail_from_browser_dom_keeps_full_image_url(self):
+        long_url = "https://cdn.example.test/" + ("a" * 120) + "/thumb.jpg"
+        html = f'<html><head><meta property="og:image" content="{long_url}"></head></html>'
+        self.assertEqual(engine.thumbnail_from_browser_dom(html), long_url)
+
+    def test_favicon_urls_from_html_discovers_link_icons(self):
+        html = """
+        <html><head>
+          <link rel="shortcut icon" href="/static/favicon.ico">
+          <link rel="apple-touch-icon" href="https://cdn.example.test/icon.png">
+        </head></html>
+        """
+        self.assertEqual(
+            engine.favicon_urls_from_html(html, "https://media.example.test/watch/1"),
+            [
+                "https://media.example.test/static/favicon.ico",
+                "https://cdn.example.test/icon.png",
+            ],
+        )
+
+    def test_save_thumbnail_asset_writes_image_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(engine, "fetch_binary_url", return_value=(b"x" * 1200, "image/jpeg")):
+                saved = engine.save_thumbnail_asset(
+                    "https://cdn.example.test/thumb.jpg",
+                    Path(tmp),
+                    "video-title",
+                    referer="https://media.example.test/watch/1",
+                )
+            path = Path(saved["path"])
+            self.assertTrue(path.exists())
+            self.assertEqual(path.stat().st_size, 1200)
+            self.assertIn("video-title.thumb", path.name)
+
+    def test_save_favicon_asset_tries_candidates_until_one_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                engine,
+                "download_image_asset",
+                side_effect=[RuntimeError("404"), {"ok": True, "path": str(Path(tmp) / "video-title.favicon.ico"), "bytes": 256, "url": "https://media.example.test/favicon.ico", "content_type": "image/x-icon"}],
+            ) as download_image:
+                saved = engine.save_favicon_asset(
+                    "https://media.example.test/watch/1",
+                    Path(tmp),
+                    "video-title",
+                    dom_html='<link rel="icon" href="/missing.ico">',
+                )
+            self.assertEqual(download_image.call_count, 2)
+            self.assertEqual(saved["bytes"], 256)
+
     def test_is_browser_remote_media_api_url_detects_site_media_endpoints(self):
         self.assertTrue(engine.is_browser_remote_media_api_url("https://www.redtube.com/media/mp4?s=abc"))
         self.assertTrue(engine.is_browser_remote_media_api_url("https://www.pornhub.com/video/get_media?s=abc"))

@@ -1035,6 +1035,202 @@ def thumbnail_from_info(info):
     return str(best.get("url") or "")
 
 
+LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+HTML_ATTR_RE = re.compile(r"""([:\w-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+)""", re.IGNORECASE)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".ico", ".gif", ".svg"}
+
+
+def _html_tag_attributes(tag):
+    attributes = {}
+    for key, raw_value in HTML_ATTR_RE.findall(str(tag or "")):
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+            value = value[1:-1]
+        attributes[key.lower()] = html_lib.unescape(value)
+    return attributes
+
+
+def favicon_urls_from_html(html_text, page_url):
+    urls = []
+    seen = set()
+    for tag in LINK_TAG_RE.findall(str(html_text or "")):
+        attrs = _html_tag_attributes(tag)
+        rel = attrs.get("rel", "").lower()
+        href = attrs.get("href", "").strip()
+        if "icon" not in rel or not href:
+            continue
+        icon_url = urllib.parse.urljoin(page_url, href)
+        if icon_url and icon_url not in seen:
+            seen.add(icon_url)
+            urls.append(icon_url)
+    return urls
+
+
+def default_favicon_urls(url):
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+    if not parsed.netloc:
+        return []
+    origin = f"{scheme}://{parsed.netloc}"
+    return [
+        f"{origin}/favicon.ico",
+        f"{origin}/favicon.png",
+        f"{origin}/apple-touch-icon.png",
+    ]
+
+
+def platform_favicon_urls(page_url):
+    host = urllib.parse.urlsplit(str(page_url or "")).netloc.lower()
+    urls = []
+    if "pornhub" in host:
+        urls.append("https://ei.phncdn.com/www-static/favicon.ico")
+    if "xvideos" in host:
+        urls.extend(
+            [
+                "https://assets-cdn77.xvideos-cdn.com/v3/img/skins/default/logo/xv.white.32.png",
+                "https://assets-cdn77.xvideos-cdn.com/v3/img/skins/default/logo/xv.white.16.png",
+            ]
+        )
+    if "redtube" in host:
+        urls.append("https://ei.rdtcdn.com/www-static/favicon.ico")
+    if "xhamster" in host:
+        urls.append("https://static-ah.xhcdn.com/xh-desktop/images/favicon/favicon-192x192.png")
+    return urls
+
+
+def favicon_candidate_urls(page_url, dom_html=None):
+    urls = []
+    seen = set()
+    for candidate in [
+        *platform_favicon_urls(page_url),
+        *favicon_urls_from_html(dom_html or "", page_url),
+        *default_favicon_urls(page_url),
+    ]:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            urls.append(candidate)
+    return urls
+
+
+def image_extension_from_response(content_type, url):
+    mime = str(content_type or "").split(";", 1)[0].strip().lower()
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/x-icon": ".ico",
+        "image/vnd.microsoft.icon": ".ico",
+        "image/svg+xml": ".svg",
+    }
+    if mime in mapping:
+        return mapping[mime]
+    path = urllib.parse.urlsplit(str(url or "")).path.lower()
+    for ext in IMAGE_EXTENSIONS:
+        if path.endswith(ext):
+            return ext
+    return ".img"
+
+
+def fetch_binary_url(url, referer=None, timeout=20, headers=None):
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": ACCEPT_LANGUAGE,
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        **(headers or {}),
+    }
+    if referer:
+        request_headers["Referer"] = referer
+    request = urllib.request.Request(str(url or ""), headers=request_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content_type = response.headers.get("Content-Type") or ""
+            return response.read(), content_type
+    except Exception as urllib_exc:
+        try:
+            apply_curl_cffi_system_dns_patch()
+            from curl_cffi import requests as curl_requests
+
+            response = curl_requests.get(
+                str(url or ""),
+                headers=request_headers,
+                impersonate="chrome",
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response.content, response.headers.get("Content-Type") or ""
+        except Exception:
+            raise urllib_exc
+
+
+def download_image_asset(url, output_path, referer=None, min_bytes=500, timeout=20):
+    data, content_type = fetch_binary_url(url, referer=referer, timeout=timeout)
+    if len(data) < min_bytes:
+        raise RuntimeError(f"Image too small: {len(data)} bytes")
+    output_path = Path(output_path).expanduser()
+    ext = image_extension_from_response(content_type, url)
+    if output_path.suffix.lower() not in IMAGE_EXTENSIONS:
+        output_path = Path(f"{output_path}{ext}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(data)
+    return {
+        "ok": True,
+        "path": str(output_path),
+        "bytes": len(data),
+        "url": str(url),
+        "content_type": content_type,
+    }
+
+
+def save_thumbnail_asset(thumbnail_url, output_dir, stem, referer=None, min_bytes=1000):
+    thumbnail_url = str(thumbnail_url or "").strip()
+    if not thumbnail_url.lower().startswith(("http://", "https://")):
+        raise RuntimeError("Thumbnail URL is missing or invalid.")
+    output_dir = Path(output_dir).expanduser()
+    return download_image_asset(
+        thumbnail_url,
+        output_dir / f"{stem}.thumb",
+        referer=referer,
+        min_bytes=min_bytes,
+    )
+
+
+def save_favicon_asset(page_url, output_dir, stem, dom_html=None, candidate_urls=None, min_bytes=100, timeout=20):
+    page_url = str(page_url or "").strip()
+    if not page_url.lower().startswith(("http://", "https://")):
+        raise RuntimeError("Page URL is missing or invalid.")
+    output_dir = Path(output_dir).expanduser()
+    if candidate_urls:
+        urls = []
+        seen = set()
+        for candidate_url in candidate_urls:
+            if candidate_url and candidate_url not in seen:
+                seen.add(candidate_url)
+                urls.append(candidate_url)
+    else:
+        html = dom_html
+        if html is None:
+            try:
+                html = fetch_dom_html_with_urllib(page_url, timeout=min(20, timeout))
+            except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+                html = ""
+        urls = favicon_candidate_urls(page_url, html)
+    errors = []
+    for candidate_url in urls:
+        try:
+            return download_image_asset(
+                candidate_url,
+                output_dir / f"{stem}.favicon",
+                referer=page_url,
+                min_bytes=min_bytes,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            errors.append(f"{candidate_url}: {exc}")
+    raise RuntimeError(errors[-1] if errors else "No favicon candidate could be downloaded.")
+
+
 def parse_content_range(value):
     match = re.search(r"/(\d+)\s*$", str(value or ""))
     return safe_int(match.group(1)) if match else 0
@@ -2318,12 +2514,15 @@ def script_map_media_from_html(dom, base_url):
     return items
 
 
-def first_html_match(dom, patterns):
+def first_html_match(dom, patterns, compact_limit=90):
     text = str(dom or "")
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
         if match:
-            return compact_text(html_lib.unescape(match.group(1)))
+            value = html_lib.unescape(match.group(1)).strip()
+            if compact_limit is None:
+                return value
+            return compact_text(value, limit=compact_limit)
     return ""
 
 
@@ -2391,6 +2590,7 @@ def thumbnail_from_browser_dom(dom):
             r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
             r'setThumbUrl(?:169)?\(\s*["\']([^"\']+)["\']\s*\)',
         ],
+        compact_limit=None,
     )
 
 
@@ -2858,6 +3058,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         "webpage_url": url,
         "title": title,
         "source": "browser-dom",
+        "favicon_urls": favicon_candidate_urls(url, dom),
         "candidates": candidates,
         "warnings": [],
     }
