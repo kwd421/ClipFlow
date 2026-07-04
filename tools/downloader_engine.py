@@ -49,8 +49,8 @@ BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
 BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
-BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 160
-BROWSER_DOM_HLS_PARALLEL_WORKERS = 6
+BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
+BROWSER_DOM_HLS_PARALLEL_WORKERS = 8
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -3958,14 +3958,83 @@ def fetch_hls_playlist_text(url, headers, timeout=30):
 
 
 def hls_playlist_is_encrypted(playlist_text):
+    return hls_playlist_parallel_encryption(playlist_text) not in {None, "none"}
+
+
+def hls_playlist_parallel_encryption(playlist_text):
+    methods = set()
     for line in str(playlist_text or "").splitlines():
         upper = line.upper()
         if not upper.startswith("#EXT-X-KEY"):
             continue
-        if "METHOD=NONE" in upper:
+        method_match = re.search(r"METHOD=([^,]+)", upper)
+        if not method_match:
             continue
-        return True
-    return False
+        methods.add(method_match.group(1).strip())
+    if any(method in {"SAMPLE-AES", "SAMPLE-AES-CTR", "SAMPLE-AES-CENC"} for method in methods):
+        return None
+    if "AES-128" in methods:
+        return "aes-128"
+    if methods and methods != {"NONE"}:
+        return None
+    return "none"
+
+
+def parse_hls_media_playlist(playlist_text, playlist_url):
+    media_sequence = 0
+    key_url = ""
+    key_iv = None
+    segment_urls = []
+    for line in str(playlist_text or "").splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            media_sequence = safe_int(line.split(":", 1)[1])
+        elif line.startswith("#EXT-X-KEY:"):
+            uri_match = re.search(r'URI="([^"]+)"', line)
+            if uri_match:
+                key_url = urllib.parse.urljoin(playlist_url, uri_match.group(1))
+            iv_match = re.search(r"IV=0x([0-9a-fA-F]+)", line)
+            if iv_match:
+                key_iv = bytes.fromhex(iv_match.group(1))
+        elif line and not line.startswith("#"):
+            segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+    return {
+        "media_sequence": media_sequence,
+        "key_url": key_url,
+        "key_iv": key_iv,
+        "segment_urls": segment_urls,
+    }
+
+
+def hls_aes128_iv(media_sequence, segment_index, fixed_iv=None):
+    if fixed_iv is not None:
+        return fixed_iv
+    sequence = int(media_sequence) + int(segment_index)
+    return sequence.to_bytes(16, byteorder="big")
+
+
+def fetch_hls_aes128_key(key_url, headers):
+    request = urllib.request.Request(str(key_url or ""), headers=dict(headers or {}))
+    with urllib.request.urlopen(request, timeout=30) as response:
+        key = response.read()
+    if len(key) != 16:
+        raise RuntimeError(f"HLS AES-128 key must be 16 bytes, got {len(key)}")
+    return key
+
+
+def decrypt_hls_aes128_segment(encrypted, key, iv):
+    try:
+        from Cryptodome.Cipher import AES
+    except ImportError as exc:
+        raise RuntimeError("PyCryptodome is required for encrypted HLS downloads.") from exc
+    if len(encrypted) % 16:
+        raise RuntimeError("Encrypted HLS segment size is not a multiple of 16.")
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(encrypted)
+    pad = decrypted[-1] if decrypted else 0
+    if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
+        decrypted = decrypted[:-pad]
+    return decrypted
 
 
 def resolve_hls_media_playlist(url, headers, max_depth=4):
@@ -4011,7 +4080,7 @@ def iter_hls_segment_urls(playlist_text, playlist_url):
 def browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
     if ".m3u8" not in str((candidate or {}).get("url") or "").lower():
         return False
-    if hls_playlist_is_encrypted(playlist_text):
+    if hls_playlist_parallel_encryption(playlist_text) is None:
         return False
     if not segment_urls:
         return False
@@ -4078,9 +4147,16 @@ def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None,
     headers = direct_media_request_headers(candidate)
     duration = safe_int((candidate or {}).get("duration"))
     playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
-    segment_urls = iter_hls_segment_urls(playlist_text, playlist_url)
+    playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+    segment_urls = playlist_meta["segment_urls"]
     if not browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
         raise RuntimeError("HLS stream is not eligible for parallel segment download.")
+    encryption = hls_playlist_parallel_encryption(playlist_text)
+    aes_key = None
+    if encryption == "aes-128":
+        if not playlist_meta["key_url"]:
+            raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
+        aes_key = fetch_hls_aes128_key(playlist_meta["key_url"], headers)
     emit_event(on_event, "status", message=f"Downloading {len(segment_urls)} HLS segments in parallel")
     started_at = time.monotonic()
     last_emit_at = started_at
@@ -4092,6 +4168,9 @@ def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None,
         request = urllib.request.Request(segment_url, headers=dict(headers))
         with urllib.request.urlopen(request, timeout=45) as response:
             payload = response.read()
+        if aes_key is not None:
+            iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
+            payload = decrypt_hls_aes128_segment(payload, aes_key, iv)
         return index, payload
 
     segment_paths = [None] * len(segment_urls)

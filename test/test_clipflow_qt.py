@@ -1627,7 +1627,23 @@ print(thumbnail._preview_label.width(), thumbnail._preview_label.height())
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "384 256"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "324 216"])
+
+    def test_clipflow_qt_thumbnail_preview_portrait_uses_rotated_landscape_frame(self):
+        script = r'''
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder
+
+app = QApplication([])
+thumbnail = ThumbnailPlaceholder()
+thumbnail._set_pixmap(QPixmap(268, 394))
+print(thumbnail._preview_size().width(), thumbnail._preview_size().height())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["216 317"])
 
     def test_clipflow_qt_thumbnail_preview_moves_from_mouse_event_global_position(self):
         script = r'''

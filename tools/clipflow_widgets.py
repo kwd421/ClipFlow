@@ -1165,11 +1165,7 @@ class ThumbnailPlaceholder(QFrame):
     def _scaled_thumbnail_pixmap(self):
         target_size = self.size()
         if self._scaled_pixmap.isNull() or self._scaled_target_size != target_size:
-            ratio = float(self.devicePixelRatioF() or 1.0)
-            render_size = QSize(max(1, int(target_size.width() * ratio)), max(1, int(target_size.height() * ratio)))
-            scaled = self._pixmap.scaled(render_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            scaled.setDevicePixelRatio(ratio)
-            self._scaled_pixmap = scaled
+            self._scaled_pixmap = self._pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self._scaled_target_size = QSize(target_size.width(), target_size.height())
         return self._scaled_pixmap
 
@@ -1202,12 +1198,16 @@ class ThumbnailPlaceholder(QFrame):
         if self._pixmap.isNull() or self._pixmap.height() <= 0:
             return QSize(base_w, base_h)
         aspect = self._pixmap.width() / self._pixmap.height()
-        if aspect < 0.9:
-            height = min(560, max(base_h, int(base_w / max(aspect, 0.2))))
+        if aspect < 1.0:
+            frame_w, frame_h = base_h, base_w
+        else:
+            frame_w, frame_h = base_w, base_h
+        if aspect >= frame_w / max(frame_h, 1):
+            width = frame_w
+            height = max(1, int(width / aspect))
+        else:
+            height = frame_h
             width = max(1, int(height * aspect))
-            return QSize(width, height)
-        width = min(560, max(base_w, int(base_h * aspect)))
-        height = max(1, int(width / aspect))
         return QSize(width, height)
 
     def paintEvent(self, event):

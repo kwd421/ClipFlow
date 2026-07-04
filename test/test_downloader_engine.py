@@ -1949,7 +1949,12 @@ for line in sys.stdin:
         candidate = {"url": "https://cdn.example.test/index.m3u8", "duration": 30, "sort_bytes": 800_000}
         self.assertTrue(engine.browser_dom_hls_prefers_parallel_download(candidate, playlist, segments))
         encrypted = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n#EXTINF:1,\nseg.ts\n"
-        self.assertFalse(engine.browser_dom_hls_prefers_parallel_download(candidate, encrypted, segments))
+        self.assertTrue(engine.browser_dom_hls_prefers_parallel_download(candidate, encrypted, segments))
+        sample_aes = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:1,\nseg.ts\n"
+        self.assertFalse(engine.browser_dom_hls_prefers_parallel_download(candidate, sample_aes, segments))
+
+    def test_hls_aes128_iv_uses_media_sequence_when_iv_is_missing(self):
+        self.assertEqual(engine.hls_aes128_iv(5, 2, None), (7).to_bytes(16, byteorder="big"))
 
     def test_is_browser_dom_manifest_candidate_detects_hls_entries(self):
         self.assertTrue(
