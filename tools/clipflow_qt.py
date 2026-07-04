@@ -1357,12 +1357,22 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _analysis_failed(self, message):
         message = engine.strip_ansi(message)
         self._analysis_auto_download = False
+        changed = False
         for row in self.rows:
-            if row.get("kind") == "playlist" and row.get("analysis_loading") and not row.get("child_loading"):
-                row["analysis_loading"] = False
-                row["status"] = ERROR_STATUS
-                row["status_detail"] = message
-                row["progress_text"] = message
+            if not self._is_analysis_loading_row(row):
+                continue
+            row["analysis_loading"] = False
+            row["child_loading"] = False
+            if row.get("id") == "__analyzing__":
+                row["id"] = f"error-{self._next_row_sequence()}"
+            row["status"] = ERROR_STATUS
+            row["status_detail"] = message
+            row["progress"] = 0
+            row["progress_text"] = message
+            row.setdefault("messages", []).append(message)
+            changed = True
+        if changed:
+            self._render_rows()
         self._set_status(f"{engine.classify_error(message)}: {message}")
         self._maybe_prompt_macos_cookie_permission(message)
 

@@ -210,6 +210,41 @@ def ffmpeg_path():
     return _FFMPEG_PATH
 
 
+def ffprobe_path():
+    ffmpeg = ffmpeg_path()
+    if ffmpeg:
+        probe = Path(ffmpeg).with_name("ffprobe" + (".exe" if os.name == "nt" else ""))
+        if probe.exists():
+            return str(probe)
+    return shutil.which("ffprobe")
+
+
+def probe_video_resolution(path):
+    probe = ffprobe_path()
+    if not probe:
+        return 0, 0
+    command = [
+        probe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return 0, 0
+    parts = [part.strip() for part in str(completed.stdout or "").split(",") if part.strip()]
+    if len(parts) < 2:
+        return 0, 0
+    return safe_int(parts[0]), safe_int(parts[1])
+
+
 def ffmpeg_path_for_yt_dlp(ffmpeg_exe=None, cache_dir=None):
     value = ffmpeg_exe or ffmpeg_path()
     if not value:

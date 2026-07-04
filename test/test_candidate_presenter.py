@@ -68,6 +68,33 @@ class CandidatePresenterTests(unittest.TestCase):
         self.assertIn("WAV", label)
         self.assertNotIn("p", label.lower())
 
+    def test_select_candidate_auto_prefers_sized_unknown_height_over_low_labeled_stream(self):
+        candidates = [
+            {
+                "id": "browser-240",
+                "output_ext": "mp4",
+                "height": 240,
+                "sort_bytes": 0,
+                "url": "https://cdn.example.test/240p.h264.mp4",
+                "is_manifest": False,
+            },
+            {
+                "id": "browser-html-video",
+                "output_ext": "mp4",
+                "height": 0,
+                "sort_bytes": 2_463_314,
+                "url": "https://cdn.example.test/preview.mp4",
+                "is_manifest": False,
+            },
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동"),
+        )
+
+        self.assertEqual(selected["id"], "browser-html-video")
+
     def test_select_candidate_auto_quality_and_frame_prefers_best_available(self):
         candidates = [
             {"id": "1080-30", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 100},

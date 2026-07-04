@@ -155,6 +155,25 @@ def _target_height(quality):
     return int(digits) if digits else 0
 
 
+def _effective_height_for_auto(candidate):
+    height = engine.safe_int(candidate.get("height"))
+    if height:
+        return height
+    url_height = engine.height_from_media_url(candidate.get("url") or "")
+    if url_height:
+        return url_height
+    size = engine.safe_int(candidate.get("sort_bytes"))
+    if size >= 50_000_000:
+        return 1080
+    if size >= 10_000_000:
+        return 720
+    if size >= 2_000_000:
+        return 480
+    if size >= 400_000:
+        return 360
+    return 0
+
+
 def _target_fps(frame_rate):
     text = str(frame_rate or "").strip().lower()
     if text in {"", "자동", "auto"}:
@@ -186,7 +205,7 @@ def _best_candidate(candidates, preferences):
         ]
 
     def score(candidate):
-        height = engine.safe_int(candidate.get("height"))
+        height = _effective_height_for_auto(candidate) if quality_auto else engine.safe_int(candidate.get("height"))
         fps = engine.safe_int(candidate.get("fps"))
         size = engine.safe_int(candidate.get("sort_bytes"))
         codec = _codec_name(candidate)
