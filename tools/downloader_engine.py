@@ -466,6 +466,55 @@ def browser_cookie_db_available(browser_key):
     return bool(browser_cookie_profile_dirs(browser_key))
 
 
+def macos_full_disk_access_hint(app_name="ClipFlow"):
+    name = str(app_name or "ClipFlow")
+    return (
+        f"‘전체 디스크 접근 열기’를 누르면 시스템 설정이 열리고 목록에 {name}이(가) 추가돼요. "
+        "스위치만 켜고 다시 시도하세요."
+    )
+
+
+def full_disk_access_provoke_paths(cookie_source=None):
+    if sys.platform != "darwin":
+        return []
+    home = Path.home()
+    paths = []
+    source_key = str(cookie_source or "chrome").strip().lower()
+    for profile_dir in browser_cookie_profile_dirs(source_key):
+        cookie_path = profile_dir / "Cookies"
+        if cookie_path.exists():
+            paths.append(str(cookie_path))
+    if source_key == "firefox":
+        for profile_dir in browser_cookie_profile_dirs("firefox"):
+            for name in ("cookies.sqlite", "cookies.sqlite-wal"):
+                cookie_path = profile_dir / name
+                if cookie_path.exists():
+                    paths.append(str(cookie_path))
+    if source_key == "safari":
+        cookie_path = home / "Library/Cookies/Cookies.binarycookies"
+        if cookie_path.exists():
+            paths.append(str(cookie_path))
+    for fallback in (
+        home / "Library/Application Support/Google/Chrome/Default/Cookies",
+        home / "Library/Cookies/Cookies.binarycookies",
+        home / "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+        home / "Library/Safari/Bookmarks.plist",
+    ):
+        text = str(fallback)
+        if fallback.exists() and text not in paths:
+            paths.append(text)
+    return paths
+
+
+def provoke_macos_full_disk_access_registration(cookie_source=None):
+    for path in full_disk_access_provoke_paths(cookie_source):
+        try:
+            with open(path, "rb") as handle:
+                handle.read(1)
+        except Exception:
+            continue
+
+
 def browser_cookie_sources_for_retry(preferred=None):
     order = []
     preferred_key = str(preferred or "").strip().lower()
@@ -1381,6 +1430,58 @@ def enrich_missing_sizes(candidates, size_probe=http_content_length, limit=SIZE_
         candidate["filesize_approx"] = size
         candidate["sort_bytes"] = size
         candidate["size_source"] = "http"
+    return candidates
+
+
+DURATION_PROBE_LIMIT = 3
+
+
+def duration_from_hls_playlist_text(playlist_text):
+    total = 0.0
+    for line in str(playlist_text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("#EXTINF:"):
+            continue
+        value = line.split(":", 1)[1].split(",", 1)[0].strip()
+        try:
+            total += float(value)
+        except ValueError:
+            continue
+    return safe_int(total)
+
+
+def probe_manifest_duration(url, candidate=None):
+    media_url = str(url or "").strip()
+    if ".m3u8" not in media_url.lower():
+        return 0
+    headers = direct_media_request_headers(candidate or {})
+    try:
+        resolved_url, playlist_text = resolve_hls_media_playlist(media_url, headers)
+        duration = duration_from_hls_playlist_text(playlist_text)
+        if duration:
+            return duration
+    except Exception:
+        pass
+    return probe_stream_duration(media_url, candidate)
+
+
+def enrich_missing_durations(candidates, duration_probe=None, limit=DURATION_PROBE_LIMIT):
+    probe = duration_probe or probe_manifest_duration
+    checked = 0
+    for candidate in candidates:
+        if safe_int(candidate.get("duration")):
+            continue
+        media_url = str(candidate.get("url") or "")
+        if not media_url:
+            continue
+        if not (candidate.get("is_manifest") or ".m3u8" in media_url.lower()):
+            continue
+        if checked >= limit:
+            break
+        checked += 1
+        duration = safe_int(probe(media_url, candidate))
+        if duration:
+            candidate["duration"] = duration
     return candidates
 
 
@@ -3186,7 +3287,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "note": f"browser {format_label} {quality}".strip(),
             }
         )
-    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    candidates = sort_candidates(enrich_missing_sizes(enrich_missing_durations(candidates)))
     if not candidates:
         raise RuntimeError("Browser DOM fallback found no downloadable media entries.")
     return {

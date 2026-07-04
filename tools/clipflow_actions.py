@@ -23,11 +23,11 @@ from PySide6.QtWidgets import (
 try:
     from tools import downloader_engine as engine
     from tools.clipflow_dialogs import DeleteConfirmDialog
-    from tools.clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
+    from tools.clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS, WAITING_STATUS
 except ImportError:
     import downloader_engine as engine
     from clipflow_dialogs import DeleteConfirmDialog
-    from clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
+    from clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS, WAITING_STATUS
 
 
 def local_file_url(path):

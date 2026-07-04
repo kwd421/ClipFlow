@@ -27,7 +27,7 @@ try:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from tools.clipflow_widgets import CleanCheckBox, SourceLinkButton, Spinner, ThumbnailPlaceholder
+    from tools.clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
 except ImportError:
     import downloader_engine as engine
     import clipflow_theme as theme
@@ -40,7 +40,7 @@ except ImportError:
         SIZE_WIDTH,
         THUMBNAIL_WIDTH,
     )
-    from clipflow_widgets import CleanCheckBox, SourceLinkButton, Spinner, ThumbnailPlaceholder
+    from clipflow_widgets import CleanCheckBox, MarqueeLabel, SourceLinkButton, Spinner, ThumbnailPlaceholder
 
 
 ANALYZING_STATUS = "분석 중"
@@ -259,11 +259,17 @@ class DownloadRowWidget(QFrame):
         self.source_link_button = SourceLinkButton()
         self.source_link_button.clicked.connect(self._open_source)
         source_line.addWidget(self.source_link_button)
-        self.row_quality_label = QLabel()
+        self.source_status_slot = QWidget()
+        self.source_status_slot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        source_status_layout = QHBoxLayout(self.source_status_slot)
+        source_status_layout.setContentsMargins(0, 0, 0, 0)
+        source_status_layout.setSpacing(0)
+        self.row_quality_label = MarqueeLabel()
         self.row_quality_label.setObjectName("MetaText")
+        self.row_quality_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.row_quality_label.hide()
-        source_line.addWidget(self.row_quality_label, 0, Qt.AlignVCenter)
-        source_line.addStretch(1)
+        source_status_layout.addWidget(self.row_quality_label, 1)
+        source_line.addWidget(self.source_status_slot, 1)
 
         self.meta_widget = QWidget()
         self.meta_widget.setFixedHeight(16 + max(0, ROW_META_INSET - ROW_INSET))
@@ -723,6 +729,17 @@ class DownloadRowWidget(QFrame):
             phase = piece_end
         return path
 
+    def _show_row_quality_text(self, text, tooltip=""):
+        text = str(text or "")
+        self.row_quality_label.setText(text)
+        self.row_quality_label.setToolTip(str(tooltip or text))
+        if text:
+            self.row_quality_label.show()
+            self.row_quality_label.start_marquee_if_needed()
+        else:
+            self.row_quality_label.stop_marquee()
+            self.row_quality_label.hide()
+
     def set_status(self, status, detail=""):
         self.row["status"] = status
         self.row["status_detail"] = detail
@@ -740,10 +757,9 @@ class DownloadRowWidget(QFrame):
         self._sync_ring_timer()
         self.spinner.stop()
         if analyzing or starting or (status == COMPLETED_STATUS and detail):
-            self.row_quality_label.setText(detail or status)
-            self.row_quality_label.show()
+            self._show_row_quality_text(detail or status)
         else:
-            self.row_quality_label.hide()
+            self._show_row_quality_text("")
         self.info_widget.show()
         self.size_widget.show()
         self._refresh_actions()
@@ -775,13 +791,11 @@ class DownloadRowWidget(QFrame):
         self.setProperty("progressActive", active_value)
         self.setProperty("progressValue", progress_value)
         if (active or paused) and display_text:
-            self.row_quality_label.setText(display_text)
-            self.row_quality_label.show()
+            self._show_row_quality_text(display_text)
         elif status in {ERROR_STATUS, COMPLETED_STATUS} and display_text:
-            self.row_quality_label.setText(display_text)
-            self.row_quality_label.show()
+            self._show_row_quality_text(display_text)
         elif status not in ACTIVE_STATUSES:
-            self.row_quality_label.hide()
+            self._show_row_quality_text("")
         self.progress_text.hide()
         self.progress_text.setText("")
         self.progress_text.setStyleSheet(

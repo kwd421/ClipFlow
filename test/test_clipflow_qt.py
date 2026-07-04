@@ -1629,6 +1629,27 @@ print(thumbnail._preview_label.width(), thumbnail._preview_label.height())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "324 216"])
 
+    def test_clipflow_qt_thumbnail_inline_draw_centers_with_device_pixel_ratio(self):
+        script = r'''
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import ThumbnailPlaceholder, _pixmap_logical_size
+
+app = QApplication([])
+thumbnail = ThumbnailPlaceholder()
+thumbnail._set_pixmap(QPixmap(80, 120))
+scaled = thumbnail._scaled_thumbnail_pixmap()
+logical = _pixmap_logical_size(scaled)
+x = round((thumbnail.width() - logical.width()) / 2)
+y = round((thumbnail.height() - logical.height()) / 2)
+print(x, y)
+print(round(logical.width()), round(logical.height()))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["30 0", "36 54"])
+
     def test_clipflow_qt_thumbnail_preview_portrait_uses_rotated_landscape_frame(self):
         script = r'''
 from PySide6.QtGui import QPixmap
@@ -2567,6 +2588,64 @@ app.exec()
         self.assertEqual(
             result.stdout.splitlines(),
             ["https://media.test/watch/paste", "[]", "0", "True"],
+        )
+
+    def test_clipflow_qt_close_event_detaches_running_analysis_thread(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QThread
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+thread = QThread()
+thread.start()
+window.analysis_thread = thread
+window.close()
+print(window.analysis_thread is None)
+print(thread.parent() is None)
+app.quit()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["True", "True"],
+        )
+
+    def test_clipflow_qt_error_row_reanalyzes_when_same_url_submitted_again(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, ERROR_STATUS
+
+url = "https://www.instagram.com/stories/user/123/"
+calls = []
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.rows = [window._single_analysis_loading_row(url)]
+window._analysis_failed("ERROR: could not find chrome cookies database")
+print(window.rows[0]["status"])
+print(window.rows[0]["status_detail"])
+
+window._start_analysis = lambda auto_download=False: calls.append(["analyze", auto_download])
+window.url_input.setText(url)
+window._handle_primary_action()
+print(calls)
+print(sum(1 for row in window.rows if row.get("status") == ERROR_STATUS))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "오류",
+                "브라우저 쿠키를 읽을 수 없어요. 설정 → 전체 디스크 접근에서 ClipFlow 허용",
+                "[['analyze', True]]",
+                "1",
+            ],
         )
 
     def test_clipflow_qt_download_button_analyzes_then_downloads_single_video(self):

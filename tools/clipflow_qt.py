@@ -233,7 +233,65 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     def closeEvent(self, event):
         self.settings.setValue(WINDOW_SIZE_SETTING, self.size())
+        self._shutdown_on_close()
         super().closeEvent(event)
+
+    def _detach_running_thread(self, thread, worker=None, wait_ms=1500):
+        if thread is None:
+            return
+        thread.setParent(None)
+        if worker is not None:
+            worker.setParent(None)
+        if thread.isRunning():
+            thread.finished.connect(thread.deleteLater)
+            if worker is not None:
+                thread.finished.connect(worker.deleteLater)
+            thread.quit()
+            try:
+                thread.wait(wait_ms)
+            except TypeError:
+                thread.wait()
+            if thread.isRunning():
+                terminate = getattr(thread, "terminate", None)
+                if callable(terminate):
+                    terminate()
+                    try:
+                        thread.wait(1000)
+                    except TypeError:
+                        thread.wait()
+        else:
+            thread.deleteLater()
+            if worker is not None:
+                worker.deleteLater()
+
+    def _shutdown_on_close(self):
+        self._queued_analysis_downloads.clear()
+        self._analysis_auto_download = False
+        self._analysis_discard_result = True
+        thread = self.analysis_thread
+        worker = self.analysis_worker
+        self.analysis_thread = None
+        self.analysis_worker = None
+        self._detach_running_thread(thread, worker)
+        for item in list(getattr(self, "active_downloads", []) or []):
+            row = item.get("row")
+            row_id = str((row or {}).get("id") or "")
+            if row_id:
+                try:
+                    engine.cancel_download_request(row_id)
+                except Exception:
+                    pass
+            self._detach_running_thread(item.get("thread"), item.get("worker"))
+        self.active_downloads = []
+        self.queued_download_rows = []
+        try:
+            engine.analysis_process_pool().close_all()
+        except Exception:
+            pass
+        try:
+            engine.download_process_pool().close_all()
+        except Exception:
+            pass
 
     def _build_ui(self):
         root = QWidget()
@@ -681,6 +739,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         current_url = self.url_input.text().strip()
         if current_url:
             row_index = self._first_visible_analyzed_row_index_for_url(current_url)
+            if row_index >= 0 and self._row_should_reanalyze_on_submit(self.rows[row_index]):
+                if self.analysis_thread and self.analysis_thread.isRunning():
+                    self._queue_analysis_download(current_url)
+                else:
+                    self._start_analysis(auto_download=True)
+                return
             if row_index < 0:
                 if self.analysis_thread and self.analysis_thread.isRunning():
                     self._queue_analysis_download(current_url)
@@ -1185,22 +1249,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._analysis_url = ""
         self._playlist_event_parent_id = ""
         thread = self.analysis_thread
-        if thread and thread.isRunning():
-            thread.quit()
-            try:
-                thread.wait(1500)
-            except TypeError:
-                thread.wait()
-            if thread.isRunning():
-                terminate = getattr(thread, "terminate", None)
-                if callable(terminate):
-                    terminate()
-                    try:
-                        thread.wait(1000)
-                    except TypeError:
-                        thread.wait()
+        worker = self.analysis_worker
         self.analysis_thread = None
         self.analysis_worker = None
+        self._detach_running_thread(thread, worker)
         self.primary_button.set_loading(False)
 
     def _start_analysis(self, auto_download=False):
@@ -1221,6 +1273,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._analysis_url = url
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
+        self._cookie_permission_prompt_shown = False
         self._refresh_primary_action()
         self.primary_button.set_loading(False)
         self._set_status(ANALYZING_STATUS)
@@ -1230,6 +1283,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             except Exception as exc:
                 self._append_event_message(f"Download worker warmup failed: {engine.strip_ansi(exc)}")
 
+        self._drop_stale_error_rows_for_url(url)
         loading_rows = self._analysis_loading_rows(url)
         self.rows = loading_rows + [row for row in self.rows if not self._is_analysis_loading_row(row)]
         self._render_rows()
@@ -1388,6 +1442,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._analysis_discard_result = False
             return
         message = engine.strip_ansi(message)
+        detail = self._analysis_error_detail(message)
         self._analysis_auto_download = False
         changed = False
         for row in self.rows:
@@ -1398,9 +1453,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if row.get("id") == "__analyzing__":
                 row["id"] = f"error-{self._next_row_sequence()}"
             row["status"] = ERROR_STATUS
-            row["status_detail"] = message
+            row["status_detail"] = detail
             row["progress"] = 0
-            row["progress_text"] = message
+            row["progress_text"] = detail
             row.setdefault("messages", []).append(message)
             changed = True
         if changed:
@@ -1442,9 +1497,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         title.setWordWrap(True)
         detail = QLabel(
             "비공개·로그인 전용 영상이나 재생목록은 브라우저의 로그인 쿠키가 필요해요.\n"
-            "macOS에서는 ClipFlow가 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 있어야 합니다.\n\n"
-            "‘전체 디스크 접근 열기’를 누르면 이 앱(터미널에서 실행했다면 ‘터미널’)이 목록에 자동으로 추가돼요. "
-            "옆의 스위치만 켜고 다시 다운로드를 시도하세요."
+            "macOS에서는 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 있어야 합니다.\n\n"
+            + engine.macos_full_disk_access_hint(APP_NAME)
         )
         detail.setObjectName("MetaText")
         detail.setWordWrap(True)
@@ -1468,29 +1522,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         dialog.exec()
 
     def _open_full_disk_access_settings(self):
-        # Touch Full-Disk-Access-protected paths first so macOS registers the
-        # responsible app (this app, or the launching Terminal) in the Full Disk
-        # Access list automatically — the user then only flips the switch.
-        self._provoke_full_disk_access_registration()
-        QDesktopServices.openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
-
-    def _provoke_full_disk_access_registration(self):
-        if sys.platform != "darwin":
-            return
-        home = os.path.expanduser("~")
-        protected_paths = [
-            os.path.join(home, "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"),
-            os.path.join(home, "Library/Cookies/Cookies.binarycookies"),
-            os.path.join(home, "Library/Safari/Bookmarks.plist"),
-        ]
-        for path in protected_paths:
-            try:
-                with open(path, "rb") as handle:
-                    handle.read(1)
-            except Exception:
-                # A PermissionError here is exactly what makes macOS list this
-                # app under Full Disk Access; other errors are harmless to ignore.
-                continue
+        # Touch the selected browser cookie DB first so macOS registers ClipFlow
+        # in the Full Disk Access list — the user then only flips the switch.
+        source = cookie_source_from_display(self.cookie_combo.currentText())
+        engine.provoke_macos_full_disk_access_registration(source)
+        for url in (
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+        ):
+            if QDesktopServices.openUrl(QUrl(url)):
+                break
 
     @Slot()
     def _analysis_thread_finished(self):
@@ -1791,6 +1832,58 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         has_url = bool(self.url_input.text().strip())
         self.primary_button.setEnabled(has_target or has_url)
 
+    def _row_urls_for_match(self, row):
+        return {
+            str(row.get("analysis_source_url") or "").strip(),
+            str(row.get("source_url") or "").strip(),
+            str(row.get("input_url") or "").strip(),
+        }
+
+    def _row_matches_url(self, row, url):
+        url = str(url or "").strip()
+        if not url:
+            return False
+        playlist_key = self._playlist_key(url)
+        if playlist_key and row.get("kind") == "playlist" and self._playlist_key_for_row(row) == playlist_key:
+            return True
+        return url in self._row_urls_for_match(row)
+
+    def _row_should_reanalyze_on_submit(self, row):
+        if not row or self._is_analysis_loading_row(row):
+            return False
+        if row.get("status") == ERROR_STATUS:
+            return True
+        candidate = row.get("candidate") or {}
+        if str(candidate.get("id") or "") == "loading" and not (row.get("qualities") or []):
+            return True
+        return False
+
+    def _drop_stale_error_rows_for_url(self, url):
+        url = str(url or "").strip()
+        if not url:
+            return
+        self.rows = [
+            row
+            for row in self.rows
+            if not (
+                row.get("status") == ERROR_STATUS
+                and not self._is_analysis_loading_row(row)
+                and self._row_matches_url(row, url)
+            )
+        ]
+
+    def _analysis_error_detail(self, message):
+        message = str(message or "")
+        lower = message.lower()
+        if sys.platform == "darwin" and "cookie" in lower and any(
+            token in lower
+            for token in ("could not find", "cookies database", "decrypt", "permission", "operation not permitted")
+        ):
+            return "브라우저 쿠키를 읽을 수 없어요. 설정 → 전체 디스크 접근에서 ClipFlow 허용"
+        if engine.classify_error(message) == "로그인/권한 필요":
+            return "로그인이 필요한 항목이에요. 상단 쿠키에서 Chrome 등 로그인한 브라우저를 선택하세요."
+        return message
+
     def _first_visible_analyzed_row_index_for_url(self, url):
         url = str(url or "").strip()
         if not url:
@@ -1803,12 +1896,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 continue
             if playlist_key and row.get("kind") == "playlist" and self._playlist_key_for_row(row) == playlist_key:
                 return index
-            row_urls = {
-                str(row.get("analysis_source_url") or "").strip(),
-                str(row.get("source_url") or "").strip(),
-                str(row.get("input_url") or "").strip(),
-            }
-            if url in row_urls:
+            if self._row_matches_url(row, url):
                 return index
         return -1
 

@@ -1943,6 +1943,60 @@ for line in sys.stdin:
             ],
         )
 
+    def test_full_disk_access_provoke_paths_include_chrome_cookies(self):
+        paths = engine.full_disk_access_provoke_paths("chrome")
+        self.assertTrue(any(path.endswith("/Cookies") for path in paths))
+
+    def test_macos_full_disk_access_hint_mentions_clipflow(self):
+        hint = engine.macos_full_disk_access_hint("ClipFlow")
+        self.assertIn("ClipFlow", hint)
+        self.assertIn("전체 디스크 접근", hint)
+
+    def test_duration_from_hls_playlist_text_sums_extinf(self):
+        playlist = "\n".join(
+            [
+                "#EXTM3U",
+                "#EXTINF:12.5,",
+                "seg-001.ts",
+                "#EXTINF:7.25,",
+                "seg-002.ts",
+            ]
+        )
+        self.assertEqual(engine.duration_from_hls_playlist_text(playlist), 19)
+
+    def test_enrich_missing_durations_fills_manifest_candidates(self):
+        candidates = [
+            {"url": "https://cdn.example.test/index.m3u8", "is_manifest": True, "duration": 0},
+            {"url": "https://cdn.example.test/file.mp4", "duration": 0},
+        ]
+
+        def fake_probe(url, candidate=None):
+            self.assertEqual(url, "https://cdn.example.test/index.m3u8")
+            return 321
+
+        enriched = engine.enrich_missing_durations(candidates, duration_probe=fake_probe)
+        self.assertEqual(enriched[0]["duration"], 321)
+        self.assertEqual(enriched[1]["duration"], 0)
+
+    def test_analyze_browser_dom_media_enriches_hls_duration_when_page_has_none(self):
+        html = """
+        <html><head><title>HLS Page</title></head><body>
+        <video poster="https://media.example.test/thumb.webp" src="https://cdn.example.test/index.m3u8"></video>
+        </body></html>
+        """
+
+        def fake_probe(url, candidate=None):
+            return 1860
+
+        with mock.patch.object(engine, "probe_manifest_duration", side_effect=fake_probe):
+            result = engine.analyze_browser_dom_media(
+                "https://media.example.test/watch",
+                html,
+                output_ext=engine.ALL_OUTPUT_EXT,
+            )
+
+        self.assertEqual(result["candidates"][0]["duration"], 1860)
+
     def test_browser_dom_hls_prefers_parallel_download_for_small_unencrypted_playlists(self):
         playlist = "#EXTM3U\n#EXTINF:1,\nseg.ts\n"
         segments = engine.iter_hls_segment_urls(playlist, "https://cdn.example.test/index.m3u8")
