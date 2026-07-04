@@ -507,7 +507,7 @@ class DownloadRowWidget(QFrame):
         self.resume_download_button.setVisible(paused)
         self.play_file_button.setVisible(completed and has_output and self.row.get("kind") != "playlist")
         self.open_folder_button.setVisible(completed)
-        self.delete_file_button.setVisible((completed and has_deletable_output) or (paused and has_deletable_output))
+        self.delete_file_button.setVisible(completed or (paused and has_deletable_output))
         self.more_button.setVisible(completed)
         self.remove_button.setVisible((not active and not paused) or remove_paused)
         self.pause_download_button.setEnabled(pauseable)
