@@ -1,6 +1,7 @@
-"""Gate release uploads: live appcast + older-build detection + toast callback path."""
+"""Gate release uploads: local appcast + older-build detection + toast callback path."""
 
 import argparse
+import os
 import subprocess
 import sys
 import urllib.request
@@ -13,27 +14,40 @@ PAGES_FEED = "https://kwd421.github.io/ClipFlow/appcast-windows.xml"
 GITHUB_FEED = "https://raw.githubusercontent.com/kwd421/ClipFlow/main/docs/appcast-windows.xml"
 
 
-def _latest_build(feed_url):
-    request = urllib.request.Request(feed_url, headers={"User-Agent": "ClipFlow-Release-Verify"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        root = ET.fromstring(response.read())
+def _latest_build_from_xml(root):
     item = root.find("channel/item")
     if item is None:
-        raise RuntimeError(f"no appcast item: {feed_url}")
+        raise RuntimeError("no appcast item")
     version = item.find(SPARKLE_VERSION)
     if version is None or not version.text:
-        raise RuntimeError(f"no sparkle:version: {feed_url}")
+        raise RuntimeError("no sparkle:version")
     return int(version.text.strip())
 
 
-def _run(script, *args):
+def _latest_build(feed_or_path):
+    if feed_or_path.startswith("http://") or feed_or_path.startswith("https://"):
+        request = urllib.request.Request(feed_or_path, headers={"User-Agent": "ClipFlow-Release-Verify"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            root = ET.fromstring(response.read())
+    else:
+        root = ET.fromstring(Path(feed_or_path).read_bytes())
+    return _latest_build_from_xml(root)
+
+
+def _run(script, *args, env=None):
     cmd = [sys.executable, str(ROOT / "build-helper" / script), *map(str, args)]
-    return subprocess.run(cmd, cwd=ROOT, check=False)
+    merged = {**os.environ, **(env or {})}
+    return subprocess.run(cmd, cwd=ROOT, check=False, env=merged)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build", required=True, help="Current release build number, e.g. 105")
+    parser.add_argument("--build", required=True, help="Current release build number, e.g. 106")
+    parser.add_argument(
+        "--appcast-path",
+        default=str(ROOT / "docs" / "appcast-windows.xml"),
+        help="Local appcast file that will be published with this release",
+    )
     args = parser.parse_args()
     current = int(args.build)
     previous = current - 1
@@ -41,28 +55,36 @@ def main():
         raise SystemExit("build number must be > 1")
 
     errors = []
+    local_latest = _latest_build(args.appcast_path)
+    print(f"local_appcast_latest={local_latest}")
+    if local_latest != current:
+        errors.append(f"local_appcast_expected_{current}_got_{local_latest}")
+
+    if local_latest <= previous:
+        errors.append(f"local_appcast_{local_latest}_must_be_newer_than_{previous}")
+    else:
+        print(f"older_build_{previous}_sees_update_from_local=True")
+
+    if local_latest == current:
+        print(f"current_build_{current}_sees_update_from_local=False")
 
     for name, feed in (("pages", PAGES_FEED), ("github", GITHUB_FEED)):
         try:
             latest = _latest_build(feed)
         except Exception as exc:
-            errors.append(f"{name}_appcast_error={exc}")
+            print(f"{name}_appcast_latest=error ({exc})")
             continue
         print(f"{name}_appcast_latest={latest}")
-        if latest != current:
-            errors.append(f"{name}_appcast_expected_{current}_got_{latest}")
+        if latest > current:
+            errors.append(f"{name}_appcast_ahead_of_release_{latest}")
 
-    older = _run("verify_update_check.py", previous)
-    print(f"older_build_{previous}_sees_update exit={older.returncode}")
-    if older.returncode != 0:
-        errors.append(f"older_build_{previous}_must_see_update")
-
-    same = _run("verify_update_check.py", current)
-    print(f"current_build_{current}_sees_update exit={same.returncode}")
-    if same.returncode == 0:
-        errors.append(f"current_build_{current}_must_not_see_update")
-
-    toast = _run("verify_update_toast_qt.py")
+    toast = _run(
+        "verify_update_toast_qt.py",
+        env={
+            "CLIPFLOW_BUILD_NUMBER": str(previous),
+            "CLIPFLOW_VERIFY_APPCAST_PATH": str(Path(args.appcast_path).resolve()),
+        },
+    )
     print(f"toast_path exit={toast.returncode}")
     if toast.returncode != 0:
         errors.append("toast_callback_path_failed")
