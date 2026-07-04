@@ -655,6 +655,7 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         super().__init__(parent)
         self.source_url = ""
         self.favicon_url = ""
+        self._fallback_icon_urls = []
         self._reply = None
         self._icon_candidates = []
         self._seen_icon_candidates = set()
@@ -673,11 +674,17 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             cls._network_manager = QNetworkAccessManager()
         return cls._network_manager
 
-    def set_source_url(self, url):
+    def set_source_url(self, url, fallback_icon_urls=None):
         url = str(url or "").strip()
-        if url == self.source_url:
+        fallback_icon_urls = [
+            str(item or "").strip()
+            for item in (fallback_icon_urls or [])
+            if str(item or "").strip().lower().startswith(("http://", "https://"))
+        ]
+        if url == self.source_url and fallback_icon_urls == getattr(self, "_fallback_icon_urls", []):
             return
         self.source_url = url
+        self._fallback_icon_urls = list(fallback_icon_urls)
         domain = source_domain(url)
         self.setText("")
         self.setToolTip(f"{domain}\n원본 링크 열기" if domain else "")
@@ -781,6 +788,10 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             reply = self.network_manager().get(self._make_request(page_url))
             self._reply = reply
             reply.finished.connect(lambda reply=reply, page_url=page_url: self._icon_page_finished(reply, page_url))
+            return
+        self._queue_icon_candidates(getattr(self, "_fallback_icon_urls", []))
+        if self._icon_candidates:
+            self._fetch_next_icon_candidate()
             return
         self.favicon_url = ""
 

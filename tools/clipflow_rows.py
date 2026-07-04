@@ -456,7 +456,12 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_source_button(self):
         source_url = self.row.get("source_url") or ""
-        self.source_link_button.set_source_url(source_url)
+        candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row.get("candidate") or {}
+        fallback_urls = list(self.row.get("analysis_favicon_urls") or [])
+        thumbnail_url = str(candidate.get("thumbnail") or "").strip()
+        if thumbnail_url.lower().startswith(("http://", "https://")):
+            fallback_urls.append(thumbnail_url)
+        self.source_link_button.set_source_url(source_url, fallback_icon_urls=fallback_urls)
 
     def _refresh_actions(self):
         status = self.row.get("status")
@@ -732,6 +737,8 @@ class DownloadRowWidget(QFrame):
             bool(self.row.get("analysis_loading"))
             and status not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}
         )
+        if status == DOWNLOAD_STATUS:
+            analyzing = False
         self.setProperty("analyzing", "true" if analyzing else "false")
         starting = bool(self.row.get("download_starting"))
         self.setProperty("starting", "true" if starting else "false")
@@ -883,13 +890,11 @@ class DownloadRowWidget(QFrame):
             return
 
         if starting:
-            # "Preparing" phase: the download is resolving formats but no byte
-            # progress exists yet. Spin the same accent segment as a determinate
-            # ring so the row reads as working rather than frozen at 0%.
             painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
+            partial = self._ring_segment_path(_rect, 0.0, 1.1)
             painter.setPen(QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(self._analysis_dash_path(_rect))
+            painter.drawPath(partial)
             return
 
         progress = max(0, min(100, int(self.property("progressValue") or 0)))

@@ -1549,6 +1549,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         existing["progress"] = 0
         existing["progress_text"] = ""
         existing["messages"] = list(new_row.get("messages") or [])
+        if new_row.get("analysis_favicon_urls"):
+            existing["analysis_favicon_urls"] = list(new_row.get("analysis_favicon_urls") or [])
 
     def _video_duplicate_key(self, row, source_url="", include_current_clip_range=False):
         candidate = dict(row.get("candidate") or {})

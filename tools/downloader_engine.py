@@ -46,6 +46,8 @@ DIRECT_MEDIA_PARALLEL_WORKERS = 4
 DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
+BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
+_BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
     "google chrome": ("chrome",),
@@ -217,6 +219,64 @@ def ffprobe_path():
         if probe.exists():
             return str(probe)
     return shutil.which("ffprobe")
+
+
+def _browser_dom_cache_key(url):
+    return str(url or "").strip().rstrip("/")
+
+
+def remember_browser_dom_html(url, html):
+    key = _browser_dom_cache_key(url)
+    text = clean_browser_dom(html)
+    if not key or not dom_html_looks_usable(text):
+        return
+    _BROWSER_DOM_HTML_CACHE[key] = (time.monotonic(), text)
+
+
+def browser_dom_html_cached(url, max_age=None):
+    key = _browser_dom_cache_key(url)
+    entry = _BROWSER_DOM_HTML_CACHE.get(key)
+    if not entry:
+        return None
+    fetched_at, html = entry
+    age_limit = BROWSER_DOM_HTML_CACHE_MAX_AGE if max_age is None else float(max_age)
+    if time.monotonic() - fetched_at > age_limit:
+        _BROWSER_DOM_HTML_CACHE.pop(key, None)
+        return None
+    return html
+
+
+def probe_stream_duration(url, candidate=None):
+    probe = ffprobe_path()
+    if not probe:
+        return 0
+    headers = direct_media_request_headers(candidate or {})
+    header_arg = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    command = [
+        probe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+    ]
+    if header_arg:
+        command.extend(["-headers", header_arg])
+    command.append(str(url or ""))
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            timeout=30,
+        )
+        return safe_int(float(str(completed.stdout or "").strip()))
+    except (OSError, subprocess.CalledProcessError, ValueError, subprocess.TimeoutExpired):
+        return 0
 
 
 def probe_video_resolution(path):
@@ -1114,30 +1174,10 @@ def default_favicon_urls(url):
     ]
 
 
-def platform_favicon_urls(page_url):
-    host = urllib.parse.urlsplit(str(page_url or "")).netloc.lower()
-    urls = []
-    if "pornhub" in host:
-        urls.append("https://ei.phncdn.com/www-static/favicon.ico")
-    if "xvideos" in host:
-        urls.extend(
-            [
-                "https://assets-cdn77.xvideos-cdn.com/v3/img/skins/default/logo/xv.white.32.png",
-                "https://assets-cdn77.xvideos-cdn.com/v3/img/skins/default/logo/xv.white.16.png",
-            ]
-        )
-    if "redtube" in host:
-        urls.append("https://ei.rdtcdn.com/www-static/favicon.ico")
-    if "xhamster" in host:
-        urls.append("https://static-ah.xhcdn.com/xh-desktop/images/favicon/favicon-192x192.png")
-    return urls
-
-
 def favicon_candidate_urls(page_url, dom_html=None):
     urls = []
     seen = set()
     for candidate in [
-        *platform_favicon_urls(page_url),
         *favicon_urls_from_html(dom_html or "", page_url),
         *default_favicon_urls(page_url),
     ]:
@@ -2311,9 +2351,12 @@ def fetch_dom_for_fallback(url, on_event=None, timeout=90):
         html = ""
         urllib_failed_fast = True
     if dom_html_looks_usable(html):
+        remember_browser_dom_html(url, html)
         return html
     chrome_timeout = 35 if urllib_failed_fast or (html and len(html) > 200) else timeout
-    return dump_dom_with_browser(url, on_event=on_event, timeout=chrome_timeout)
+    dom = dump_dom_with_browser(url, on_event=on_event, timeout=chrome_timeout)
+    remember_browser_dom_html(url, dom)
+    return dom
 
 
 def dump_dom_with_browser(url, on_event=None, timeout=90):
@@ -2769,7 +2812,9 @@ def json_text_from_browser_dump(dom):
 
 def needs_browser_profile_for_remote_media(media_url):
     lower = str(media_url or "").lower()
-    return "pornhub.com/video/get_media" in lower or ("pornhub.com" in lower and "/get_media" in lower)
+    parsed = urllib.parse.urlparse(lower)
+    path = parsed.path.rstrip("/")
+    return path.endswith("/video/get_media") or path.endswith("/get_media")
 
 
 def _browser_dump_dom_base_args(browser, profile_dir=None):
@@ -2880,13 +2925,16 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
     if not needs_refresh:
         return candidate
     emit_event(on_event, "status", message="브라우저 DOM 미디어 URL 새로고침 중")
-    dom = ""
-    try:
-        dom = fetch_dom_html_with_urllib(page_url, timeout=20)
-    except (OSError, urllib.error.URLError, ValueError, TimeoutError):
-        dom = ""
+    dom = browser_dom_html_cached(page_url) or ""
     if not dom_html_looks_usable(dom):
-        dom = fetch_dom_for_fallback(page_url, on_event=on_event, timeout=45)
+        try:
+            dom = fetch_dom_html_with_urllib(page_url, timeout=20)
+        except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+            dom = ""
+        if dom_html_looks_usable(dom):
+            remember_browser_dom_html(page_url, dom)
+        else:
+            dom = fetch_dom_for_fallback(page_url, on_event=on_event, timeout=45)
     analysis = analyze_browser_dom_media(
         page_url,
         dom,
@@ -3794,6 +3842,9 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
         raise RuntimeError("ffmpeg is required for browser DOM manifest downloads")
     headers = direct_media_request_headers(candidate)
     header_arg = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    duration = safe_int((candidate or {}).get("duration"))
+    if not duration:
+        duration = probe_stream_duration(url, candidate)
     output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
     command = [
         str(ffmpeg_exe),
@@ -3876,10 +3927,11 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
             last_progress = time.monotonic()
             raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
             current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
-            duration = safe_int((candidate or {}).get("duration"))
             if duration:
                 percent = max(0, min(100, current * 100 / duration))
                 emit_event(on_event, "progress", percent=percent, message=f"{percent:.1f}%")
+            elif current > 0:
+                emit_event(on_event, "progress", percent=0, message=display_duration(int(current)))
         if process.poll() is not None:
             reader_done = True
 

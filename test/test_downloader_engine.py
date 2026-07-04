@@ -2,6 +2,7 @@ import concurrent.futures
 import contextlib
 import io
 import json
+import subprocess
 import time
 import unittest
 import tempfile
@@ -1567,11 +1568,11 @@ for line in sys.stdin:
     def test_browser_dom_media_definitions_site_metadata_matches_page(self):
         html = """
         <html><head>
-          <meta name="twitter:title" content="Seductive Indian beauty strips down and fingers her pink pussy">
+          <meta name="twitter:title" content="Demo clip for mediaDefinitions parsing">
           <meta property="og:video:duration" content="361">
         </head><body>
-        <h1 class="title">Seductive Indian beauty strips down and fingers her pink pussy</h1>
-        <div>From:&nbsp;<a href="/users/babes-com"><span class="username">BABES-COM</span></a></div>
+        <h1 class="title">Demo clip for mediaDefinitions parsing</h1>
+        <div>From:&nbsp;<a href="/users/demo-creator"><span class="username">Demo Creator</span></a></div>
         <script>
         var flashvars_123 = {"video_duration":361,"mediaDefinitions":[
           {"height":720,"width":1280,"format":"hls","videoUrl":"https:\\/\\/cdn.example.test\\/720\\/master.m3u8","quality":"720"},
@@ -1587,21 +1588,21 @@ for line in sys.stdin:
         )
         best_mp4 = next(candidate for candidate in result["candidates"] if candidate["height"] == 480)
 
-        self.assertEqual(result["title"], "BABES-COM - Seductive Indian beauty strips down and fingers her pink pussy")
+        self.assertEqual(result["title"], "Demo Creator - Demo clip for mediaDefinitions parsing")
         self.assertEqual(best_mp4["display_title"], result["title"])
-        self.assertEqual(best_mp4["uploader"], "BABES-COM")
+        self.assertEqual(best_mp4["uploader"], "Demo Creator")
         self.assertEqual(best_mp4["duration"], 361)
         self.assertEqual(best_mp4["sort_bytes"], 52_428_800)
         self.assertEqual(best_mp4["size_source"], "metadata")
         self.assertEqual(
             engine.final_output_path_for_candidate(best_mp4, "/tmp/downloads").name,
-            "BABES-COM - Seductive Indian beauty strips down and fingers her pink pussy.mp4",
+            "Demo Creator - Demo clip for mediaDefinitions parsing.mp4",
         )
 
-    def test_browser_dom_xvideos_player_script_metadata_matches_page(self):
+    def test_browser_dom_player_script_metadata_matches_page(self):
         html = """
         <html><head>
-          <title>A Beautiful Red-Haired Stranger - XVIDEOS.COM</title>
+          <title>Player Script Demo Clip</title>
           <meta property="video:duration" content="1238">
           <meta name="description" content="File Size: 70.00 MB">
         </head><body>
@@ -1633,9 +1634,9 @@ for line in sys.stdin:
         self.assertEqual(best_mp4["sort_bytes"], 73_400_320)
         self.assertEqual(best_mp4["size_source"], "metadata")
 
-    def test_browser_dom_xhamster_initials_metadata_matches_page(self):
+    def test_browser_dom_page_script_initials_metadata_matches_page(self):
         html = """
-        <html><head><title>FemaleAgent Shy beauty takes the bait - xHamster.com</title></head><body>
+        <html><head><title>Page Script Demo Clip</title></head><body>
         <script>
         window.initials = {
           "videoModel": {
@@ -1755,9 +1756,9 @@ for line in sys.stdin:
             self.assertEqual(download_image.call_count, 2)
             self.assertEqual(saved["bytes"], 256)
 
-    def test_is_browser_remote_media_api_url_detects_site_media_endpoints(self):
-        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.redtube.com/media/mp4?s=abc"))
-        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.pornhub.com/video/get_media?s=abc"))
+    def test_is_browser_remote_media_api_url_detects_remote_media_paths(self):
+        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.example-stream.test/media/mp4?s=abc"))
+        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.example-stream.test/video/get_media?s=abc"))
         self.assertFalse(engine.is_browser_remote_media_api_url("https://cdn.example.test/video.mp4"))
 
     def test_analyze_browser_dom_media_includes_remote_mp4_api_candidates(self):
@@ -1771,17 +1772,19 @@ for line in sys.stdin:
         </script></body></html>
         """
 
-        result = engine.analyze_browser_dom_media("https://www.redtube.com/198689351", html)
+        page_url = "https://www.example-stream.test/watch/demo123"
+        result = engine.analyze_browser_dom_media(page_url, html)
 
-        self.assertEqual(result["candidates"][0]["url"], "https://www.redtube.com/media/mp4?s=token")
+        self.assertEqual(result["candidates"][0]["url"], "https://www.example-stream.test/media/mp4?s=token")
         self.assertFalse(result["candidates"][0]["is_manifest"])
 
     def test_prepare_browser_dom_candidate_auto_quality_picks_highest_remote_api_entry(self):
+        page_url = "https://www.example-stream.test/watch/demo123"
         candidate = {
             "format_id": "browser-mp4",
-            "url": "https://www.redtube.com/media/mp4?s=token",
+            "url": "https://www.example-stream.test/media/mp4?s=token",
             "height": 0,
-            "source": "https://www.redtube.com/198689351",
+            "source": page_url,
         }
         payload = [
             {"quality": "240", "videoUrl": "https://cdn.example.test/240.mp4"},
@@ -1794,17 +1797,18 @@ for line in sys.stdin:
             "refresh_browser_dom_candidate_media",
             side_effect=lambda page_url, candidate, on_event=None: dict(candidate),
         ), mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
-            prepared = engine.prepare_browser_dom_candidate("https://www.redtube.com/198689351", candidate)
+            prepared = engine.prepare_browser_dom_candidate(page_url, candidate)
 
         self.assertEqual(prepared["url"], "https://cdn.example.test/1080.mp4")
         self.assertEqual(prepared["height"], 1080)
 
     def test_prepare_browser_dom_candidate_resolves_remote_api_url(self):
+        page_url = "https://www.example-stream.test/watch/demo123"
         candidate = {
             "format_id": "browser-480",
-            "url": "https://www.redtube.com/media/mp4?s=token",
+            "url": "https://www.example-stream.test/media/mp4?s=token",
             "height": 480,
-            "source": "https://www.redtube.com/198689351",
+            "source": page_url,
         }
         payload = [
             {"quality": "480", "videoUrl": "https://cdn.example.test/480.mp4"},
@@ -1816,7 +1820,7 @@ for line in sys.stdin:
             "refresh_browser_dom_candidate_media",
             side_effect=lambda page_url, candidate, on_event=None: dict(candidate),
         ), mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
-            prepared = engine.prepare_browser_dom_candidate("https://www.redtube.com/198689351", candidate)
+            prepared = engine.prepare_browser_dom_candidate(page_url, candidate)
 
         self.assertEqual(prepared["url"], "https://cdn.example.test/480.mp4")
         self.assertFalse(prepared["is_manifest"])
@@ -1831,10 +1835,10 @@ for line in sys.stdin:
         self.assertEqual(picked["url"], "https://cdn.example.test/480.mp4")
 
     def test_prepare_browser_dom_candidate_refreshes_remote_api_to_manifest(self):
-        page_url = "https://www.pornhub.com/view_video.php?viewkey=abc"
+        page_url = "https://www.example-stream.test/view_video.php?viewkey=abc"
         candidate = {
             "format_id": "browser-480",
-            "url": "https://www.pornhub.com/video/get_media?s=token",
+            "url": "https://www.example-stream.test/video/get_media?s=token",
             "height": 480,
             "source": page_url,
         }
@@ -1855,6 +1859,36 @@ for line in sys.stdin:
 
         self.assertEqual(prepared["url"], "https://cdn.example.test/480/master.m3u8")
         self.assertTrue(prepared["is_manifest"])
+
+    def test_browser_dom_html_cache_is_reused_for_manifest_refresh(self):
+        page_url = "https://www.example-stream.test/watch/cache-demo"
+        cached_dom = """
+        <html><body><video src="https://cdn.example.test/fresh/master.m3u8"></video></body></html>
+        """ + ("<!-- padding -->" * 40)
+        engine._BROWSER_DOM_HTML_CACHE.clear()
+        engine.remember_browser_dom_html(page_url, cached_dom)
+        candidate = {
+            "format_id": "browser-hls",
+            "url": "https://cdn.example.test/stale/master.m3u8",
+            "is_manifest": True,
+            "output_ext": "mp4",
+        }
+
+        with mock.patch.object(engine, "fetch_dom_for_fallback") as fetch_dom:
+            refreshed = engine.refresh_browser_dom_candidate_media(page_url, dict(candidate))
+
+        fetch_dom.assert_not_called()
+        self.assertEqual(refreshed["url"], "https://cdn.example.test/fresh/master.m3u8")
+
+    def test_probe_stream_duration_reads_ffprobe_output(self):
+        with mock.patch.object(engine, "ffprobe_path", return_value="/usr/bin/ffprobe"), mock.patch.object(
+            subprocess,
+            "run",
+            return_value=mock.Mock(stdout="777\n", returncode=0),
+        ):
+            duration = engine.probe_stream_duration("https://cdn.example.test/master.m3u8", {"referer": "https://example.test/"})
+
+        self.assertEqual(duration, 777)
 
     def test_is_browser_dom_manifest_candidate_detects_hls_entries(self):
         self.assertTrue(

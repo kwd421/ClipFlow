@@ -455,6 +455,7 @@ class PlaylistMixin:
             "output_path": "",
             "messages": [],
             "created_order": created_order,
+            "analysis_favicon_urls": list(analysis.get("favicon_urls") or []),
         }
 
     def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):

@@ -311,6 +311,8 @@ class DownloadMixin:
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
         row["download_started_at"] = time.time()
+        row.pop("analysis_loading", None)
+        row.pop("child_loading", None)
         row["download_starting"] = True
         widget = row.get("widget")
         if widget:
