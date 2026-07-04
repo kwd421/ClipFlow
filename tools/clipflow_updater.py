@@ -280,6 +280,22 @@ class WinSparkleUpdater:
         self._library = library
         self._callbacks = []
         self._on_found = None
+        self._winsparkle_ready = False
+
+    def _ensure_winsparkle_ready(self):
+        if self._winsparkle_ready:
+            return self._library is not None
+        if self._library is None:
+            return False
+        library, callbacks = _init_winsparkle_library(self._library)
+        if library is None:
+            self._library = None
+            self._callbacks = []
+            return False
+        self._library = library
+        self._callbacks = callbacks
+        self._winsparkle_ready = True
+        return True
 
     def schedule_startup_check(self, on_found):
         self._on_found = on_found
@@ -294,7 +310,7 @@ class WinSparkleUpdater:
         threading.Thread(target=worker, name="clipflow-update-check", daemon=True).start()
 
     def check_for_updates(self):
-        if self._library is None:
+        if not self._ensure_winsparkle_ready():
             return
         self._library.win_sparkle_check_update_with_ui()
 
@@ -383,15 +399,8 @@ def start_winsparkle_updater():
     if not updater_configured():
         return None
 
-    library = _load_winsparkle_library()
-    callbacks = []
-    if library is not None:
-        library, callbacks = _init_winsparkle_library(library)
-        if library is None:
-            callbacks = []
-
-    updater = WinSparkleUpdater(library)
-    updater._callbacks = callbacks
+    updater = WinSparkleUpdater(_load_winsparkle_library())
+    updater._callbacks = []
     return updater
 
 

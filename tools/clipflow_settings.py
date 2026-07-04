@@ -8,7 +8,7 @@ imports below plus methods that remain on the window class or other mixins.
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QStandardPaths, Qt
+from PySide6.QtCore import QPoint, QStandardPaths, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QLabel
 
 try:
@@ -376,6 +376,7 @@ class SettingsMixin:
     def schedule_startup_update_check(self):
         updater = self._app_updater()
         if updater is None:
+            QTimer.singleShot(500, self.schedule_startup_update_check)
             return
         updater.schedule_startup_check(self._show_update_available_toast)
 

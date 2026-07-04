@@ -222,7 +222,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.resize(self._initial_window_size())
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
-        self._load_completed_history()
+        QTimer.singleShot(0, self._load_completed_history)
         self._refresh_primary_action()
 
     def _initial_window_size(self):
@@ -1907,9 +1907,10 @@ def main():
 
     app = QApplication(sys.argv)
     configure_app_font(app)
-    app._clipflow_updater = start_app_updater()
+    app._clipflow_updater = None
     window = ClipFlowWindow()
     window.show()
+    QTimer.singleShot(0, lambda: setattr(app, "_clipflow_updater", start_app_updater()))
     QTimer.singleShot(1500, window.schedule_startup_update_check)
 
     if os.environ.get("CLIPFLOW_QT_SMOKE") == "1":
