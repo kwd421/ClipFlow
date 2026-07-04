@@ -14,7 +14,7 @@ def verify_cookie_source():
 PLATFORMS = [
     ("youtube", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "yt-dlp"),
     ("chzzk", "https://chzzk.naver.com/clips/z0DUTFaKDZ", "yt-dlp"),
-    ("instagram", "https://www.instagram.com/reel/C5-rS1Xr0ZU/", "yt-dlp"),
+    ("instagram", "https://www.instagram.com/reel/DUl354timp1/", "yt-dlp"),
     ("vimeo", "https://vimeo.com/76979871", "yt-dlp"),
     ("tiktok", "https://vm.tiktok.com/ZMh8xPqKb/", "yt-dlp"),
     ("pornhub", "https://www.pornhub.com/view_video.php?viewkey=6861453eadd37", "dom"),
