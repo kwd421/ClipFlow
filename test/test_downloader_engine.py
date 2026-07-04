@@ -1880,6 +1880,17 @@ for line in sys.stdin:
         fetch_dom.assert_not_called()
         self.assertEqual(refreshed["url"], "https://cdn.example.test/fresh/master.m3u8")
 
+    def test_emit_manifest_download_progress_includes_speed_and_eta(self):
+        events = []
+
+        def on_event(event):
+            events.append(event)
+
+        engine.emit_manifest_download_progress(on_event=on_event, current_sec=120, duration_sec=600, speed_text="2x", started_at=0)
+        self.assertEqual(events[-1]["type"], "progress")
+        self.assertIn("ETA", events[-1].get("message") or "")
+        self.assertIn("2x", events[-1].get("message") or "")
+
     def test_probe_stream_duration_reads_ffprobe_output(self):
         with mock.patch.object(engine, "ffprobe_path", return_value="/usr/bin/ffprobe"), mock.patch.object(
             subprocess,

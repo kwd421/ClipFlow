@@ -456,12 +456,7 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_source_button(self):
         source_url = self.row.get("source_url") or ""
-        candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row.get("candidate") or {}
-        fallback_urls = list(self.row.get("analysis_favicon_urls") or [])
-        thumbnail_url = str(candidate.get("thumbnail") or "").strip()
-        if thumbnail_url.lower().startswith(("http://", "https://")):
-            fallback_urls.append(thumbnail_url)
-        self.source_link_button.set_source_url(source_url, fallback_icon_urls=fallback_urls)
+        self.source_link_button.set_source_url(source_url)
 
     def _refresh_actions(self):
         status = self.row.get("status")

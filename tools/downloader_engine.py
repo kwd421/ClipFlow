@@ -1174,12 +1174,32 @@ def default_favicon_urls(url):
     ]
 
 
+def external_favicon_lookup_url(page_url):
+    parsed = urllib.parse.urlsplit(str(page_url or ""))
+    if not parsed.netloc:
+        return ""
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+    origin = f"{scheme}://{parsed.netloc}"
+    query = urllib.parse.urlencode(
+        {
+            "client": "SOCIAL",
+            "type": "FAVICON",
+            "fallback_opts": "TYPE,SIZE,URL",
+            "url": origin,
+            "size": "32",
+        }
+    )
+    return f"https://t0.gstatic.com/faviconV2?{query}"
+
+
 def favicon_candidate_urls(page_url, dom_html=None):
     urls = []
     seen = set()
+    lookup = external_favicon_lookup_url(page_url)
     for candidate in [
         *favicon_urls_from_html(dom_html or "", page_url),
         *default_favicon_urls(page_url),
+        *([lookup] if lookup else []),
     ]:
         if candidate and candidate not in seen:
             seen.add(candidate)
@@ -3521,6 +3541,42 @@ def direct_media_request_headers(candidate):
     return headers
 
 
+def emit_manifest_download_progress(on_event, current_sec, duration_sec, speed_text="", started_at=None):
+    if not duration_sec:
+        return
+    percent = max(0, min(100, current_sec * 100 / duration_sec))
+    speed_label = ffmpeg_progress_speed_label(speed_text)
+    eta = 0
+    remaining = max(0.0, float(duration_sec) - float(current_sec))
+    if speed_text.endswith("x"):
+        try:
+            multiplier = float(str(speed_text)[:-1])
+            if multiplier > 0:
+                eta = int(remaining / multiplier)
+        except ValueError:
+            pass
+    elif started_at is not None and current_sec > 0:
+        elapsed = max(0.001, time.monotonic() - float(started_at))
+        eta = int(remaining * elapsed / float(current_sec))
+    eta_text = display_duration(eta) if eta else ""
+    if speed_label and eta_text:
+        message = f"{percent:.1f}% · {speed_label} · ETA {eta_text}"
+    elif speed_label:
+        message = f"{percent:.1f}% · {speed_label}"
+    elif eta_text:
+        message = f"{percent:.1f}% · ETA {eta_text}"
+    else:
+        message = f"{percent:.1f}%"
+    emit_event(
+        on_event,
+        "progress",
+        percent=percent,
+        speed_text=speed_label,
+        eta_text=eta_text,
+        message=message,
+    )
+
+
 def emit_direct_download_progress(on_event, downloaded, total, started_at):
     if not total:
         return
@@ -3927,9 +3983,14 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
             last_progress = time.monotonic()
             raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
             current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
-            if duration:
-                percent = max(0, min(100, current * 100 / duration))
-                emit_event(on_event, "progress", percent=percent, message=f"{percent:.1f}%")
+            if duration and current > 0:
+                emit_manifest_download_progress(
+                    on_event,
+                    current,
+                    duration,
+                    speed_text=progress_values.get("speed") or "",
+                    started_at=started_at,
+                )
             elif current > 0:
                 emit_event(on_event, "progress", percent=0, message=display_duration(int(current)))
         if process.poll() is not None:

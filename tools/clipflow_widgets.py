@@ -1,5 +1,6 @@
 import html as html_lib
 import re
+import urllib.parse
 from urllib.parse import urljoin, urlparse
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, Property, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
@@ -596,6 +597,37 @@ def default_favicon_urls(url):
     ]
 
 
+def external_favicon_lookup_url(url):
+    parsed = urlparse(str(url or ""))
+    if not parsed.netloc:
+        return ""
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+    origin = f"{scheme}://{parsed.netloc}"
+    query = urllib.parse.urlencode(
+        {
+            "client": "SOCIAL",
+            "type": "FAVICON",
+            "fallback_opts": "TYPE,SIZE,URL",
+            "url": origin,
+            "size": "32",
+        }
+    )
+    return f"https://t0.gstatic.com/faviconV2?{query}"
+
+
+def square_favicon_pixmap(pixmap, size=20):
+    if pixmap.isNull():
+        return pixmap
+    scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    square = QPixmap(size, size)
+    square.fill(Qt.transparent)
+    painter = QPainter(square)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    painter.end()
+    return square
+
+
 class AboveTooltipMixin:
     def tooltip_position(self):
         return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
@@ -655,7 +687,6 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         super().__init__(parent)
         self.source_url = ""
         self.favicon_url = ""
-        self._fallback_icon_urls = []
         self._reply = None
         self._icon_candidates = []
         self._seen_icon_candidates = set()
@@ -674,17 +705,11 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             cls._network_manager = QNetworkAccessManager()
         return cls._network_manager
 
-    def set_source_url(self, url, fallback_icon_urls=None):
+    def set_source_url(self, url):
         url = str(url or "").strip()
-        fallback_icon_urls = [
-            str(item or "").strip()
-            for item in (fallback_icon_urls or [])
-            if str(item or "").strip().lower().startswith(("http://", "https://"))
-        ]
-        if url == self.source_url and fallback_icon_urls == getattr(self, "_fallback_icon_urls", []):
+        if url == self.source_url:
             return
         self.source_url = url
-        self._fallback_icon_urls = list(fallback_icon_urls)
         domain = source_domain(url)
         self.setText("")
         self.setToolTip(f"{domain}\n원본 링크 열기" if domain else "")
@@ -710,6 +735,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self._seen_icon_candidates = set()
         self._page_checked = False
         self._queue_icon_candidates(default_favicon_urls(url))
+        lookup = external_favicon_lookup_url(url)
+        if lookup:
+            self._queue_icon_candidates([lookup])
         self._fetch_next_icon_candidate()
 
     def _set_fallback_icon(self):
@@ -789,10 +817,6 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             self._reply = reply
             reply.finished.connect(lambda reply=reply, page_url=page_url: self._icon_page_finished(reply, page_url))
             return
-        self._queue_icon_candidates(getattr(self, "_fallback_icon_urls", []))
-        if self._icon_candidates:
-            self._fetch_next_icon_candidate()
-            return
         self.favicon_url = ""
 
     def _favicon_finished(self, reply, domain, favicon_url):
@@ -812,7 +836,7 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             payload = _reply_bytes(reply)
             pixmap = QPixmap()
             if payload and pixmap.loadFromData(payload) and not pixmap.isNull():
-                icon = QIcon(pixmap)
+                icon = QIcon(square_favicon_pixmap(pixmap, self.iconSize().width() or 20))
                 self._icon_cache[domain] = icon
                 if domain == source_domain(self.source_url):
                     self.setIcon(icon)
@@ -1133,7 +1157,7 @@ class ThumbnailPlaceholder(QFrame):
     def _scaled_thumbnail_pixmap(self):
         target_size = self.size()
         if self._scaled_pixmap.isNull() or self._scaled_target_size != target_size:
-            self._scaled_pixmap = self._pixmap.scaled(target_size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            self._scaled_pixmap = self._pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self._scaled_target_size = QSize(target_size.width(), target_size.height())
         return self._scaled_pixmap
 
