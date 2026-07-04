@@ -194,6 +194,12 @@ if (-not (Test-Path $releaseNotesPath)) {
 
 New-Item -ItemType File -Force -Path (Join-Path $docsDir ".nojekyll") | Out-Null
 
+Write-Host "Verifying live update check before upload..."
+& python (Join-Path $PSScriptRoot "verify_release_update.py") --build $BuildNumber
+if ($LASTEXITCODE -ne 0) {
+    throw "Update verification failed. Fix appcast/updater before uploading $releaseExe"
+}
+
 if (-not $SkipUpload) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw "GitHub CLI (gh) is required for release upload"
