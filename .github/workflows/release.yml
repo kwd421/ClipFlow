@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Parse release version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(.+)$') {
+            throw "Release tag must look like v1.2.3, got: $tag"
+          }
+          "CLIPFLOW_VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+          "CLIPFLOW_RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
+      - name: Write WinSparkle private key
+        shell: pwsh
+        env:
+          CLIPFLOW_WINSPARKLE_PRIVATE_KEY: ${{ secrets.CLIPFLOW_WINSPARKLE_PRIVATE_KEY }}
+        run: |
+          if (-not $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY) {
+            throw "Missing GitHub secret CLIPFLOW_WINSPARKLE_PRIVATE_KEY"
+          }
+          $keyPath = Join-Path $env:RUNNER_TEMP "winsparkle-private.key"
+          Set-Content -Path $keyPath -Value $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY -NoNewline -Encoding utf8
+          "CLIPFLOW_WINSPARKLE_PRIVATE_KEY_FILE=$keyPath" >> $env:GITHUB_ENV
+
+      - name: Build, sign, and update appcast
+        shell: pwsh
+        env:
+          CLIPFLOW_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.CLIPFLOW_SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          & build-helper/release_windows.ps1 `
+            -Version $env:CLIPFLOW_VERSION `
+            -Tag $env:CLIPFLOW_RELEASE_TAG `
+            -PrivateKeyFile $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY_FILE `
+            -SkipUpload
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ClipFlow ${{ env.CLIPFLOW_VERSION }}
+          body: Windows ClipFlow release with WinSparkle automatic update support.
+          files: dist/ClipFlow-${{ env.CLIPFLOW_VERSION }}.exe
+          fail_on_unmatched_files: true
+
+      - name: Publish appcast to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          git checkout "${{ github.sha }}" -- docs/appcast-windows.xml "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" docs/.nojekyll
+          git add docs/appcast-windows.xml "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" docs/.nojekyll
+          if (git diff --cached --quiet) {
+            Write-Host "No appcast changes to publish"
+            exit 0
+          }
+          git commit -m "Update Windows appcast for ClipFlow $env:CLIPFLOW_VERSION"
+          git push origin main

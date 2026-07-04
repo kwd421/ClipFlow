@@ -1650,6 +1650,27 @@ print(round(logical.width()), round(logical.height()))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["30 0", "36 54"])
 
+    def test_clipflow_qt_rounded_pixmap_portrait_rounds_image_bounds(self):
+        script = r'''
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import _rounded_pixmap
+
+app = QApplication([])
+portrait = QPixmap.fromImage(QImage(268, 394, QImage.Format_RGB32))
+portrait.fill(0x336699)
+rounded = _rounded_pixmap(portrait, 216, 317, 12, 1.0)
+image = rounded.toImage()
+print(image.pixelColor(0, 0).alpha())
+print(image.pixelColor(rounded.width() - 1, 0).alpha())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "0")
+        self.assertEqual(lines[1], "0")
+
     def test_clipflow_qt_thumbnail_preview_portrait_uses_rotated_landscape_frame(self):
         script = r'''
 from PySide6.QtGui import QPixmap

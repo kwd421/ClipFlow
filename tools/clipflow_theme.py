@@ -194,6 +194,27 @@ QPushButton#FloatingButton {{
 QPushButton#FloatingButton:hover {{
     background: {SURFACE_SOFT};
 }}
+QFrame#UpdateToast {{
+    background: {SURFACE};
+    color: {INK};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 12px;
+}}
+QLabel#UpdateToastMessage {{
+    color: {INK};
+    font-size: 13px;
+    font-weight: 600;
+}}
+QPushButton#UpdateToastDismiss {{
+    color: {MUTED};
+    font-size: 16px;
+    font-weight: 700;
+    border: none;
+    background: transparent;
+}}
+QPushButton#UpdateToastDismiss:hover {{
+    color: {INK};
+}}
 QLabel {{
     color: {INK};
     font-size: 13px;

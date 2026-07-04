@@ -16,7 +16,7 @@ try:
     from tools import downloader_engine as engine
     from tools import clipflow_theme as theme
     from tools.clipflow_dialogs import PreferencesDialog, _combo_text
-    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup
+    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
     from tools.clipflow_rows import build_quality_options, row_kind
     from tools.clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
@@ -29,7 +29,7 @@ except ImportError:
     import downloader_engine as engine
     import clipflow_theme as theme
     from clipflow_dialogs import PreferencesDialog, _combo_text
-    from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup
+    from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
     from clipflow_rows import build_quality_options, row_kind
     from clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
@@ -366,3 +366,52 @@ class SettingsMixin:
             self._render_rows()
             if repaired_missing_parents:
                 self._save_completed_history()
+
+    def _app_updater(self):
+        app = QApplication.instance()
+        if app is None:
+            return None
+        return getattr(app, "_clipflow_updater", None)
+
+    def schedule_startup_update_check(self):
+        updater = self._app_updater()
+        if updater is None:
+            return
+        updater.schedule_startup_check(self._show_update_available_toast)
+
+    def _show_update_available_toast(self):
+        toast = getattr(self, "update_toast", None)
+        if toast is not None and toast.isVisible():
+            return
+        if toast is None:
+            toast = UpdateAvailableBanner(self)
+            toast.update_requested.connect(self._open_update_installer)
+            toast.dismissed.connect(self._hide_update_toast)
+            self.update_toast = toast
+        self._position_update_toast()
+        toast.show()
+        toast.raise_()
+
+    def _hide_update_toast(self):
+        toast = getattr(self, "update_toast", None)
+        if toast is not None:
+            toast.hide()
+
+    def _position_update_toast(self):
+        toast = getattr(self, "update_toast", None)
+        if toast is None:
+            return
+        margin = 16
+        toast.adjustSize()
+        x = max(margin, self.width() - toast.width() - margin)
+        y = max(margin, self.height() - toast.height() - margin)
+        toast.move(x, y)
+
+    def _open_update_installer(self):
+        updater = self._app_updater()
+        if updater is not None:
+            updater.check_for_updates()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_update_toast()

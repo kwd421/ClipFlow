@@ -41,10 +41,12 @@ OUTPUT_EXTENSIONS = {"mp4", "webm"} | AUDIO_OUTPUT_EXTENSIONS
 ALL_OUTPUT_EXT = "all"
 SIZE_PROBE_LIMIT = 12
 DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
+DIRECT_MEDIA_PARALLEL_MIN_SIZE = 2 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_WORKERS = 4
 DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
+PAGE_THUMBNAIL_TIMEOUT = 8
 BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
 BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
@@ -1156,31 +1158,115 @@ def display_title_for(video_info, root_info):
     return prefix_title_with_uploader(raw_title, uploader_name_from_info(video_info, root_info))
 
 
+YOUTUBE_THUMBNAIL_AREAS = {
+    "maxresdefault": 1280 * 720,
+    "sddefault": 640 * 480,
+    "hqdefault": 480 * 360,
+    "mqdefault": 320 * 180,
+    "default": 120 * 90,
+}
+YOUTUBE_THUMBNAIL_NAME_SCORES = (
+    ("maxresdefault", 5),
+    ("sddefault", 4),
+    ("hqdefault", 3),
+    ("mqdefault", 2),
+    ("default", 1),
+)
+THUMBNAIL_URL_FORMAT_SCORES = (
+    (".avif", 0),
+    (".jpg", 3),
+    (".jpeg", 3),
+    (".png", 3),
+    (".webp", 2),
+)
+
+
+def thumbnail_url_format_score(url):
+    path = urllib.parse.urlsplit(str(url or "")).path.lower()
+    for ext, score in THUMBNAIL_URL_FORMAT_SCORES:
+        if path.endswith(ext):
+            return score
+    return 1
+
+
+def youtube_thumbnail_name_score(url):
+    text = str(url or "")
+    if "i.ytimg.com/" not in text:
+        return 0
+    path = urllib.parse.urlsplit(text).path.lower()
+    if "/vi_lc/" in path:
+        return -1
+    best = 0
+    for name, score in YOUTUBE_THUMBNAIL_NAME_SCORES:
+        if f"/{name}." in path:
+            best = max(best, score)
+    if "/vi/" in path and best == 0:
+        best = 3
+    elif "/vi_webp/" in path:
+        best = max(best, 2)
+    return best
+
+
+def thumbnail_item_area(item):
+    width = safe_int((item or {}).get("width"))
+    height = safe_int((item or {}).get("height"))
+    url = str((item or {}).get("url") or "")
+    if width > 0 and height > 0:
+        if width >= 1280 and height >= 720 and width * height >= 1920 * 1080:
+            return 0
+        return width * height
+    path = urllib.parse.urlsplit(url).path.lower()
+    for name, area in YOUTUBE_THUMBNAIL_AREAS.items():
+        if f"/{name}." in path:
+            return area
+    return 0
+
+
+def thumbnail_variant_tier_score(url):
+    match = re.search(r"(\d+)_([tp])\.(jpg|jpeg|png|webp|avif)\b", str(url or ""), re.IGNORECASE)
+    if not match:
+        return 0, 0
+    tier = safe_int(match.group(1))
+    if match.group(2).lower() == "p":
+        return tier, -2
+    return tier, 2
+
+
+def _upgrade_thumbnail_tier_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return text
+    tier_match = re.search(r"(\d+)_t\.(jpg|jpeg)\b", text, re.IGNORECASE)
+    if tier_match and safe_int(tier_match.group(1)) < 30:
+        return re.sub(r"(\d+)_t\.(jpg|jpeg)\b", r"30_t.\2", text, count=1, flags=re.IGNORECASE)
+    if re.search(r"\d+_p\.avif\b", text, re.IGNORECASE):
+        return re.sub(r"\d+_p\.avif\b", "30_t.jpg", text, flags=re.IGNORECASE)
+    return text
+
+
 def thumbnail_from_info(info):
     if not isinstance(info, dict):
         return ""
     thumbnails = info.get("thumbnails") or []
     usable = [item for item in thumbnails if isinstance(item, dict) and item.get("url")]
     if info.get("thumbnail"):
-        usable.append({"url": info["thumbnail"], "width": info.get("width"), "height": info.get("height")})
+        usable.append({"url": info["thumbnail"], "id": "primary"})
     if not usable:
         return ""
 
     def score(item):
         url = str(item.get("url") or "")
-        area = safe_int(item.get("width")) * safe_int(item.get("height"))
-        stable_youtube = 0
-        if "i.ytimg.com/" in url:
-            if "/vi/" in url:
-                stable_youtube = 3
-            elif "/vi_webp/" in url:
-                stable_youtube = 2
-            elif "/vi_lc/" in url:
-                stable_youtube = 0
-        return stable_youtube, area
+        role_score, tier_score = thumbnail_variant_tier_score(url)
+        return (
+            thumbnail_url_format_score(url),
+            youtube_thumbnail_name_score(url),
+            role_score,
+            tier_score,
+            thumbnail_item_area(item),
+        )
 
     best = sorted(usable, key=score, reverse=True)[0]
-    return str(best.get("url") or "")
+    return _upgrade_thumbnail_tier_url(str(best.get("url") or ""))
 
 
 LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
@@ -2028,7 +2114,8 @@ def candidates_from_info(info, output_ext=None):
     for video_info in iter_video_infos(info):
         title = clean_video_title(video_info.get("title") or info.get("title")) or "video"
         display_title = display_title_for(video_info, info)
-        thumbnail = thumbnail_from_info(video_info) or thumbnail_from_info(info)
+        page_url = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
+        thumbnail = resolve_analysis_thumbnail(page_url, video_info) or thumbnail_from_info(info)
         duration = safe_int(video_info.get("duration") or info.get("duration"))
         formats = video_info.get("formats") or []
         audio = best_audio_format(formats)
@@ -2796,6 +2883,26 @@ def thumbnail_from_browser_dom(dom):
         ],
         compact_limit=None,
     )
+
+
+def thumbnail_from_page_url(page_url, page_fetch=fetch_dom_html_with_urllib, timeout=PAGE_THUMBNAIL_TIMEOUT):
+    page_url = str(page_url or "").strip()
+    if not page_url.lower().startswith(("http://", "https://")):
+        return ""
+    try:
+        html = page_fetch(page_url, timeout=timeout)
+    except Exception:
+        return ""
+    return str(thumbnail_from_browser_dom(html) or "").strip()
+
+
+def resolve_analysis_thumbnail(page_url, info, page_fetch=fetch_dom_html_with_urllib):
+    page_thumb = thumbnail_from_page_url(page_url, page_fetch=page_fetch)
+    if page_thumb:
+        return page_thumb
+    if isinstance(info, dict):
+        return thumbnail_from_info(info)
+    return ""
 
 
 def duration_from_browser_dom(dom):
@@ -3807,8 +3914,29 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
     return part_path
 
 
+def direct_media_parallel_part_size(total, workers=None):
+    workers = max(1, safe_int(workers or DIRECT_MEDIA_PARALLEL_WORKERS))
+    total = max(1, safe_int(total))
+    if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
+        return DIRECT_MEDIA_PARALLEL_PART_SIZE
+    target_parts = max(workers * 2, workers)
+    adaptive = (total + target_parts - 1) // target_parts
+    return max(256 * 1024, min(DIRECT_MEDIA_PARALLEL_PART_SIZE, adaptive))
+
+
+def should_use_parallel_direct_download(url, headers, total):
+    total = safe_int(total)
+    if total <= 0:
+        return False
+    if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
+        return True
+    if total < DIRECT_MEDIA_PARALLEL_MIN_SIZE:
+        return False
+    return direct_media_range_supported(url, headers)
+
+
 def direct_media_ranges(total, part_size=None):
-    part_size = max(1, safe_int(part_size or DIRECT_MEDIA_PARALLEL_PART_SIZE))
+    part_size = max(1, safe_int(part_size or direct_media_parallel_part_size(total)))
     start = 0
     index = 0
     while start < total:
@@ -3951,11 +4079,12 @@ def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size
         thread.join(timeout=2)
 
 
-def download_direct_media_parallel(url, output_path, headers, total, on_event=None):
+def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None):
     part_path = output_path.with_name(output_path.name + ".part")
+    resolved_part_size = max(1, safe_int(part_size or direct_media_parallel_part_size(total)))
     ranges = [
         (index, start, end, part_path.with_name(f"{part_path.name}.{index}"))
-        for index, start, end in direct_media_ranges(total)
+        for index, start, end in direct_media_ranges(total, part_size=resolved_part_size)
     ]
     segment_paths = [segment_path for _index, _start, _end, segment_path in ranges]
     downloaded = 0
@@ -4029,13 +4158,18 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     headers = direct_media_request_headers(candidate)
     total = candidate_expected_size(candidate)
-    use_parallel = total >= DIRECT_MEDIA_PARALLEL_THRESHOLD
+    use_parallel = should_use_parallel_direct_download(url, headers, total)
     emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
     if use_parallel:
         try:
-            if not direct_media_range_supported(url, headers):
-                raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
-            part_path = download_direct_media_parallel(url, output_path, headers, total, on_event=on_event)
+            part_path = download_direct_media_parallel(
+                url,
+                output_path,
+                headers,
+                total,
+                on_event=on_event,
+                part_size=direct_media_parallel_part_size(total),
+            )
         except DirectMediaRangeUnsupported:
             emit_event(on_event, "status", message="Range download unsupported; retrying direct download")
             part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
@@ -4507,12 +4641,16 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     proxy_cm = None
     if runner is None:
         total = safe_int((candidate or {}).get("source_filesize")) or candidate_expected_size(candidate)
-        if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
+        if should_use_parallel_direct_download(url, headers, total):
             try:
-                if direct_media_range_supported(url, headers):
-                    proxy_cm = direct_media_parallel_proxy_url(url, headers, total)
-                    input_url = proxy_cm.__enter__()
-                    emit_event(on_event, "status", message="Preparing parallel segment stream")
+                proxy_cm = direct_media_parallel_proxy_url(
+                    url,
+                    headers,
+                    total,
+                    part_size=direct_media_parallel_part_size(total),
+                )
+                input_url = proxy_cm.__enter__()
+                emit_event(on_event, "status", message="Preparing parallel segment stream")
             except Exception as exc:
                 if proxy_cm is not None:
                     proxy_cm.__exit__(*sys.exc_info())

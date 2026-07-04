@@ -12,6 +12,7 @@ dist/
 build-helper/UniversalMP4BrowserDownloader-build/
 
 *.exe
+!build-helper/third_party/winsparkle/**/winsparkle-tool.exe
 *.msi
 *.dmg
 *.pkg
@@ -25,3 +26,6 @@ downloads/
 *.mp4
 *.webm
 *.wav
+
+build-helper/third_party/**/*.pdb
+build-helper/third_party/**/*.zip

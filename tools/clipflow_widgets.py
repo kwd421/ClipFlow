@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 from PySide6.QtCore import QElapsedTimer, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, Property, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
 try:
@@ -531,13 +531,21 @@ def _pixmap_logical_size(pixmap):
     return QSizeF(pixmap.width() / ratio, pixmap.height() / ratio)
 
 
+def _pixmap_letterbox_rect(target_rect, pixmap):
+    if pixmap.isNull():
+        return QRectF(target_rect)
+    logical = _pixmap_logical_size(pixmap)
+    if logical.width() <= 0 or logical.height() <= 0:
+        return QRectF(target_rect)
+    x = target_rect.x() + (target_rect.width() - logical.width()) / 2
+    y = target_rect.y() + (target_rect.height() - logical.height()) / 2
+    return QRectF(x, y, logical.width(), logical.height())
+
+
 def _draw_pixmap_centered(painter, target_rect, pixmap):
     if pixmap.isNull():
         return
-    logical = _pixmap_logical_size(pixmap)
-    x = target_rect.x() + (target_rect.width() - logical.width()) / 2
-    y = target_rect.y() + (target_rect.height() - logical.height()) / 2
-    dest = QRectF(x, y, logical.width(), logical.height())
+    dest = _pixmap_letterbox_rect(target_rect, pixmap)
     painter.drawPixmap(dest, pixmap, QRectF(0, 0, pixmap.width(), pixmap.height()))
 
 
@@ -555,11 +563,12 @@ def _rounded_pixmap(pixmap, width, height, radius, device_ratio=1.0):
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, render_w, render_h), radius * device_ratio, radius * device_ratio)
-    painter.setClipPath(path)
     x = (render_w - scaled.width()) // 2
     y = (render_h - scaled.height()) // 2
+    corner = radius * device_ratio
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(x, y, scaled.width(), scaled.height()), corner, corner)
+    painter.setClipPath(path)
     painter.drawPixmap(x, y, scaled)
     painter.end()
     if device_ratio != 1.0:
@@ -1070,6 +1079,37 @@ class CleanComboBox(QComboBox):
         super().hidePopup()
 
 
+class UpdateAvailableBanner(QFrame):
+    update_requested = Signal()
+    dismissed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("UpdateToast")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 10, 10)
+        layout.setSpacing(10)
+        self.message_label = QLabel("새 버전이 있습니다")
+        self.message_label.setObjectName("UpdateToastMessage")
+        self.update_button = OutlinedButton("업데이트")
+        self.update_button.setObjectName("PrimaryPopupButton")
+        self.update_button.setCursor(Qt.PointingHandCursor)
+        self.dismiss_button = QPushButton("×")
+        self.dismiss_button.setObjectName("UpdateToastDismiss")
+        self.dismiss_button.setFixedSize(24, 24)
+        self.dismiss_button.setCursor(Qt.PointingHandCursor)
+        self.dismiss_button.setFlat(True)
+        self.update_button.clicked.connect(self.update_requested.emit)
+        self.dismiss_button.clicked.connect(self._dismiss)
+        layout.addWidget(self.message_label, 1)
+        layout.addWidget(self.update_button, 0)
+        layout.addWidget(self.dismiss_button, 0, Qt.AlignTop)
+
+    def _dismiss(self):
+        self.hide()
+        self.dismissed.emit()
+
+
 class ThumbnailPlaceholder(QFrame):
     _network_manager = None
     _active_preview_owner = None
@@ -1260,10 +1300,12 @@ class ThumbnailPlaceholder(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        target = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        scaled = self._scaled_thumbnail_pixmap()
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 7, 7)
+        path.addRoundedRect(_pixmap_letterbox_rect(target, scaled), 7, 7)
         painter.setClipPath(path)
-        _draw_pixmap_centered(painter, QRectF(self.rect()).adjusted(1, 1, -1, -1), self._scaled_thumbnail_pixmap())
+        _draw_pixmap_centered(painter, target, scaled)
 
     def enterEvent(self, event):
         self._preview_hide_timer.stop()

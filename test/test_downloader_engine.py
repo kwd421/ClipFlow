@@ -1711,6 +1711,146 @@ for line in sys.stdin:
         html = f'<html><head><meta property="og:image" content="{long_url}"></head></html>'
         self.assertEqual(engine.thumbnail_from_browser_dom(html), long_url)
 
+    def test_thumbnail_from_info_prefers_youtube_maxresdefault(self):
+        info = {
+            "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg",
+            "width": 320,
+            "height": 240,
+            "thumbnails": [
+                {"url": "https://i.ytimg.com/vi/abc/hqdefault.jpg", "width": 480, "height": 360},
+                {"url": "https://i.ytimg.com/vi/abc/maxresdefault.jpg"},
+            ],
+        }
+        self.assertEqual(
+            engine.thumbnail_from_info(info),
+            "https://i.ytimg.com/vi/abc/maxresdefault.jpg",
+        )
+
+    def test_thumbnail_from_info_prefers_display_variant_over_preview(self):
+        info = {
+            "thumbnail": "https://cdn.example.test/30_p.avif",
+            "width": 1920,
+            "height": 1080,
+            "thumbnails": [
+                {"url": "https://cdn.example.test/15_t.jpg"},
+                {"url": "https://cdn.example.test/30_p.avif"},
+            ],
+        }
+        self.assertEqual(
+            engine.thumbnail_from_info(info),
+            "https://cdn.example.test/30_t.jpg",
+        )
+
+    def test_resolve_analysis_thumbnail_prefers_page_meta(self):
+        info = {
+            "thumbnail": "https://cdn.example.test/15_t.jpg",
+            "thumbnails": [{"url": "https://cdn.example.test/15_t.jpg"}],
+        }
+        html = '<html><head><meta property="og:image" content="https://cdn.example.test/page.jpg"></head></html>'
+
+        def fake_fetch(url, timeout=8):
+            del url, timeout
+            return html
+
+        self.assertEqual(
+            engine.resolve_analysis_thumbnail("https://media.example.test/watch/1", info, page_fetch=fake_fetch),
+            "https://cdn.example.test/page.jpg",
+        )
+
+    def test_resolve_analysis_thumbnail_falls_back_to_extractor_metadata(self):
+        info = {
+            "thumbnail": "https://cdn.example.test/15_t.jpg",
+            "thumbnails": [{"url": "https://cdn.example.test/15_t.jpg"}],
+        }
+
+        def fake_fetch(url, timeout=8):
+            del url, timeout
+            raise OSError("blocked")
+
+        self.assertEqual(
+            engine.resolve_analysis_thumbnail("https://media.example.test/watch/1", info, page_fetch=fake_fetch),
+            "https://cdn.example.test/30_t.jpg",
+        )
+
+    def test_direct_media_parallel_part_size_scales_down_for_small_files(self):
+        self.assertEqual(
+            engine.direct_media_parallel_part_size(7 * 1024 * 1024),
+            896 * 1024,
+        )
+        self.assertEqual(
+            engine.direct_media_parallel_part_size(128 * 1024 * 1024),
+            engine.DIRECT_MEDIA_PARALLEL_PART_SIZE,
+        )
+
+    def test_small_direct_media_download_uses_parallel_when_range_supported(self):
+        content = b"x" * (3 * 1024 * 1024)
+        ranges = []
+        original_urlopen = engine.urllib.request.urlopen
+        original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
+        original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
+
+        class FakeResponse:
+            def __init__(self, payload, status=206, headers=None):
+                self.payload = payload
+                self.status = status
+                self.headers = headers or {"Content-Length": str(len(payload))}
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size):
+                if self.offset >= len(self.payload):
+                    return b""
+                chunk = self.payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        def fake_urlopen(request, timeout=30):
+            del timeout
+            range_header = request.get_header("Range")
+            if not range_header:
+                return FakeResponse(content, status=200)
+            ranges.append(range_header)
+            start_text, end_text = range_header.removeprefix("bytes=").split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            return FakeResponse(
+                content[start : end + 1],
+                status=206,
+                headers={
+                    "Content-Length": str(end - start + 1),
+                    "Content-Range": f"bytes {start}-{end}/{len(content)}",
+                },
+            )
+
+        try:
+            engine.urllib.request.urlopen = fake_urlopen
+            engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
+            engine.DIRECT_MEDIA_PARALLEL_WORKERS = 4
+            with tempfile.TemporaryDirectory() as temp:
+                result = engine.download_direct_media(
+                    "https://cdn.example.test/clip.mp4",
+                    {
+                        "title": "Clip",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "sort_bytes": len(content),
+                        "source": "https://chzzk.naver.com/clips/example",
+                    },
+                    temp,
+                )
+                self.assertEqual(Path(result["output_path"]).read_bytes(), content)
+        finally:
+            engine.urllib.request.urlopen = original_urlopen
+            engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
+            engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
+
+        self.assertGreater(len(ranges), 1)
+
     def test_favicon_urls_from_html_discovers_link_icons(self):
         html = """
         <html><head>
