@@ -12,7 +12,7 @@ ClipFlow는 영상 링크를 붙여넣고 품질을 고른 뒤 바로 저장할 
 
 ## 다운로드
 
-- 최신 배포본: [Releases](https://github.com/kwd421/universal-mp4-browser-downloader/releases)
+- 최신 배포본: [Releases](https://github.com/kwd421/ClipFlow/releases)
 - Windows: `ClipFlow-<version>.exe`
 - macOS: 릴리즈 자산에 포함된 macOS 빌드 사용
 

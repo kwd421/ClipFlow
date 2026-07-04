@@ -1958,7 +1958,7 @@ def main():
     app._clipflow_updater = start_app_updater()
     window = ClipFlowWindow()
     window.show()
-    QTimer.singleShot(0, window.schedule_startup_update_check)
+    QTimer.singleShot(1500, window.schedule_startup_update_check)
 
     if os.environ.get("CLIPFLOW_QT_SMOKE") == "1":
         QTimer.singleShot(0, lambda: (print("ClipFlow smoke launch OK"), app.quit()))

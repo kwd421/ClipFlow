@@ -68,16 +68,37 @@ class ClipFlowUpdaterTests(unittest.TestCase):
         with mock.patch.object(updater.sys, "frozen", False, create=True):
             self.assertIsNone(updater.start_winsparkle_updater())
 
-    def test_winsparkle_updater_schedule_startup_check_triggers_background_check(self):
+    def test_latest_appcast_build_number_reads_first_item(self):
+        xml = (
+            b'<?xml version="1.0"?>'
+            b'<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">'
+            b"<channel><item><sparkle:version>104</sparkle:version></item></channel></rss>"
+        )
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = xml
+            self.assertEqual(
+                updater._latest_appcast_build_number("https://example.test/appcast.xml"),
+                104,
+            )
+
+    def test_winsparkle_updater_schedule_startup_check_notifies_when_appcast_is_newer(self):
         library = mock.Mock()
         instance = updater.WinSparkleUpdater(library)
         seen = []
 
-        def on_found():
-            seen.append(True)
+        def run_worker_immediately(target=None, daemon=None, name=None):
+            target()
+            return mock.Mock()
 
-        instance.schedule_startup_check(on_found)
-        library.win_sparkle_check_update_without_ui.assert_called_once_with()
+        on_found = lambda: seen.append(True)
+        with mock.patch.object(updater, "_latest_appcast_build_number", return_value=104), mock.patch.object(
+            updater, "_build_number_int", return_value=102
+        ), mock.patch.object(updater, "updater_feed_url", return_value="https://example.test/appcast.xml"), mock.patch.object(
+            updater, "_dispatch_to_main_thread", side_effect=lambda callback: callback()
+        ), mock.patch.object(updater.threading, "Thread", side_effect=run_worker_immediately):
+            instance.schedule_startup_check(on_found)
+
+        self.assertEqual(seen, [True])
         self.assertIs(instance._on_found, on_found)
 
 

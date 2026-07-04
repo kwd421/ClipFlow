@@ -4,8 +4,16 @@ import atexit
 import ctypes
 import os
 import plistlib
+import re
 import sys
+import threading
+import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+
+SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+SPARKLE_VERSION_TAG = f"{{{SPARKLE_NS}}}version"
 
 
 APP_VENDOR = "ClipFlow"
@@ -66,6 +74,33 @@ def updater_build_number():
 
 def updater_configured():
     return bool(updater_feed_url() and updater_public_ed_key())
+
+
+def _build_number_int(value):
+    text = str(value or "").strip()
+    if text.isdigit():
+        return int(text)
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", text)
+    if match:
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        patch = int(match.group(3))
+        if major < 10 and minor < 10 and patch < 10:
+            return major * 100 + minor * 10 + patch
+    return None
+
+
+def _latest_appcast_build_number(feed_url):
+    request = urllib.request.Request(feed_url, headers={"User-Agent": "ClipFlow-Updater"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        root = ET.fromstring(response.read())
+    item = root.find("channel/item")
+    if item is None:
+        return None
+    version = item.find(SPARKLE_VERSION_TAG)
+    if version is None or not version.text:
+        return None
+    return int(version.text.strip())
 
 
 def _dispatch_to_main_thread(callback):
@@ -215,7 +250,21 @@ class WinSparkleUpdater:
 
     def schedule_startup_check(self, on_found):
         self._on_found = on_found
-        self._library.win_sparkle_check_update_without_ui()
+
+        def worker():
+            try:
+                feed_url = updater_feed_url()
+                if not feed_url:
+                    return
+                latest = _latest_appcast_build_number(feed_url)
+                current = _build_number_int(updater_build_number())
+                if latest is None or current is None or latest <= current:
+                    return
+                _dispatch_to_main_thread(self._on_found)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="clipflow-update-check", daemon=True).start()
 
     def check_for_updates(self):
         self._library.win_sparkle_check_update_with_ui()
