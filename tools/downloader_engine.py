@@ -1186,7 +1186,7 @@ def external_favicon_lookup_url(page_url):
             "type": "FAVICON",
             "fallback_opts": "TYPE,SIZE,URL",
             "url": origin,
-            "size": "32",
+            "size": "128",
         }
     )
     return f"https://t0.gstatic.com/faviconV2?{query}"
@@ -2686,6 +2686,7 @@ def thumbnail_from_browser_dom(dom):
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
             r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<video[^>]+poster=["\']([^"\']+)["\']',
             r'setThumbUrl(?:169)?\(\s*["\']([^"\']+)["\']\s*\)',
         ],
         compact_limit=None,
@@ -3541,22 +3542,37 @@ def direct_media_request_headers(candidate):
     return headers
 
 
-def emit_manifest_download_progress(on_event, current_sec, duration_sec, speed_text="", started_at=None):
+def emit_manifest_download_progress(
+    on_event,
+    current_sec,
+    duration_sec,
+    downloaded_bytes=0,
+    total_bytes=0,
+    started_at=None,
+    last_bytes=0,
+    last_emit_at=None,
+):
     if not duration_sec:
         return
     percent = max(0, min(100, current_sec * 100 / duration_sec))
-    speed_label = ffmpeg_progress_speed_label(speed_text)
+    if total_bytes and downloaded_bytes:
+        percent = max(percent, min(100, downloaded_bytes * 100 / total_bytes))
+    speed_bps = 0.0
+    now = time.monotonic()
+    if last_emit_at is not None and downloaded_bytes > last_bytes:
+        elapsed = max(0.001, now - float(last_emit_at))
+        speed_bps = max(0.0, (downloaded_bytes - last_bytes) / elapsed)
+    elif started_at is not None and downloaded_bytes > 0:
+        elapsed = max(0.001, now - float(started_at))
+        speed_bps = downloaded_bytes / elapsed
+    speed_label = f"{display_size(speed_bps)}/s" if speed_bps > 0 else ""
+    remaining_bytes = max(0, int(total_bytes) - int(downloaded_bytes)) if total_bytes else 0
     eta = 0
-    remaining = max(0.0, float(duration_sec) - float(current_sec))
-    if speed_text.endswith("x"):
-        try:
-            multiplier = float(str(speed_text)[:-1])
-            if multiplier > 0:
-                eta = int(remaining / multiplier)
-        except ValueError:
-            pass
+    if speed_bps > 0 and remaining_bytes:
+        eta = int(remaining_bytes / speed_bps)
     elif started_at is not None and current_sec > 0:
-        elapsed = max(0.001, time.monotonic() - float(started_at))
+        remaining = max(0.0, float(duration_sec) - float(current_sec))
+        elapsed = max(0.001, now - float(started_at))
         eta = int(remaining * elapsed / float(current_sec))
     eta_text = display_duration(eta) if eta else ""
     if speed_label and eta_text:
@@ -3571,6 +3587,9 @@ def emit_manifest_download_progress(on_event, current_sec, duration_sec, speed_t
         on_event,
         "progress",
         percent=percent,
+        downloaded=downloaded_bytes,
+        total=total_bytes,
+        speed=speed_bps,
         speed_text=speed_label,
         eta_text=eta_text,
         message=message,
@@ -3955,6 +3974,8 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
     timeout = BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT if no_progress_timeout is None else float(no_progress_timeout)
     started_at = time.monotonic()
     last_progress = time.monotonic()
+    last_emit_at = started_at
+    last_emit_bytes = 0
     reader_done = False
     stderr_text = ""
 
@@ -3984,13 +4005,23 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
             raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
             current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
             if duration and current > 0:
+                part_size = part_path.stat().st_size if part_path.exists() else 0
+                total_bytes = 0
+                if current >= 3 and part_size > 0:
+                    total_bytes = int(part_size * duration / current)
                 emit_manifest_download_progress(
                     on_event,
                     current,
                     duration,
-                    speed_text=progress_values.get("speed") or "",
+                    downloaded_bytes=part_size,
+                    total_bytes=total_bytes,
                     started_at=started_at,
+                    last_bytes=last_emit_bytes,
+                    last_emit_at=last_emit_at,
                 )
+                if part_size != last_emit_bytes:
+                    last_emit_bytes = part_size
+                    last_emit_at = time.monotonic()
             elif current > 0:
                 emit_event(on_event, "progress", percent=0, message=display_duration(int(current)))
         if process.poll() is not None:

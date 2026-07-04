@@ -521,20 +521,24 @@ class TimecodeInput(QWidget):
             painter.drawText(QRect(unit_x, 0, metrics.horizontalAdvance(units[index]) + 1, self.height()), Qt.AlignVCenter | Qt.AlignLeft, units[index])
 
 
-def _rounded_pixmap(pixmap, width, height, radius):
-    scaled = pixmap.scaled(width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-    result = QPixmap(width, height)
+def _rounded_pixmap(pixmap, width, height, radius, device_ratio=1.0):
+    render_w = max(1, int(round(width * device_ratio)))
+    render_h = max(1, int(round(height * device_ratio)))
+    scaled = pixmap.scaled(render_w, render_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    result = QPixmap(render_w, render_h)
     result.fill(Qt.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+    path.addRoundedRect(QRectF(0, 0, render_w, render_h), radius * device_ratio, radius * device_ratio)
     painter.setClipPath(path)
-    x = (width - scaled.width()) // 2
-    y = (height - scaled.height()) // 2
+    x = (render_w - scaled.width()) // 2
+    y = (render_h - scaled.height()) // 2
     painter.drawPixmap(x, y, scaled)
     painter.end()
+    if device_ratio != 1.0:
+        result.setDevicePixelRatio(device_ratio)
     return result
 
 
@@ -609,22 +613,25 @@ def external_favicon_lookup_url(url):
             "type": "FAVICON",
             "fallback_opts": "TYPE,SIZE,URL",
             "url": origin,
-            "size": "32",
+            "size": "128",
         }
     )
     return f"https://t0.gstatic.com/faviconV2?{query}"
 
 
-def square_favicon_pixmap(pixmap, size=20):
+def square_favicon_pixmap(pixmap, size=20, device_ratio=1.0):
     if pixmap.isNull():
         return pixmap
-    scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    square = QPixmap(size, size)
+    render_size = max(size, int(round(size * device_ratio)))
+    scaled = pixmap.scaled(render_size, render_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    square = QPixmap(render_size, render_size)
     square.fill(Qt.transparent)
     painter = QPainter(square)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
-    painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    painter.drawPixmap((render_size - scaled.width()) // 2, (render_size - scaled.height()) // 2, scaled)
     painter.end()
+    if device_ratio != 1.0:
+        square.setDevicePixelRatio(device_ratio)
     return square
 
 
@@ -836,7 +843,8 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             payload = _reply_bytes(reply)
             pixmap = QPixmap()
             if payload and pixmap.loadFromData(payload) and not pixmap.isNull():
-                icon = QIcon(square_favicon_pixmap(pixmap, self.iconSize().width() or 20))
+                ratio = float(self.devicePixelRatioF() or 1.0)
+                icon = QIcon(square_favicon_pixmap(pixmap, self.iconSize().width() or 20, ratio))
                 self._icon_cache[domain] = icon
                 if domain == source_domain(self.source_url):
                     self.setIcon(icon)
@@ -1157,7 +1165,11 @@ class ThumbnailPlaceholder(QFrame):
     def _scaled_thumbnail_pixmap(self):
         target_size = self.size()
         if self._scaled_pixmap.isNull() or self._scaled_target_size != target_size:
-            self._scaled_pixmap = self._pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            ratio = float(self.devicePixelRatioF() or 1.0)
+            render_size = QSize(max(1, int(target_size.width() * ratio)), max(1, int(target_size.height() * ratio)))
+            scaled = self._pixmap.scaled(render_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(ratio)
+            self._scaled_pixmap = scaled
             self._scaled_target_size = QSize(target_size.width(), target_size.height())
         return self._scaled_pixmap
 
@@ -1185,7 +1197,18 @@ class ThumbnailPlaceholder(QFrame):
         return QCursor.pos()
 
     def _preview_size(self):
-        return QSize(self.width() * THUMBNAIL_PREVIEW_SCALE, self.height() * THUMBNAIL_PREVIEW_SCALE)
+        base_w = self.width() * THUMBNAIL_PREVIEW_SCALE
+        base_h = self.height() * THUMBNAIL_PREVIEW_SCALE
+        if self._pixmap.isNull() or self._pixmap.height() <= 0:
+            return QSize(base_w, base_h)
+        aspect = self._pixmap.width() / self._pixmap.height()
+        if aspect < 0.9:
+            height = min(560, max(base_h, int(base_w / max(aspect, 0.2))))
+            width = max(1, int(height * aspect))
+            return QSize(width, height)
+        width = min(560, max(base_w, int(base_h * aspect)))
+        height = max(1, int(width / aspect))
+        return QSize(width, height)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1247,9 +1270,10 @@ class ThumbnailPlaceholder(QFrame):
             self._preview_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             preview_layout.addWidget(self._preview_label)
         self._preview_label.setFixedSize(width, height)
-        key = (self._pixmap.cacheKey(), width, height, 12)
+        ratio = float(self.devicePixelRatioF() or 1.0)
+        key = (self._pixmap.cacheKey(), width, height, 12, ratio)
         if self._preview_pixmap.isNull() or self._preview_pixmap_key != key:
-            self._preview_pixmap = _rounded_pixmap(self._pixmap, width, height, 12)
+            self._preview_pixmap = _rounded_pixmap(self._pixmap, width, height, 12, ratio)
             self._preview_pixmap_key = key
         self._preview_label.setPixmap(self._preview_pixmap)
         self._preview.adjustSize()

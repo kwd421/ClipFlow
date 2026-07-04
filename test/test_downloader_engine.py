@@ -1886,10 +1886,21 @@ for line in sys.stdin:
         def on_event(event):
             events.append(event)
 
-        engine.emit_manifest_download_progress(on_event=on_event, current_sec=120, duration_sec=600, speed_text="2x", started_at=0)
+        with mock.patch.object(engine.time, "monotonic", return_value=10.0):
+            engine.emit_manifest_download_progress(
+                on_event=on_event,
+                current_sec=120,
+                duration_sec=600,
+                downloaded_bytes=50_000_000,
+                total_bytes=250_000_000,
+                started_at=0.0,
+                last_bytes=40_000_000,
+                last_emit_at=9.0,
+            )
         self.assertEqual(events[-1]["type"], "progress")
         self.assertIn("ETA", events[-1].get("message") or "")
-        self.assertIn("2x", events[-1].get("message") or "")
+        self.assertIn("/s", events[-1].get("message") or "")
+        self.assertIn("/s", events[-1].get("speed_text") or "")
 
     def test_probe_stream_duration_reads_ffprobe_output(self):
         with mock.patch.object(engine, "ffprobe_path", return_value="/usr/bin/ffprobe"), mock.patch.object(

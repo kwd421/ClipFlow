@@ -1627,7 +1627,7 @@ print(thumbnail._preview_label.width(), thumbnail._preview_label.height())
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["True", "True", "384 216"])
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "384 256"])
 
     def test_clipflow_qt_thumbnail_preview_moves_from_mouse_event_global_position(self):
         script = r'''

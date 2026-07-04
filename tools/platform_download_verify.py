@@ -31,10 +31,10 @@ PLATFORMS = [
         "yt-dlp",
         720,
     ),
-    ("pornhub", "https://www.pornhub.com/view_video.php?viewkey=6861453eadd37", "dom", 480),
-    ("xvideos", "https://www.xvideos.com/video.klvdubb4d47/49079845/0/full_version_https_bit.ly_36cjbb4", "dom", 480),
-    ("redtube", "https://www.redtube.com/198689351", "dom", 720),
-    ("xhamster", "https://xhamster.desi/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom", 240),
+    ("dom-media-definitions", "https://www.pornhub.com/view_video.php?viewkey=6861453eadd37", "dom", 480),
+    ("dom-player-script", "https://www.xvideos.com/video.klvdubb4d47/49079845/0/full_version_https_bit.ly_36cjbb4", "dom", 480),
+    ("dom-remote-mp4-api", "https://www.redtube.com/198689351", "dom", 720),
+    ("dom-page-script", "https://xhamster.desi/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom", 240),
 ]
 
 

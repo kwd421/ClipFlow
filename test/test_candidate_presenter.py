@@ -196,7 +196,7 @@ class CandidatePresenterTests(unittest.TestCase):
                 "height": 0,
                 "sort_bytes": 0,
                 "is_manifest": True,
-                "url": "https://www.redtube.com/media/hls?s=token",
+                "url": "https://www.example-stream.test/media/hls?s=token",
             },
             {
                 "id": "browser-mp4",
@@ -204,7 +204,7 @@ class CandidatePresenterTests(unittest.TestCase):
                 "height": 0,
                 "sort_bytes": 0,
                 "is_manifest": False,
-                "url": "https://www.redtube.com/media/mp4?s=token",
+                "url": "https://www.example-stream.test/media/mp4?s=token",
             },
         ]
 
