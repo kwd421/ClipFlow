@@ -53,6 +53,7 @@ class LucideIconWidget(QWidget):
         self.icon_size = size
         self.color = color
         self.setFixedSize(size, size)
+        self.setCursor(Qt.ArrowCursor)
 
     def set_color(self, color):
         self.color = color
@@ -78,6 +79,7 @@ class LucideIconButton(QToolButton):
         background=None,
         hover_background=None,
         bordered=False,
+        pointer_cursor=True,
     ):
         super().__init__(parent)
         self.icon_name = icon_name
@@ -90,7 +92,7 @@ class LucideIconButton(QToolButton):
         self.setObjectName("ActionButton")
         self.setProperty("danger", "true" if danger else "false")
         self.setFixedSize(size, size)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.PointingHandCursor if pointer_cursor else Qt.ArrowCursor)
 
     def tooltip_position(self):
         return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 2))

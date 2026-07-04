@@ -166,6 +166,7 @@ class RowActionOverlay(QFrame):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
+        self.setCursor(Qt.ArrowCursor)
 
     def paintEvent(self, event):
         del event
@@ -179,6 +180,7 @@ class DownloadRowWidget(QFrame):
         self.setObjectName("DownloadRow")
         self.setProperty("selected", "false")
         self.setProperty("hovered", "false")
+        self.setCursor(Qt.ArrowCursor)
         self.setMouseTracking(True)
         self.setFixedHeight(ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -203,7 +205,6 @@ class DownloadRowWidget(QFrame):
 
         self.select_checkbox = CleanCheckBox()
         self.select_checkbox.setObjectName("RowCheck")
-        self.select_checkbox.setCursor(Qt.PointingHandCursor)
         self.select_checkbox.hide()
         self.select_checkbox.toggled.connect(self._on_check_toggled)
         self.select_slot = QWidget()
@@ -229,7 +230,7 @@ class DownloadRowWidget(QFrame):
         title_line = QHBoxLayout()
         title_line.setContentsMargins(0, 0, 0, 0)
         title_line.setSpacing(4)
-        self.playlist_toggle_button = LucideIconButton("chevron-down", size=22, icon_size=14)
+        self.playlist_toggle_button = LucideIconButton("chevron-down", size=22, icon_size=14, pointer_cursor=False)
         self.playlist_toggle_button.setToolTip("펼치기/접기")
         self.playlist_toggle_button.clicked.connect(self._toggle_playlist)
         title_line.addWidget(self.playlist_toggle_button, 0, Qt.AlignVCenter)
@@ -416,6 +417,34 @@ class DownloadRowWidget(QFrame):
         self.spinner = Spinner(30, parent=self)
         self.spinner.hide()
         self._actions_menu_open = False
+        self._apply_row_arrow_cursors()
+
+    def _apply_row_arrow_cursors(self):
+        for widget in (
+            self,
+            self.select_slot,
+            self.item_widget,
+            self.playlist_pill,
+            self.title_label,
+            self.title_action_spacer,
+            self.source_status_slot,
+            self.row_quality_label,
+            self.meta_widget,
+            self.info_widget,
+            self.info_icon,
+            self.info_label,
+            self.size_widget,
+            self.size_icon,
+            self.size_label,
+            self.progress_bar,
+            self.progress_text,
+            self.playlist_detail_label,
+            self.actions_widget,
+            self.thumbnail,
+            self.select_checkbox,
+            self.playlist_toggle_button,
+        ):
+            widget.setCursor(Qt.ArrowCursor)
 
     def mousePressEvent(self, event):
         if getattr(self.owner, "select_mode", False):

@@ -6965,6 +6965,53 @@ print(2 <= gap <= 6)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], "True")
 
+    def test_clipflow_qt_download_row_pointer_cursor_only_on_favicon_and_hover_actions(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_rows import DownloadRowWidget
+
+class RowOwner:
+    select_mode = False
+
+    def selected_candidate_for_row_ref(self, row):
+        return row.get("candidate")
+
+    def row_has_deletable_output(self, row):
+        return False
+
+app = QApplication([])
+row = {"id": "row-1", "candidate": {"title": "Test", "display_title": "Test", "output_ext": "mp4"}}
+widget = DownloadRowWidget(RowOwner(), row)
+pointer = Qt.PointingHandCursor
+arrow = Qt.ArrowCursor
+checks = [
+    widget.cursor().shape() == arrow,
+    widget.thumbnail.cursor().shape() == arrow,
+    widget.thumbnail.icon.cursor().shape() == arrow,
+    widget.title_label.cursor().shape() == arrow,
+    widget.info_icon.cursor().shape() == arrow,
+    widget.size_icon.cursor().shape() == arrow,
+    widget.source_link_button.cursor().shape() == pointer,
+    widget.pause_download_button.cursor().shape() == pointer,
+    widget.resume_download_button.cursor().shape() == pointer,
+    widget.play_file_button.cursor().shape() == pointer,
+    widget.open_folder_button.cursor().shape() == pointer,
+    widget.remove_button.cursor().shape() == pointer,
+    widget.delete_file_button.cursor().shape() == pointer,
+    widget.more_button.cursor().shape() == pointer,
+    widget.playlist_toggle_button.cursor().shape() == arrow,
+    widget.select_checkbox.cursor().shape() == arrow,
+    widget.actions_widget.cursor().shape() == arrow,
+]
+for ok in checks:
+    print(ok)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True"] * 17)
+
 
 if __name__ == "__main__":
     unittest.main()

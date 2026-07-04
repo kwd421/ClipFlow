@@ -306,7 +306,7 @@ class TimecodeInput(QWidget):
         super().__init__(parent)
         self.setObjectName("BareInput")
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.ArrowCursor)
         self._parts = [None, None, None]
         self._selected_segment = None
         self._entry_buffer = ""
@@ -392,6 +392,24 @@ class TimecodeInput(QWidget):
                 return
         self.set_selected_segment(0)
         event.accept()
+
+    def mouseMoveEvent(self, event):
+        self._update_hover_cursor(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.setCursor(Qt.ArrowCursor)
+        super().leaveEvent(event)
+
+    def _update_hover_cursor(self, pos):
+        if self.hasFocus() and self._selected_segment is not None:
+            self.setCursor(Qt.IBeamCursor)
+            return
+        for rect in self._segment_rects:
+            if rect.contains(pos):
+                self.setCursor(Qt.PointingHandCursor)
+                return
+        self.setCursor(Qt.ArrowCursor)
 
     def event(self, event):
         if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
@@ -674,6 +692,7 @@ class AboveTooltipMixin:
 class MarqueeLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setCursor(Qt.ArrowCursor)
         self._marquee_offset = 0
         self._marquee_timer = QTimer(self)
         self._marquee_timer.setInterval(80)
