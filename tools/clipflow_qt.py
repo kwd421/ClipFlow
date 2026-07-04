@@ -199,6 +199,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.rows = []
         self.analysis_thread = None
         self.analysis_worker = None
+        self._analysis_discard_result = False
         self.download_thread = None
         self.download_worker = None
         self.active_download_row = None
@@ -1178,10 +1179,35 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._render_rows()
         self.start_download_for_row(new_row)
 
+    def _cancel_active_analysis(self):
+        self._analysis_discard_result = True
+        self._analysis_auto_download = False
+        self._analysis_url = ""
+        self._playlist_event_parent_id = ""
+        thread = self.analysis_thread
+        if thread and thread.isRunning():
+            thread.quit()
+            try:
+                thread.wait(1500)
+            except TypeError:
+                thread.wait()
+            if thread.isRunning():
+                terminate = getattr(thread, "terminate", None)
+                if callable(terminate):
+                    terminate()
+                    try:
+                        thread.wait(1000)
+                    except TypeError:
+                        thread.wait()
+        self.analysis_thread = None
+        self.analysis_worker = None
+        self.primary_button.set_loading(False)
+
     def _start_analysis(self, auto_download=False):
         if self.analysis_thread and self.analysis_thread.isRunning():
             return
 
+        self._analysis_discard_result = False
         url = self.url_input.text().strip()
         if not url:
             return
@@ -1333,6 +1359,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     @Slot(dict)
     def _analysis_finished(self, analysis):
+        if self._analysis_discard_result:
+            self._analysis_discard_result = False
+            return
         self.analysis = analysis
         self._remember_download_infos(analysis)
         grouped = presenter.group_candidates(analysis.get("candidates") or [])
@@ -1355,6 +1384,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     @Slot(str)
     def _analysis_failed(self, message):
+        if self._analysis_discard_result:
+            self._analysis_discard_result = False
+            return
         message = engine.strip_ansi(message)
         self._analysis_auto_download = False
         changed = False
@@ -1634,6 +1666,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     @Slot(dict)
     def _handle_analysis_event(self, event):
+        if self._analysis_discard_result:
+            return
         event_type = event.get("type")
         if event_type in {"playlist_parent", "playlist_entry", "playlist_entry_loading", "playlist_complete", "playlist_failed_entry"}:
             self._handle_playlist_analysis_event(event)

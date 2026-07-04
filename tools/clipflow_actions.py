@@ -106,9 +106,51 @@ class ActionMixin:
     def _open_path(self, path):
         return QDesktopServices.openUrl(local_file_url(path))
 
+    def row_has_deletable_output(self, row):
+        if not row:
+            return False
+        for path in self._delete_paths_for_row(row, dry_run=True):
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    return True
+                if path.is_dir() and any(child.is_file() and child.stat().st_size > 0 for child in path.iterdir()):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _row_analysis_active(self, row):
+        if not row:
+            return False
+        return bool(row.get("analysis_loading") or row.get("child_loading") or row.get("id") == "__analyzing__")
+
+    def _row_matches_running_analysis(self, row):
+        thread = getattr(self, "analysis_thread", None)
+        if not thread or not thread.isRunning():
+            return False
+        if self._row_analysis_active(row):
+            return True
+        analysis_url = str(getattr(self, "_analysis_url", "") or "").strip()
+        if not analysis_url:
+            return False
+        row_urls = {
+            str(row.get("analysis_source_url") or "").strip(),
+            str(row.get("source_url") or "").strip(),
+            str(row.get("input_url") or "").strip(),
+        }
+        return analysis_url in row_urls
+
     def remove_row(self, row):
         if row.get("status") in {"분석 중", DOWNLOAD_STATUS}:
             return
+        if self._row_analysis_active(row) or self._row_matches_running_analysis(row):
+            cancel = getattr(self, "_cancel_active_analysis", None)
+            if callable(cancel):
+                cancel()
+        if row.get("kind") == "playlist":
+            for child in self._playlist_children_for_parent(row):
+                if child.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS}:
+                    self.pause_download_for_row(child)
         if row in self.rows:
             index = self.rows.index(row)
             transfer_hover = self._row_has_hover(row)
@@ -246,6 +288,8 @@ class ActionMixin:
         output_path = self._delete_target_for_row(row)
         delete_paths = self._delete_paths_for_row(row, dry_run=True)
         if output_path is None and not delete_paths:
+            if row.get("status") == PAUSED_STATUS or self._row_analysis_active(row):
+                self.remove_row(row)
             return
         confirm_target = output_path or (delete_paths[0] if delete_paths else None)
         confirmed = (

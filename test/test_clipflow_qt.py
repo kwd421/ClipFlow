@@ -6420,6 +6420,35 @@ print(started)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["['Video 1']", "True", "['Video 1', 'Video 2']"])
 
+    def test_clipflow_qt_paused_analysis_row_remove_deletes_from_list(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+parent = window._playlist_parent_loading_row("https://media.test/playlist/paused-remove")
+parent["analysis_loading"] = True
+parent["status"] = "일시정지"
+window.rows = [parent]
+window._render_rows()
+app.processEvents()
+widget = parent["widget"]
+widget._set_hovered(True)
+app.processEvents()
+print(widget.remove_button.isVisible())
+print(widget.delete_file_button.isVisible())
+print(widget.remove_button.isEnabled())
+window.remove_row(parent)
+print(len(window.rows))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "True", "0"])
+
     def test_clipflow_qt_paused_streaming_playlist_stops_future_auto_downloads(self):
         script = r'''
 from PySide6.QtWidgets import QApplication

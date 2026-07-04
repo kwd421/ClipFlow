@@ -464,24 +464,24 @@ class DownloadRowWidget(QFrame):
         pauseable = status in {DOWNLOAD_STATUS, WAITING_STATUS}
         paused = status == PAUSED_STATUS
         completed = self.row.get("status") == COMPLETED_STATUS
-        output_path = Path(self.row.get("output_path") or "")
-        has_output = bool(self.row.get("output_path")) and output_path.exists()
-        can_resolve_output = bool(has_output or paused or self.row.get("kind") == "playlist" or self.row.get("is_playlist_child"))
+        has_deletable_output = self.owner.row_has_deletable_output(self.row)
+        has_output = has_deletable_output
+        remove_paused = paused and not has_deletable_output
         # Finder + file delete only make sense once a file exists (completed).
-        # Analysed / error rows expose only "remove from list".
+        # Paused analysis rows without files should expose list removal instead.
         self.pause_download_button.setVisible(pauseable)
         self.resume_download_button.setVisible(paused)
         self.play_file_button.setVisible(completed and has_output and self.row.get("kind") != "playlist")
         self.open_folder_button.setVisible(completed)
-        self.delete_file_button.setVisible(completed or paused)
+        self.delete_file_button.setVisible((completed and has_deletable_output) or (paused and has_deletable_output))
         self.more_button.setVisible(completed)
-        self.remove_button.setVisible(not active and not paused)
+        self.remove_button.setVisible((not active and not paused) or remove_paused)
         self.pause_download_button.setEnabled(pauseable)
         self.resume_download_button.setEnabled(paused)
         self.play_file_button.setEnabled(completed and has_output and not active)
         self.open_folder_button.setEnabled(completed and not active)
-        self.remove_button.setEnabled(not active)
-        self.delete_file_button.setEnabled((completed or paused) and can_resolve_output and not active)
+        self.remove_button.setEnabled(not pauseable and ((not active and not paused) or remove_paused))
+        self.delete_file_button.setEnabled((completed or paused) and has_deletable_output and not active)
         self.more_button.setEnabled(completed)
 
     def _playlist_detail_text(self):
