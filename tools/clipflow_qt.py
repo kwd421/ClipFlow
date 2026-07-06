@@ -222,7 +222,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.resize(self._initial_window_size())
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
-        QTimer.singleShot(200, self._load_completed_history)
+        self._load_completed_history()
         self._refresh_primary_action()
 
     def _initial_window_size(self):
@@ -830,16 +830,30 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return value if isinstance(value, dict) else None
 
     def _candidate_for_download(self, row, candidate):
-        fixed_has_clip_range = bool(row and row.get("fixed_candidate") and (candidate or {}).get("clip_range"))
-        if row and not fixed_has_clip_range and row.get("download_base_candidate"):
-            prepared = dict(row.get("download_base_candidate") or {})
+        row_clip = engine.clip_range_from_candidate((row or {}).get("candidate") or {}) if row and row.get("fixed_candidate") else None
+        try:
+            ui_clip = self.current_clip_range()
+        except ValueError:
+            ui_clip = None
+        normalized_ui_clip = engine.clip_range_from_candidate({"clip_range": ui_clip}) if ui_clip else None
+        clip_override = bool(normalized_ui_clip and normalized_ui_clip != row_clip)
+        if row and row.get("fixed_candidate") and not clip_override:
+            prepared = dict(row.get("candidate") or {})
+        elif row and (row.get("download_base_candidate") or (row.get("fixed_candidate") and clip_override)):
+            if hasattr(self, "_row_clip_download_base_candidate"):
+                prepared = dict(self._row_clip_download_base_candidate(row) or {})
+            else:
+                prepared = dict(row.get("download_base_candidate") or row.get("candidate") or {})
         else:
             prepared = dict(candidate or {})
         key = str(prepared.get("_download_info_key") or "")
         cached_info = self._cached_download_info(key) if key else None
         if cached_info and engine.download_info_reuse_supported(prepared):
             prepared["_download_info"] = cached_info
-        if not fixed_has_clip_range:
+        if engine.candidate_looks_chzzk(prepared, row.get("source_url") or row.get("input_url") or ""):
+            prepared.pop("_download_info", None)
+            prepared.pop("_download_info_key", None)
+        if clip_override or not (row and row.get("fixed_candidate")):
             prepared.pop("clip_range", None)
             prepared.pop("clip_cut_mode", None)
             clip_range = self.current_clip_range()
@@ -897,6 +911,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         row["quality_options"] = build_quality_options([prepared])
         row["selected_index"] = 0
         row["selected_format_index"] = 0
+        if prepared.get("clip_range"):
+            row["fixed_candidate"] = True
         widget = row.get("widget")
         if widget:
             widget.refresh()
@@ -1097,10 +1113,14 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             return None
         return engine.normalize_clip_range(start_text, end_text)
 
+    def _clip_range_input_texts(self):
+        return self._applied_clip_start_text, self._applied_clip_end_text
+
     def current_clip_range(self):
         if self._clip_range_apply_error:
             raise ValueError(self._clip_range_apply_error)
-        return self._clip_range_from_texts(self._applied_clip_start_text, self._applied_clip_end_text)
+        start_text, end_text = self._clip_range_input_texts()
+        return self._clip_range_from_texts(start_text, end_text)
 
     def _show_clip_range_dialog(self, initial=None):
         dialog = QDialog(self)
@@ -1557,8 +1577,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 continue
             if row.get("kind") == "playlist" and not row.get("is_playlist_child"):
                 continue
-            if self._video_duplicate_key(row, source_url, include_current_clip_range=False) == target_key:
-                return row
+            existing_key = self._video_duplicate_key(row, source_url, include_current_clip_range=True)
+            if existing_key != target_key:
+                continue
+            if hasattr(self, "_row_is_downloading") and self._row_is_downloading(row):
+                continue
+            if row.get("download_starting") or row in getattr(self, "queued_download_rows", []):
+                continue
+            if row.get("fixed_candidate"):
+                continue
+            return row
         return None
 
     def _refresh_existing_video_row_for_analysis(self, existing, new_row):
@@ -1566,6 +1594,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if new_row.get(key):
                 existing[key] = new_row.get(key)
         if existing.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS}:
+            return
+        if hasattr(self, "_row_is_downloading") and self._row_is_downloading(existing):
+            return
+        if existing.get("download_starting") or existing in getattr(self, "queued_download_rows", []):
+            return
+        if existing.get("fixed_candidate"):
             return
         for key in ("candidate", "qualities", "quality_options", "selected_index", "selected_format_index"):
             existing[key] = new_row.get(key)
@@ -1670,6 +1704,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if hasattr(self, "status_label"):
                 self.status_label.setText(message or "분석 중")
             if message:
+                detail = engine.compact_text(message, 48)
+                for row in self.rows:
+                    if not self._is_analysis_loading_row(row):
+                        continue
+                    widget = row.get("widget")
+                    if widget:
+                        widget._show_row_quality_text(detail)
                 self._append_event_message(message)
         elif event_type in {"log", "done", "file"} and message:
             self._append_event_message(message)
@@ -1700,6 +1741,20 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _on_download_thread_finished(self):
         self._handle_thread_finished(self.sender())
 
+    def _progress_is_finishing_phase(self, row, percent, message=""):
+        if row and row.get("status") == COMPLETED_STATUS:
+            return False
+        text = str(message or "")
+        finishing_msg = any(token in text for token in ("마무리", "컷", "remux", "Remux"))
+        return finishing_msg and percent >= 99
+
+    def _display_progress_for_row(self, row, percent, event):
+        percent = max(0, min(100, int(float(percent or 0))))
+        message = str((event or {}).get("message") or "").strip() if isinstance(event, dict) else ""
+        if self._progress_is_finishing_phase(row, percent, message):
+            return 100, "마무리 중", True
+        return percent, self._progress_text(percent, event), False
+
     def _handle_engine_event_for(self, row, event):
         event_type = event.get("type")
         message = event.get("message") or event.get("path") or ""
@@ -1707,12 +1762,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if event_type == "progress":
             if row and (row.get("download_cancel_requested") or row.get("status") == PAUSED_STATUS):
                 return
-            percent = max(0, min(100, int(float(event.get("percent") or 0))))
-            text = self._progress_text(percent, event)
+            percent, text, is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
             if row and row.get("download_starting"):
                 row["download_starting"] = False
                 if widget:
                     widget.set_status(DOWNLOAD_STATUS)
+            if row:
+                if is_finishing:
+                    row["download_finishing"] = True
+                elif percent < 99:
+                    row.pop("download_finishing", None)
             if widget:
                 # Avoid the heavy set_status() on every progress tick (it does
                 # spinner/visibility work + a filesystem stat in _refresh_actions).
@@ -1720,9 +1779,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 # it once if it somehow drifted.
                 if row.get("status") != DOWNLOAD_STATUS:
                     widget.set_status(DOWNLOAD_STATUS)
-                widget.set_progress(percent, text)
-            if hasattr(self, "status_label") and self.status_label.text() != (text or "다운로드 중"):
-                self.status_label.setText(text or "다운로드 중")
+                if is_finishing:
+                    widget.set_finishing(text)
+                else:
+                    widget.set_progress(percent, text)
+            status_text = text if is_finishing else (text or "다운로드 중")
+            if hasattr(self, "status_label") and self.status_label.text() != status_text:
+                self.status_label.setText(status_text)
         elif event_type == "file":
             if row and event.get("path"):
                 row["output_path"] = str(event["path"])
@@ -1732,7 +1795,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if message:
                 if hasattr(self, "status_label"):
                     self.status_label.setText(message)
-                if row and row.get("download_starting") and widget:
+                if row and row.get("status") == DOWNLOAD_STATUS and widget:
+                    if any(token in str(message) for token in ("마무리", "컷")):
+                        row["download_finishing"] = True
+                        widget.set_finishing("마무리 중")
+                    elif row.get("download_starting"):
+                        widget.set_progress(0, engine.compact_text(message, 48))
+                elif row and row.get("download_starting") and widget:
                     widget.set_progress(0, engine.compact_text(message, 48))
                 self._append_event_message(message)
         elif event_type in {"log", "done"}:
@@ -1908,6 +1977,8 @@ def main():
     app = QApplication(sys.argv)
     ensure_main_thread_dispatcher()
     configure_app_font(app)
+    engine.terminate_stale_clipflow_worker_processes()
+    engine.reset_clipflow_worker_pools()
     window = ClipFlowWindow()
     window.show()
     app._clipflow_updater = start_app_updater()

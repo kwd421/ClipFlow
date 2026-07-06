@@ -86,6 +86,83 @@ def row_kind(candidate):
     return "video"
 
 
+def row_clip_range_for_display(candidate):
+    raw = (candidate or {}).get("clip_range")
+    if not isinstance(raw, dict):
+        return None
+    start = raw.get("start")
+    end = raw.get("end")
+    if start is None and end is None:
+        return None
+    source_duration = engine.safe_int((candidate or {}).get("source_duration"))
+    try:
+        if source_duration:
+            return engine.normalize_clip_range(start, end, duration=source_duration)
+        if end is None:
+            return {"start": float(start or 0), "end": None}
+        start_val = float(start or 0)
+        end_val = float(end)
+        if end_val <= start_val:
+            return None
+        return {"start": start_val, "end": end_val}
+    except (TypeError, ValueError):
+        return None
+
+
+def row_display_title(candidate):
+    title = str((candidate or {}).get("display_title") or (candidate or {}).get("title") or "media")
+    clip_range = row_clip_range_for_display(candidate)
+    if not clip_range:
+        return title
+    suffix = engine.clip_range_suffix(clip_range)
+    if not suffix:
+        return title
+    if title.endswith(suffix):
+        return title
+    return f"{title} {suffix}".strip()
+
+
+def format_title_label_text(text, font, width, max_lines=2, ellipsis="..."):
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    width = max(1, int(width))
+    metrics = QFontMetrics(font)
+    ellipsis_width = metrics.horizontalAdvance(ellipsis)
+
+    def fits(segment, reserve_ellipsis=False):
+        limit = width - (ellipsis_width if reserve_ellipsis else 0)
+        return metrics.horizontalAdvance(segment) <= limit
+
+    lines = []
+    index = 0
+    length = len(text)
+    while index < length and len(lines) < max_lines:
+        line = ""
+        is_last_line = len(lines) == max_lines - 1
+        while index < length:
+            char = text[index]
+            trial = line + char
+            reserve = is_last_line and index + 1 < length
+            if not fits(trial, reserve_ellipsis=reserve) and line:
+                break
+            if not fits(trial, reserve_ellipsis=False) and not line:
+                line = char
+                index += 1
+                break
+            line = trial
+            index += 1
+        lines.append(line)
+
+    if index < length:
+        last = lines[-1] if lines else ""
+        while last and metrics.horizontalAdvance(last + ellipsis) > width:
+            last = last[:-1]
+        lines[-1] = (last + ellipsis) if last or ellipsis else ellipsis
+
+    return "\n".join(lines)
+
+
 def row_info_text(candidate):
     kind = row_kind(candidate)
     if kind == "gallery":
@@ -94,12 +171,15 @@ def row_info_text(candidate):
     if kind == "image":
         return "1장"
     seconds = engine.safe_int(candidate.get("duration"))
+    duration_text = ""
     if seconds:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         remaining = seconds % 60
-        return f"{hours:02d}:{minutes:02d}:{remaining:02d}"
-    return engine.display_duration(candidate.get("duration"))
+        duration_text = f"{hours:02d}:{minutes:02d}:{remaining:02d}"
+    else:
+        duration_text = engine.display_duration(candidate.get("duration"))
+    return duration_text
 
 
 def quality_display_label(candidate):
@@ -240,8 +320,9 @@ class DownloadRowWidget(QFrame):
         title_line.addWidget(self.playlist_pill, 0, Qt.AlignVCenter)
         self.title_label = QLabel()
         self.title_label.setObjectName("RowTitle")
-        self.title_label.setWordWrap(True)
+        self.title_label.setWordWrap(False)
         self.title_label.setFixedHeight(TITLE_BLOCK_HEIGHT)
+        self._title_source_text = ""
         self.title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
@@ -292,6 +373,7 @@ class DownloadRowWidget(QFrame):
         self.info_label.setObjectName("MetaText")
         self.info_label.setFixedHeight(META_TEXT_HEIGHT)
         self.info_label.setAlignment(Qt.AlignCenter)
+        self._info_source_text = ""
         info_layout.addWidget(self.info_label, 0, Qt.AlignVCenter)
         meta_layout.addWidget(self.info_widget)
 
@@ -464,7 +546,9 @@ class DownloadRowWidget(QFrame):
     def resizeEvent(self, event):
         self._position_actions()
         self._position_spinner()
+        self._refresh_title_display()
         self._refresh_title_alignment()
+        self._refresh_info_display()
         self._clear_progress_path_cache()
         super().resizeEvent(event)
 
@@ -474,11 +558,12 @@ class DownloadRowWidget(QFrame):
 
     def refresh(self):
         candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
-        title = candidate.get("display_title") or candidate.get("title") or "media"
-        self.title_label.setText(str(title))
+        self._title_source_text = row_display_title(candidate)
+        self._refresh_title_display()
         self.title_label.setToolTip("")
         self._refresh_title_alignment()
-        self.info_label.setText(row_info_text(candidate))
+        self._info_source_text = row_info_text(candidate)
+        self._refresh_info_display()
         self.size_label.setText(candidate_size_label(candidate))
         self.row_quality_label.setText("")
         self.thumbnail.set_thumbnail_url(candidate.get("thumbnail") or "", self.row.get("source_url") or "")
@@ -575,22 +660,24 @@ class DownloadRowWidget(QFrame):
         self.title_action_spacer.setVisible(show_actions)
         self.title_label.setContentsMargins(0, 0, 0, 0)
         self.item_widget.layout().activate()
+        self._refresh_title_display()
         self._refresh_title_alignment()
+        self._refresh_info_display()
         if show_actions:
             self._position_actions()
         self._refresh_actions()
         self._repolish()
 
-    def _title_uses_multiple_lines(self):
-        text = self.title_label.text()
-        if not text:
-            return False
+    def _refresh_title_display(self):
+        source = str(getattr(self, "_title_source_text", "") or "")
         width = max(1, self.title_label.width())
-        metrics = QFontMetrics(self.title_label.font())
-        if metrics.horizontalAdvance(text) <= width:
-            return False
-        bounds = metrics.boundingRect(QRect(0, 0, width, 1000), Qt.TextWordWrap, text)
-        return bounds.height() > metrics.lineSpacing() + 2
+        self.title_label.setText(format_title_label_text(source, self.title_label.font(), width))
+
+    def _refresh_info_display(self):
+        self.info_label.setText(str(getattr(self, "_info_source_text", "") or ""))
+
+    def _title_uses_multiple_lines(self):
+        return "\n" in (self.title_label.text() or "")
 
     def _refresh_title_alignment(self):
         self.title_label.setFixedHeight(TITLE_BLOCK_HEIGHT)
@@ -656,12 +743,14 @@ class DownloadRowWidget(QFrame):
         self.update()
 
     def _sync_ring_timer(self):
-        # The rotating ring animates in two indeterminate phases: analysis, and
-        # the "preparing" window of a download (download_starting: kicked off but
-        # no byte progress yet). A running timer repaints the row each frame.
-        # Only (re)start when idle so an analysis -> starting handoff keeps the
-        # animation phase continuous instead of snapping back to the top-left.
-        spinning = self.property("analyzing") == "true" or self.property("starting") == "true"
+        # The rotating ring animates in indeterminate phases: analysis, download
+        # prep (download_starting), and post-download finalize (download_finishing).
+        # Only (re)start when idle so phase handoffs keep the animation continuous.
+        spinning = (
+            self.property("analyzing") == "true"
+            or self.property("starting") == "true"
+            or self.property("finishing") == "true"
+        )
         if spinning:
             if not self._analysis_ring_timer.isActive():
                 self._analysis_ring_elapsed.restart()
@@ -782,18 +871,39 @@ class DownloadRowWidget(QFrame):
         self.setProperty("analyzing", "true" if analyzing else "false")
         starting = bool(self.row.get("download_starting"))
         self.setProperty("starting", "true" if starting else "false")
+        finishing = bool(self.row.get("download_finishing"))
+        self.setProperty("finishing", "true" if finishing else "false")
         self._sync_ring_timer()
         self.spinner.stop()
-        if analyzing or starting or (status == COMPLETED_STATUS and detail):
+        if analyzing or starting or finishing or (status == COMPLETED_STATUS and detail):
             self._show_row_quality_text(detail or status)
         else:
             self._show_row_quality_text("")
         self.info_widget.show()
         self.size_widget.show()
         self._refresh_actions()
-        self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
+        if self.row.get("download_finishing"):
+            self.set_finishing(self.row.get("progress_text") or "마무리 중")
+        else:
+            self.set_progress(self.row.get("progress") or 0, self.row.get("progress_text") or "")
+
+    def set_finishing(self, text="마무리 중"):
+        detail = str(text or "마무리 중").strip() or "마무리 중"
+        self.row["download_finishing"] = True
+        self.row["download_starting"] = False
+        self.row["progress"] = 100
+        self.row["progress_text"] = detail
+        self.setProperty("starting", "false")
+        self.setProperty("finishing", "true")
+        self.setProperty("progressActive", "true")
+        self.setProperty("progressValue", "100")
+        self._sync_ring_timer()
+        self._show_row_quality_text(detail)
+        self.update()
 
     def set_progress(self, value, text=""):
+        self.row.pop("download_finishing", None)
+        self.setProperty("finishing", "false")
         bounded = max(0, min(100, int(float(value or 0))))
         status = self.row.get("status")
         active = status in ACTIVE_STATUSES
@@ -898,7 +1008,8 @@ class DownloadRowWidget(QFrame):
         errored = self.property("errored") == "true"
         analyzing = self.property("analyzing") == "true"
         starting = self.property("starting") == "true"
-        if self.property("progressActive") != "true" and not analyzing and not completed and not errored and not starting:
+        finishing = self.property("finishing") == "true"
+        if self.property("progressActive") != "true" and not analyzing and not completed and not errored and not starting and not finishing:
             return
         _rect, full, gradient = self._progress_paths()
 
@@ -929,9 +1040,17 @@ class DownloadRowWidget(QFrame):
         if starting:
             painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
-            partial = self._ring_segment_path(_rect, 0.0, 1.1)
-            painter.setPen(QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(partial)
+            pen = QPen(QColor(theme.ACCENT_SOFT if self.property("hovered") == "true" else theme.ACCENT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(self._analysis_dash_path(_rect))
+            return
+
+        if finishing:
+            painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            pen = QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(self._analysis_dash_path(_rect))
             return
 
         progress = max(0, min(100, int(self.property("progressValue") or 0)))

@@ -65,6 +65,8 @@ HLS_PARALLEL_MAX_IN_FLIGHT = 16
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
+# CHZZK/DASH declared BANDWIDTH is a peak variant rate; measured VOD size is usually lower.
+CHZZK_PEAK_BANDWIDTH_SIZE_FACTOR = 0.72
 YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 16
 YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
 _PARALLEL_HTTP_STATE = threading.local()
@@ -411,6 +413,60 @@ def cookiesfile_from_env():
         return None
     path = Path(cookie_file).expanduser()
     return str(path) if path.is_file() else None
+
+
+CHZZK_COOKIE_DOMAIN_KEYWORDS = ("naver", "chzzk")
+
+
+def cookie_header_from_jar(cookie_jar, domain_keywords=CHZZK_COOKIE_DOMAIN_KEYWORDS):
+    if not cookie_jar:
+        return ""
+    pairs = {}
+    keywords = tuple(str(keyword or "").lower() for keyword in (domain_keywords or ()) if str(keyword or "").strip())
+    for cookie in cookie_jar:
+        domain = str(getattr(cookie, "domain", "") or "").lower()
+        if keywords and not any(keyword in domain for keyword in keywords):
+            continue
+        name = getattr(cookie, "name", None)
+        value = getattr(cookie, "value", None)
+        if name and value is not None:
+            pairs[str(name)] = str(value)
+    return "; ".join(f"{name}={value}" for name, value in pairs.items())
+
+
+def load_cookie_jar(cookie_source):
+    cookie_file = cookiesfile_from_env()
+    if cookie_file:
+        from http.cookiejar import MozillaCookieJar
+
+        jar = MozillaCookieJar(cookie_file)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        return jar
+    spec = cookiesfrombrowser_spec(cookie_source)
+    if not spec:
+        return None
+    from yt_dlp.cookies import extract_cookies_from_browser
+
+    browser = spec[0]
+    profile = spec[2] if len(spec) > 2 else None
+    return extract_cookies_from_browser(browser, profile)
+
+
+def cookie_header_for_source(cookie_source):
+    try:
+        jar = load_cookie_jar(cookie_source)
+    except Exception:
+        return ""
+    return cookie_header_from_jar(jar)
+
+
+def candidate_with_request_cookies(candidate, cookie_source):
+    cookie_header = cookie_header_for_source(cookie_source)
+    if not cookie_header:
+        return candidate
+    prepared = dict(candidate or {})
+    prepared["_cookie_header"] = cookie_header
+    return prepared
 
 
 def browser_cookie_error(exc):
@@ -919,6 +975,120 @@ def remove_too_small_existing_output(candidate, output_dir, on_event=None):
         return False
     emit_event(on_event, "status", message=f"Replacing partial file: {output_path.name}")
     return True
+
+
+def partial_output_paths_for_target(output_path):
+    output_path = Path(output_path).expanduser()
+    part_path = output_path.with_name(output_path.name + ".part")
+    paths = [
+        part_path,
+        part_path.with_suffix(part_path.suffix + ".media"),
+        output_path.with_name(output_path.stem + ".trim.part" + output_path.suffix),
+    ]
+    if part_path.name:
+        prefix = part_path.name + "."
+        for sibling in part_path.parent.iterdir():
+            if sibling.is_file() and sibling.name.startswith(prefix):
+                paths.append(sibling)
+    unique = []
+    seen = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def cleanup_partial_output_files(output_path, on_event=None):
+    removed = []
+    errors = []
+    for path in partial_output_paths_for_target(output_path):
+        try:
+            if path.is_file():
+                path.unlink()
+                removed.append(path.name)
+        except OSError as exc:
+            errors.append(f"{path.name}: {exc}")
+    if removed:
+        emit_event(on_event, "log", message=f"Removed stale partial files: {', '.join(removed)}")
+    if errors:
+        emit_event(on_event, "status", message=f"Could not remove partial files: {'; '.join(errors)}")
+    return bool(removed) and not errors
+
+
+def terminate_process_tree(process, timeout=2.0):
+    if process is None:
+        return
+    poll = getattr(process, "poll", None)
+    if callable(poll) and poll() is not None:
+        return
+    pid = safe_int(getattr(process, "pid", 0))
+    if os.name == "nt" and pid > 0:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            creationflags=_download_worker_creationflags(),
+        )
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            try:
+                wait(timeout=timeout)
+            except (subprocess.TimeoutExpired, TypeError):
+                try:
+                    wait()
+                except Exception:
+                    pass
+        return
+    terminate = getattr(process, "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:
+            pass
+    wait = getattr(process, "wait", None)
+    if callable(wait):
+        try:
+            wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                try:
+                    kill()
+                except Exception:
+                    pass
+            try:
+                wait(timeout=timeout)
+            except Exception:
+                pass
+        except TypeError:
+            try:
+                wait()
+            except Exception:
+                pass
+
+
+def run_ffmpeg_command(command, timeout=900, error_label="ffmpeg failed"):
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_hidden_subprocess_kwargs(),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_tree(process)
+        raise RuntimeError(f"{error_label}: timed out after {int(timeout)}s") from exc
+    if process.returncode != 0:
+        message = (stderr or stdout or error_label).strip()
+        if isinstance(message, bytes):
+            message = message.decode("utf-8", errors="replace")
+        raise RuntimeError(str(message))
+    return stdout, stderr
 
 
 def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
@@ -1703,23 +1873,35 @@ def chzzk_duration(*values):
     return 0
 
 
-def http_json(url, params=None, headers=None):
+def http_json(url, params=None, headers=None, cookie_header=""):
     if params:
         url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept-Language": ACCEPT_LANGUAGE,
-            "Accept": "application/json,text/plain,*/*",
-            **(headers or {}),
-        },
-    )
+    request_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": ACCEPT_LANGUAGE,
+        "Accept": "application/json,text/plain,*/*",
+        **(headers or {}),
+    }
+    cookie_header = str(cookie_header or "").strip()
+    if cookie_header:
+        request_headers["Cookie"] = cookie_header
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=25) as response:
         return json.loads(response.read().decode("utf-8-sig"))
 
 
-def chzzk_clip_detail(clip_uid):
+def chzzk_detail_hard_blocked(content):
+    optional = (content or {}).get("optionalProperty") or {}
+    if optional.get("privateUserBlock") or optional.get("penalty"):
+        return True
+    return bool((content or {}).get("blindType"))
+
+
+def chzzk_adult_requires_login(content, cookie_header):
+    return bool((content or {}).get("adult")) and not str(cookie_header or "").strip()
+
+
+def chzzk_clip_detail(clip_uid, cookie_header=""):
     return http_json(
         f"https://api.chzzk.naver.com/service/v1/clips/{clip_uid}/detail",
         params=[
@@ -1735,10 +1917,11 @@ def chzzk_clip_detail(clip_uid):
             "Front-Client-Product-Type": "web",
             "Front-Client-Platform-Type": "PC",
         },
+        cookie_header=cookie_header,
     )
 
 
-def chzzk_video_detail(video_no):
+def chzzk_video_detail(video_no, cookie_header=""):
     return http_json(
         f"https://api.chzzk.naver.com/service/v3/videos/{video_no}",
         headers={
@@ -1747,10 +1930,11 @@ def chzzk_video_detail(video_no):
             "Front-Client-Product-Type": "web",
             "Front-Client-Platform-Type": "PC",
         },
+        cookie_header=cookie_header,
     )
 
 
-def chzzk_video_playback(video_id, in_key, video_no):
+def chzzk_video_playback(video_id, in_key, video_no, cookie_header=""):
     return http_json(
         f"https://apis.naver.com/neonplayer/vodplay/v1/playback/{video_id}",
         params={
@@ -1763,10 +1947,11 @@ def chzzk_video_playback(video_id, in_key, video_no):
             "Referer": f"https://chzzk.naver.com/video/{video_no}",
             "Origin": "https://chzzk.naver.com",
         },
+        cookie_header=cookie_header,
     )
 
 
-def chzzk_shortform_card(clip_uid, video_id, rec_id):
+def chzzk_shortform_card(clip_uid, video_id, rec_id, cookie_header=""):
     return http_json(
         "https://api-videohub.naver.com/shortformhub/feeds/v9/card",
         params={
@@ -1788,6 +1973,7 @@ def chzzk_shortform_card(clip_uid, video_id, rec_id):
             "Referer": "https://m.naver.com/shorts/",
             "Origin": "https://m.naver.com",
         },
+        cookie_header=cookie_header,
     )
 
 
@@ -1853,11 +2039,94 @@ def extract_chzzk_media_urls(card_payload):
     return best(mp4_candidates), best(hls_candidates)
 
 
+def chzzk_effective_bandwidth_bps(bandwidth, average_bandwidth=0):
+    average = safe_int(average_bandwidth)
+    peak = safe_int(bandwidth)
+    if average > 0:
+        return average
+    if peak > 0:
+        return max(1, int(peak * CHZZK_PEAK_BANDWIDTH_SIZE_FACTOR))
+    return 0
+
+
+def chzzk_media_size_bytes(item, duration):
+    seconds = safe_int(duration)
+    effective = chzzk_effective_bandwidth_bps(
+        (item or {}).get("bandwidth"),
+        (item or {}).get("average_bandwidth"),
+    )
+    if effective > 0 and seconds > 0:
+        return int(effective * seconds / 8), "bitrate"
+    return 0, "unknown"
+
+
+def hls_stream_inf_bitrate_bps(stream_inf_line):
+    average_match = re.search(r"AVERAGE-BANDWIDTH=(\d+)", str(stream_inf_line or ""))
+    bandwidth_match = re.search(r"BANDWIDTH=(\d+)", str(stream_inf_line or ""))
+    return chzzk_effective_bandwidth_bps(
+        safe_int(bandwidth_match.group(1)) if bandwidth_match else 0,
+        safe_int(average_match.group(1)) if average_match else 0,
+    )
+
+
+def hls_master_playlist_bandwidth(url, headers, height=0):
+    request = urllib.request.Request(str(url or ""), headers=dict(headers or {}))
+    try:
+        with parallel_http_urlopen(request, timeout=20) as response:
+            playlist_text = response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return 0
+    if "#EXT-X-STREAM-INF" not in playlist_text:
+        return 0
+    best = 0
+    best_for_height = 0
+    lines = playlist_text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        resolution_match = re.search(r"RESOLUTION=\d+x(\d+)", line)
+        bandwidth = hls_stream_inf_bitrate_bps(line)
+        variant_height = safe_int(resolution_match.group(1)) if resolution_match else 0
+        if height and variant_height == height:
+            best_for_height = max(best_for_height, bandwidth)
+        best = max(best, bandwidth)
+    return best_for_height or best
+
+
+def enrich_chzzk_candidate_sizes(candidates, limit=3):
+    checked = 0
+    for candidate in candidates:
+        if safe_int(candidate.get("sort_bytes")):
+            continue
+        media_url = str(candidate.get("url") or "")
+        if ".m3u8" not in media_url.lower():
+            continue
+        if checked >= limit:
+            break
+        checked += 1
+        bandwidth = hls_master_playlist_bandwidth(
+            media_url,
+            direct_media_request_headers(candidate),
+            height=safe_int(candidate.get("height")),
+        )
+        duration = safe_int(candidate.get("duration"))
+        if bandwidth > 0 and duration > 0:
+            size = int(bandwidth * duration / 8)
+            candidate["sort_bytes"] = size
+            candidate["filesize_approx"] = size
+            candidate["size_source"] = "bitrate"
+            candidate["tbr"] = max(1, bandwidth // 1000)
+    return candidates
+
+
 def chzzk_candidates_from_media(media_items, source_url, title, thumbnail, duration):
     candidates = []
     for index, item in enumerate(media_items, start=1):
         url = str(item.get("url") or "")
         ext = "mp4" if ".mp4" in url.lower() else "m3u8"
+        sort_bytes, size_source = chzzk_media_size_bytes(item, duration)
+        fmt = {"url": url, "ext": ext, "tbr": max(1, safe_int(item.get("bandwidth")) // 1000) if safe_int(item.get("bandwidth")) else 0}
+        filesize, filesize_approx = candidate_filesize_fields(fmt, sort_bytes, size_source)
         candidates.append(
             {
                 "id": f"chzzk-{index}",
@@ -1873,12 +2142,13 @@ def chzzk_candidates_from_media(media_items, source_url, title, thumbnail, durat
                 "resolution": f"{item.get('width')}x{item.get('height')}" if item.get("width") and item.get("height") else (f"{item.get('height')}p" if item.get("height") else "unknown"),
                 "height": safe_int(item.get("height")),
                 "fps": safe_int(item.get("fps")),
+                "tbr": safe_int(fmt.get("tbr")),
                 "vcodec": "unknown",
                 "acodec": "unknown",
-                "filesize": 0,
-                "filesize_approx": 0,
-                "sort_bytes": 0,
-                "size_source": "unknown",
+                "filesize": filesize,
+                "filesize_approx": filesize_approx,
+                "sort_bytes": sort_bytes,
+                "size_source": size_source,
                 "source": source_url,
                 "note": "CHZZK direct MP4" if ext == "mp4" else "CHZZK HLS",
             }
@@ -1886,22 +2156,25 @@ def chzzk_candidates_from_media(media_items, source_url, title, thumbnail, durat
     return candidates
 
 
-def analyze_chzzk_clip(url, on_event=None):
+def analyze_chzzk_clip(url, on_event=None, cookie_source="없음"):
     clip_uid = find_chzzk_clip_uid(url)
     if not clip_uid:
         return None
 
     emit_event(on_event, "status", message=f"CHZZK 클립 분석 중: {clip_uid}")
-    detail = chzzk_clip_detail(clip_uid)
+    cookie_header = cookie_header_for_source(cookie_source)
+    detail = chzzk_clip_detail(clip_uid, cookie_header=cookie_header)
     content = detail.get("content") or {}
-    if content.get("adult") or (content.get("optionalProperty") or {}).get("privateUserBlock") or (content.get("optionalProperty") or {}).get("penalty"):
+    if chzzk_detail_hard_blocked(content):
         raise RuntimeError("CHZZK clip is not publicly playable in this session.")
+    if chzzk_adult_requires_login(content, cookie_header):
+        raise RuntimeError("CHZZK 성인 콘텐츠는 로그인 쿠키가 필요합니다. 쿠키 소스를 선택하세요.")
 
     video_id = content.get("videoId")
     if not video_id:
         raise RuntimeError("CHZZK clip detail did not include a videoId.")
 
-    card = chzzk_shortform_card(clip_uid, video_id, content.get("recId"))
+    card = chzzk_shortform_card(clip_uid, video_id, content.get("recId"), cookie_header=cookie_header)
     mp4_candidates, hls_candidates = extract_chzzk_media_urls(card)
     raw_title = content.get("clipTitle") or content.get("title") or f"CHZZK clip {clip_uid}"
     title = chzzk_display_title(raw_title, chzzk_channel_name(content, card))
@@ -1919,7 +2192,7 @@ def analyze_chzzk_clip(url, on_event=None):
     )
     source_url = f"https://chzzk.naver.com/clips/{clip_uid}"
     candidates = chzzk_candidates_from_media(mp4_candidates + hls_candidates, source_url, title, thumbnail, duration)
-    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    candidates = sort_candidates(enrich_chzzk_candidate_sizes(enrich_missing_sizes(candidates)))
     return {
         "url": url,
         "webpage_url": source_url,
@@ -1929,16 +2202,21 @@ def analyze_chzzk_clip(url, on_event=None):
     }
 
 
-def analyze_chzzk_video(url, on_event=None):
+def analyze_chzzk_video(url, on_event=None, cookie_source="없음"):
     video_no = find_chzzk_video_no(url)
     if not video_no:
         return None
 
     emit_event(on_event, "status", message=f"CHZZK 동영상 분석 중: {video_no}")
-    detail = chzzk_video_detail(video_no)
+    if cookie_source and cookie_source != "없음":
+        emit_event(on_event, "status", message="로그인 쿠키 확인 중")
+    cookie_header = cookie_header_for_source(cookie_source)
+    detail = chzzk_video_detail(video_no, cookie_header=cookie_header)
     content = detail.get("content") or {}
-    if content.get("adult") or content.get("blindType"):
+    if chzzk_detail_hard_blocked(content):
         raise RuntimeError("CHZZK video is not publicly playable in this session.")
+    if chzzk_adult_requires_login(content, cookie_header):
+        raise RuntimeError("CHZZK 성인 콘텐츠는 로그인 쿠키가 필요합니다. 쿠키 소스를 선택하세요.")
 
     raw_title = content.get("videoTitle") or content.get("title") or f"CHZZK video {video_no}"
     title = chzzk_display_title(raw_title, chzzk_channel_name(content))
@@ -1948,7 +2226,7 @@ def analyze_chzzk_video(url, on_event=None):
 
     playback = None
     if content.get("videoId") and content.get("inKey"):
-        playback = chzzk_video_playback(content.get("videoId"), content.get("inKey"), video_no)
+        playback = chzzk_video_playback(content.get("videoId"), content.get("inKey"), video_no, cookie_header=cookie_header)
     elif content.get("liveRewindPlaybackJson"):
         playback = json.loads(content.get("liveRewindPlaybackJson") or "{}")
     if not playback:
@@ -1956,7 +2234,7 @@ def analyze_chzzk_video(url, on_event=None):
 
     mp4_candidates, hls_candidates = extract_chzzk_media_urls(playback)
     candidates = chzzk_candidates_from_media(mp4_candidates + hls_candidates, source_url, title, thumbnail, duration)
-    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    candidates = sort_candidates(enrich_chzzk_candidate_sizes(enrich_missing_sizes(candidates)))
     return {
         "url": url,
         "webpage_url": source_url,
@@ -2360,8 +2638,12 @@ def is_youtube_url(value):
 
 def download_info_reuse_supported(candidate):
     candidate = candidate or {}
+    if str(candidate.get("format_id") or "").startswith("chzzk-"):
+        return False
     for value in (candidate.get("source"), candidate.get("webpage_url"), candidate.get("url")):
         if is_youtube_url(value):
+            return False
+        if is_chzzk_page_url(value):
             return False
     return True
 
@@ -3624,12 +3906,14 @@ def analyze_url(
     url = str(url).strip()
     warnings = []
 
-    chzzk = analyze_chzzk_clip(url, on_event=on_event)
-    if chzzk:
-        return chzzk
-    chzzk = analyze_chzzk_video(url, on_event=on_event)
-    if chzzk:
-        return chzzk
+    if is_chzzk_page_url(url):
+        chzzk = analyze_chzzk_clip(url, on_event=on_event, cookie_source=cookie_source)
+        if chzzk:
+            return chzzk
+        chzzk = analyze_chzzk_video(url, on_event=on_event, cookie_source=cookie_source)
+        if chzzk:
+            return chzzk
+        raise RuntimeError("CHZZK URL 분석에 실패했습니다. Firefox 로그인 쿠키를 선택하고 다시 시도하세요.")
 
     if ydl_factory is None:
         ydl_factory = youtube_dl_factory()
@@ -3783,21 +4067,129 @@ def is_direct_https_mp4_candidate(candidate):
     return media_url.endswith(".mp4") or ".mp4?" in media_url or ".mp4&" in media_url
 
 
-def is_chzzk_direct_mp4_candidate(candidate):
-    source = str((candidate or {}).get("source") or "")
-    media_url = str((candidate or {}).get("url") or "")
-    return (
-        "chzzk.naver.com/" in source
-        and media_url.lower().startswith(("http://", "https://"))
-        and ".mp4" in media_url.lower()
-        and str((candidate or {}).get("format_selector") or "") == "best"
+def chzzk_source_hint(*values):
+    for value in values:
+        text = str(value or "")
+        if "chzzk.naver.com/" in text:
+            return text
+    return ""
+
+
+def is_chzzk_page_url(url):
+    return bool(find_chzzk_clip_uid(url) or find_chzzk_video_no(url) or chzzk_source_hint(url))
+
+
+def candidate_looks_chzzk(candidate, page_url=""):
+    candidate = candidate or {}
+    if str(candidate.get("format_id") or "").startswith("chzzk-"):
+        return True
+    return bool(
+        chzzk_source_hint(
+            candidate.get("source"),
+            candidate.get("webpage_url"),
+            candidate.get("source_url"),
+            page_url,
+        )
+    ) or is_chzzk_page_url(page_url)
+
+
+def is_chzzk_direct_mp4_candidate(candidate, page_url=""):
+    candidate = candidate or {}
+    if not candidate_looks_chzzk(candidate, page_url):
+        return False
+    media_url = str(candidate.get("url") or "").lower()
+    return media_url.startswith(("http://", "https://")) and ".mp4" in media_url
+
+
+def is_chzzk_hls_candidate(candidate, page_url=""):
+    candidate = candidate or {}
+    if not candidate_looks_chzzk(candidate, page_url):
+        return False
+    media_url = str(candidate.get("url") or "").lower()
+    return media_url.startswith(("http://", "https://")) and ".m3u8" in media_url
+
+
+def merge_chzzk_analysis_candidate(base, fresh):
+    merged = dict(fresh or {})
+    for key in (
+        "clip_range",
+        "clip_cut_mode",
+        "title",
+        "display_title",
+        "source_duration",
+        "source_filesize",
+        "_clipflow_row_id",
+    ):
+        value = (base or {}).get(key)
+        if value is not None and value != "":
+            merged[key] = value
+    if merged.get("clip_range"):
+        merged = candidate_with_clip_range_metadata(merged)
+    return merged
+
+
+def refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=None):
+    candidate = dict(candidate or {})
+    if is_chzzk_direct_mp4_candidate(candidate, page_url) or is_chzzk_hls_candidate(candidate, page_url):
+        return candidate
+    hint = chzzk_source_hint(
+        candidate.get("source"),
+        candidate.get("webpage_url"),
+        candidate.get("source_url"),
+        page_url,
     )
+    if not hint:
+        return candidate
+    analysis = analyze_chzzk_clip(hint, on_event=on_event, cookie_source=cookie_source)
+    if not analysis:
+        analysis = analyze_chzzk_video(hint, on_event=on_event, cookie_source=cookie_source)
+    if not analysis:
+        return candidate
+    wanted_id = str(candidate.get("format_id") or "")
+    picks = analysis.get("candidates") or []
+    for item in picks:
+        if wanted_id and item.get("format_id") == wanted_id:
+            return merge_chzzk_analysis_candidate(candidate, item)
+    for item in picks:
+        if is_chzzk_direct_mp4_candidate(item, hint):
+            return merge_chzzk_analysis_candidate(candidate, item)
+    for item in picks:
+        if is_chzzk_hls_candidate(item, hint):
+            return merge_chzzk_analysis_candidate(candidate, item)
+    return candidate
 
 
-def is_chzzk_hls_candidate(candidate):
-    source = str((candidate or {}).get("source") or "")
-    media_url = str((candidate or {}).get("url") or "").lower()
-    return "chzzk.naver.com/" in source and ".m3u8" in media_url
+def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없음", on_event=None):
+    if not candidate_looks_chzzk(candidate, page_url):
+        return None
+    candidate = refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=on_event)
+    candidate = dict(candidate or {})
+    candidate.pop("_download_info", None)
+    candidate.pop("_download_info_key", None)
+    chzzk_source = chzzk_source_hint(
+        candidate.get("source"),
+        candidate.get("webpage_url"),
+        candidate.get("source_url"),
+        page_url,
+    )
+    if chzzk_source and "chzzk.naver.com/" not in str(candidate.get("source") or ""):
+        candidate["source"] = chzzk_source
+    if not is_chzzk_direct_mp4_candidate(candidate, page_url) and not is_chzzk_hls_candidate(candidate, page_url):
+        raise RuntimeError(
+            "CHZZK 미디어 URL을 찾지 못했습니다. Firefox 로그인 쿠키를 선택하고 다시 분석하세요."
+        )
+    target_url = candidate.get("url") or page_url
+    if candidate.get("format_selector") == "best" and candidate.get("url"):
+        target_url = candidate["url"]
+    candidate = candidate_with_request_cookies(candidate, cookie_source)
+    media_url = str(candidate.get("url") or "").strip()
+    if media_url:
+        target_url = media_url
+    if is_chzzk_direct_mp4_candidate(candidate, page_url):
+        if clip_range_from_candidate(candidate):
+            return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
+        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+    return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
 
 
 def is_browser_dom_manifest_candidate(candidate):
@@ -3816,6 +4208,9 @@ def direct_media_request_headers(candidate):
     source = str((candidate or {}).get("source") or "")
     if source.startswith(("http://", "https://")):
         headers["Referer"] = source
+    cookie_header = str((candidate or {}).get("_cookie_header") or "").strip()
+    if cookie_header:
+        headers["Cookie"] = cookie_header
     return headers
 
 
@@ -3964,11 +4359,14 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
 def direct_media_parallel_part_size(total, workers=None):
     workers = max(1, safe_int(workers or DIRECT_MEDIA_PARALLEL_WORKERS))
     total = max(1, safe_int(total))
-    if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
-        return DIRECT_MEDIA_PARALLEL_PART_SIZE
-    target_parts = max(workers * 4, workers * 2, workers)
-    adaptive = (total + target_parts - 1) // target_parts
-    return max(1, min(DIRECT_MEDIA_PARALLEL_PART_SIZE, adaptive))
+    if total < DIRECT_MEDIA_PARALLEL_MIN_SIZE:
+        return total
+    if total < DIRECT_MEDIA_PARALLEL_THRESHOLD:
+        target_parts = max(workers * 4, workers * 2, workers)
+        adaptive = (total + target_parts - 1) // target_parts
+        return max(1, min(DIRECT_MEDIA_PARALLEL_PART_SIZE, adaptive))
+    # Large files: one range per worker lane, not thousands of 16 MB shards.
+    return max(DIRECT_MEDIA_PARALLEL_PART_SIZE, (total + workers - 1) // workers)
 
 
 def should_use_parallel_direct_download(url, headers, total):
@@ -4129,11 +4527,6 @@ def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size
 def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None):
     part_path = output_path.with_name(output_path.name + ".part")
     resolved_part_size = max(1, safe_int(part_size or direct_media_parallel_part_size(total)))
-    ranges = [
-        (index, start, end, part_path.with_name(f"{part_path.name}.{index}"))
-        for index, start, end in direct_media_ranges(total, part_size=resolved_part_size)
-    ]
-    segment_paths = [segment_path for _index, _start, _end, segment_path in ranges]
     downloaded = 0
     downloaded_lock = threading.Lock()
     progress_lock = threading.Lock()
@@ -4180,7 +4573,12 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
             raise RuntimeError(f"Direct media range returned {written} bytes, expected {expected}.")
         return index, segment_path
 
-    try:
+    with tempfile.TemporaryDirectory(prefix="clipflow-direct-") as temp_dir:
+        temp_root = Path(temp_dir)
+        ranges = [
+            (index, start, end, temp_root / f"seg_{index:08d}.part")
+            for index, start, end in direct_media_ranges(total, part_size=resolved_part_size)
+        ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, safe_int(DIRECT_MEDIA_PARALLEL_WORKERS))) as executor:
             completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
         emit_event(on_event, "status", message="Finalizing direct download")
@@ -4188,13 +4586,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
             for _index, segment_path in completed:
                 with segment_path.open("rb") as segment_file:
                     shutil.copyfileobj(segment_file, output_file, 1024 * 1024)
-        return part_path
-    finally:
-        for segment_path in segment_paths:
-            try:
-                segment_path.unlink()
-            except OSError:
-                pass
+    return part_path
 
 
 def download_direct_media(url, candidate, output_dir, on_event=None):
@@ -4371,6 +4763,8 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
     key_iv = None
     init_map_url = ""
     segment_urls = []
+    segment_durations = []
+    pending_duration = None
     for line in str(playlist_text or "").splitlines():
         line = line.strip()
         if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
@@ -4386,15 +4780,128 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
             iv_match = re.search(r"IV=0x([0-9a-fA-F]+)", line)
             if iv_match:
                 key_iv = bytes.fromhex(iv_match.group(1))
+        elif line.startswith("#EXTINF:"):
+            value = line.split(":", 1)[1].split(",", 1)[0].strip()
+            try:
+                pending_duration = float(value)
+            except ValueError:
+                pending_duration = None
         elif line and not line.startswith("#"):
             segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+            segment_durations.append(float(pending_duration or 0.0))
+            pending_duration = None
     return {
         "media_sequence": media_sequence,
         "key_url": key_url,
         "key_iv": key_iv,
         "init_map_url": init_map_url,
         "segment_urls": segment_urls,
+        "segment_durations": segment_durations,
     }
+
+
+def hls_segment_indices_for_clip_range(segment_durations, clip_start, clip_end=None):
+    durations = [float(value or 0.0) for value in (segment_durations or [])]
+    if not durations:
+        return []
+    start = max(0.0, float(clip_start or 0.0))
+    end = float(clip_end) if clip_end is not None else None
+    indices = []
+    timeline = 0.0
+    for index, seg_duration in enumerate(durations):
+        seg_start = timeline
+        seg_end = timeline + max(0.0, seg_duration)
+        timeline = seg_end
+        if end is not None and seg_start >= end:
+            break
+        if end is not None and seg_end <= start:
+            continue
+        if seg_end > start and (end is None or seg_start < end):
+            indices.append(index)
+    return indices
+
+
+def hls_segment_urls_for_clip_range(playlist_meta, clip_range):
+    segment_urls = list((playlist_meta or {}).get("segment_urls") or [])
+    durations = list((playlist_meta or {}).get("segment_durations") or [])
+    if not isinstance(clip_range, dict) or not segment_urls:
+        return segment_urls
+    if len(durations) != len(segment_urls):
+        raise RuntimeError("HLS segment durations were unavailable for clipped download.")
+    indices = hls_segment_indices_for_clip_range(
+        durations,
+        clip_range.get("start"),
+        clip_range.get("end"),
+    )
+    if not indices:
+        raise RuntimeError("Selected clip range did not match any HLS segments.")
+    return [segment_urls[index] for index in indices]
+
+
+def hls_clip_trim_params(playlist_meta, clip_range):
+    normalized = clip_range_from_candidate({"clip_range": clip_range}) if isinstance(clip_range, dict) else None
+    if not normalized:
+        return None
+    durations = [float(value or 0.0) for value in ((playlist_meta or {}).get("segment_durations") or [])]
+    if not durations:
+        return None
+    indices = hls_segment_indices_for_clip_range(
+        durations,
+        normalized.get("start"),
+        normalized.get("end"),
+    )
+    if not indices:
+        return None
+    clip_start = float(normalized.get("start") or 0.0)
+    clip_end = normalized.get("end")
+    media_start = sum(durations[: indices[0]])
+    in_file_start = max(0.0, clip_start - media_start)
+    out_duration = max(0.0, float(clip_end) - clip_start) if clip_end is not None else None
+    if in_file_start <= 0.01 and out_duration is None:
+        return None
+    return {
+        "in_file_start": in_file_start,
+        "out_duration": out_duration,
+        "clip_start": clip_start,
+        "clip_end": clip_end,
+    }
+
+
+def trim_downloaded_media_to_clip_range(output_path, trim_params, candidate=None, ffmpeg_exe=None, on_event=None):
+    output_path = Path(output_path).expanduser()
+    if not output_path.is_file() or not trim_params:
+        return output_path
+    in_file_start = max(0.0, float(trim_params.get("in_file_start") or 0.0))
+    out_duration = trim_params.get("out_duration")
+    if out_duration is not None:
+        out_duration = max(0.0, float(out_duration))
+    if in_file_start <= 0.01 and out_duration is None:
+        return output_path
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required to trim downloaded clip ranges")
+    trimmed_path = output_path.with_name(output_path.stem + ".trim.part" + output_path.suffix)
+    output_format = normalized_output_ext((candidate or {}).get("output_ext")) or output_path.suffix.lstrip(".") or "mp4"
+    command = [str(ffmpeg_exe), "-y", "-hide_banner", "-i", str(output_path)]
+    if in_file_start > 0.01:
+        command += ["-ss", str(in_file_start)]
+    if out_duration is not None:
+        command += ["-t", str(out_duration)]
+    command += ["-c", "copy", "-movflags", "+faststart", "-f", output_format, str(trimmed_path)]
+    emit_event(on_event, "status", message="마무리 중")
+    emit_event(on_event, "progress", percent=100, message="마무리 중")
+    try:
+        run_ffmpeg_command(command, error_label="ffmpeg clip trim failed")
+    except RuntimeError:
+        try:
+            trimmed_path.unlink()
+        except OSError:
+            pass
+        raise
+    if not trimmed_path.is_file() or trimmed_path.stat().st_size <= 0:
+        raise RuntimeError("ffmpeg clip trim produced an empty file.")
+    trimmed_path.replace(output_path)
+    return output_path
 
 
 def hls_aes128_iv(media_sequence, segment_index, fixed_iv=None):
@@ -4614,16 +5121,7 @@ def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
         output_format,
         str(output_path),
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_hidden_subprocess_kwargs(),
-    )
-    if completed.returncode != 0:
-        raise RuntimeError((completed.stderr or completed.stdout or "HLS remux failed.").strip())
+    run_ffmpeg_command(command, error_label="HLS remux failed")
 
 
 def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
@@ -4704,7 +5202,10 @@ def emit_hls_parallel_progress(
             return last_emit_at, last_emit_bytes
     expected_total = candidate_expected_size(candidate)
     if duration:
-        current_sec = int(duration * completed_segments / total_segments)
+        if completed_segments >= total_segments:
+            current_sec = max(0, duration - 1)
+        else:
+            current_sec = int(duration * completed_segments / total_segments)
         emit_manifest_download_progress(
             on_event,
             current_sec,
@@ -4722,6 +5223,8 @@ def emit_hls_parallel_progress(
         )
     else:
         percent = completed_segments * 100 / total_segments
+        if completed_segments >= total_segments:
+            percent = min(percent, 99)
         now = time.monotonic()
         if last_emit_at is not None and downloaded_bytes > last_emit_bytes:
             speed = max(0.0, (downloaded_bytes - last_emit_bytes) / max(0.001, now - float(last_emit_at)))
@@ -4758,17 +5261,25 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
     playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
     init_map_url = str(playlist_meta.get("init_map_url") or "")
     is_fmp4 = bool(init_map_url)
-    segment_urls = playlist_meta["segment_urls"]
+    clip_range = clip_range_from_candidate(candidate)
+    clip_trim_params = hls_clip_trim_params(playlist_meta, clip_range) if clip_range else None
+    if clip_range:
+        segment_urls = hls_segment_urls_for_clip_range(playlist_meta, clip_range)
+        emit_event(on_event, "status", message=f"Downloading {len(segment_urls)} HLS segments for selected range")
+    else:
+        segment_urls = playlist_meta["segment_urls"]
+        if not segment_urls:
+            raise RuntimeError("HLS media playlist had no segments.")
+        limit = safe_int(segment_limit)
+        if limit > 0:
+            segment_urls = segment_urls[:limit]
+        emit_event(on_event, "status", message=f"Downloading {len(segment_urls)} HLS segments in parallel")
     if not segment_urls:
         raise RuntimeError("HLS media playlist had no segments.")
-    limit = safe_int(segment_limit)
-    if limit > 0:
-        segment_urls = segment_urls[:limit]
     aes_key = hls_parallel_aes_key(playlist_text, playlist_meta, headers)
     workers = max(1, min(HLS_PARALLEL_WORKERS, len(segment_urls)))
     max_in_flight = max(workers, min(HLS_PARALLEL_MAX_IN_FLIGHT, len(segment_urls)))
     total_segments = len(segment_urls)
-    emit_event(on_event, "status", message=f"Downloading {total_segments} HLS segments in parallel")
     started_at = time.monotonic()
     last_emit_at = started_at
     last_emit_bytes = 0
@@ -4858,33 +5369,35 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                             last_emit_at,
                             last_emit_bytes,
                         )
-        emit_hls_parallel_progress(
-            on_event,
-            candidate,
-            total_segments,
-            total_segments,
-            downloaded_bytes,
-            duration,
-            started_at,
-            last_emit_at,
-            last_emit_bytes,
-            force=True,
-        )
-        emit_event(on_event, "status", message="Finalizing HLS download")
+        emit_event(on_event, "progress", percent=100, message="마무리 중")
+        emit_event(on_event, "status", message="마무리 중")
         output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
         if is_fmp4:
             # CMAF init + fragment concat is already MP4; skip ffmpeg remux for throughput.
             part_media_path.replace(part_path)
         else:
             remux_ts_file_to_mp4(part_media_path, part_path, ffmpeg_exe, output_format=output_format)
+    except BaseException:
+        cleanup_partial_output_files(output_path, on_event=on_event)
+        raise
     finally:
         try:
             part_media_path.unlink()
         except OSError:
             pass
     if not part_path.exists() or part_path.stat().st_size <= 0:
+        cleanup_partial_output_files(output_path, on_event=on_event)
         raise RuntimeError("Parallel HLS download produced an empty file.")
     part_path.replace(output_path)
+    if clip_trim_params:
+        trim_downloaded_media_to_clip_range(
+            output_path,
+            clip_trim_params,
+            candidate=candidate,
+            ffmpeg_exe=ffmpeg_exe,
+            on_event=on_event,
+        )
+    emit_event(on_event, "progress", percent=100, message="100%")
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_path))
     return {
@@ -5071,9 +5584,13 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     end = clip_range.get("end")
     duration = float(end - start) if end is not None else 0
     cut_mode = clip_cut_mode(candidate)
+    media_url = str((candidate or {}).get("url") or "").strip()
+    if media_url.lower().startswith(("http://", "https://")):
+        url = media_url
     input_url = url
     proxy_cm = None
-    if runner is None:
+    is_hls_input = ".m3u8" in str(url or "").lower()
+    if runner is None and not is_hls_input:
         total = safe_int((candidate or {}).get("source_filesize")) or candidate_expected_size(candidate)
         if should_use_parallel_direct_download(url, headers, total):
             try:
@@ -5081,16 +5598,16 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
                     url,
                     headers,
                     total,
-                    part_size=direct_media_parallel_part_size(total),
+                    part_size=min(1024 * 1024, direct_media_parallel_part_size(total)),
                 )
                 input_url = proxy_cm.__enter__()
-                emit_event(on_event, "status", message="Preparing parallel segment stream")
+                emit_event(on_event, "status", message="Preparing segment stream")
             except Exception as exc:
                 if proxy_cm is not None:
                     proxy_cm.__exit__(*sys.exc_info())
                     proxy_cm = None
                 input_url = url
-                emit_event(on_event, "log", message=f"Parallel segment stream unavailable: {exc}")
+                emit_event(on_event, "log", message=f"Segment stream proxy unavailable: {exc}")
     command = [
         str(ffmpeg_exe),
         "-y",
@@ -5101,6 +5618,8 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         "-headers",
         header_arg,
     ]
+    if is_hls_input:
+        command += ["-allowed_extensions", "ALL"]
     if cut_mode == "accurate":
         preseek = max(0.0, start - 5.0)
         if preseek:
@@ -5167,8 +5686,10 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
             percent = max(0, min(100, current * 100 / duration))
         else:
             percent = 0
-        if duration and percent <= last_percent and percent < 100:
+        if duration and percent <= last_percent and percent < 99:
             return
+        if duration:
+            percent = min(percent, 99.0)
         last_percent = percent
         last_progress = time.monotonic()
         speed_text = str(progress_values.get("speed") or "").strip()
@@ -5272,6 +5793,19 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
             "target_url": candidate.get("source") or page_url or candidate.get("url"),
         }
     remove_too_small_existing_output(candidate, output_dir, on_event=on_event)
+    output_target = final_output_path_for_candidate(candidate, output_dir)
+    if output_target:
+        cleanup_partial_output_files(output_target, on_event=on_event)
+
+    chzzk_result = download_chzzk_candidate(
+        page_url,
+        candidate,
+        output_dir,
+        cookie_source=cookie_source,
+        on_event=on_event,
+    )
+    if chzzk_result is not None:
+        return chzzk_result
 
     target_url = candidate.get("source") or page_url or candidate.get("url")
     if str((candidate or {}).get("format_id") or "").startswith("browser-"):
@@ -5280,15 +5814,6 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         target_url = candidate["url"]
     if is_browser_dom_manifest_candidate(candidate):
         return download_browser_dom_manifest(target_url, candidate, output_dir, on_event=on_event)
-    if is_chzzk_direct_mp4_candidate(candidate):
-        if clip_range_from_candidate(candidate):
-            return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
-        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
-    if is_chzzk_hls_candidate(candidate):
-        try:
-            return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
-        except Exception as exc:
-            emit_event(on_event, "log", message=f"Parallel HLS download unavailable: {exc}")
     if is_direct_https_mp4_candidate(candidate):
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
 
@@ -5366,6 +5891,39 @@ _DOWNLOAD_PROCESS_POOL = None
 _DOWNLOAD_PROCESS_POOL_LOCK = threading.Lock()
 _ANALYSIS_PROCESS_POOL = None
 _ANALYSIS_PROCESS_POOL_LOCK = threading.Lock()
+
+
+def reset_clipflow_worker_pools():
+    global _DOWNLOAD_PROCESS_POOL, _ANALYSIS_PROCESS_POOL
+    with _DOWNLOAD_PROCESS_POOL_LOCK:
+        if _DOWNLOAD_PROCESS_POOL is not None:
+            _DOWNLOAD_PROCESS_POOL.close_all()
+        _DOWNLOAD_PROCESS_POOL = None
+    with _ANALYSIS_PROCESS_POOL_LOCK:
+        if _ANALYSIS_PROCESS_POOL is not None:
+            _ANALYSIS_PROCESS_POOL.close_all()
+        _ANALYSIS_PROCESS_POOL = None
+
+
+def terminate_stale_clipflow_worker_processes():
+    if getattr(sys, "frozen", False):
+        return
+    pattern = "clipflow_(download|analysis)_process"
+    if sys.platform == "win32":
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            pass
 
 
 def _download_worker_request(page_url, candidate, output_dir, cookie_source="없음", proxy_url=None):
@@ -5465,13 +6023,7 @@ class PersistentDownloadProcess:
         except Exception:
             pass
         try:
-            if self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=2)
+            terminate_process_tree(self.process)
         except Exception:
             pass
         try:
@@ -5662,13 +6214,7 @@ class PersistentAnalysisProcess:
         except Exception:
             pass
         try:
-            if self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=2)
+            terminate_process_tree(self.process)
         except Exception:
             pass
         try:

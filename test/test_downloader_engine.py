@@ -1790,7 +1790,11 @@ for line in sys.stdin:
         )
         self.assertEqual(
             engine.direct_media_parallel_part_size(128 * 1024 * 1024),
-            engine.DIRECT_MEDIA_PARALLEL_PART_SIZE,
+            32 * 1024 * 1024,
+        )
+        self.assertEqual(
+            len(list(engine.direct_media_ranges(13 * 3600 * 6_000_000 // 8))),
+            engine.DIRECT_MEDIA_PARALLEL_WORKERS,
         )
 
     def test_small_direct_media_download_uses_parallel_when_range_supported(self):
@@ -2246,7 +2250,7 @@ for line in sys.stdin:
         original_card = engine.chzzk_shortform_card
         original_enrich = engine.enrich_missing_sizes
         try:
-            engine.chzzk_clip_detail = lambda clip_uid: {
+            engine.chzzk_clip_detail = lambda clip_uid, cookie_header="": {
                 "content": {
                     "clipTitle": "Clip Title",
                     "duration": 15,
@@ -2254,7 +2258,7 @@ for line in sys.stdin:
                     "recId": "rec-id",
                 }
             }
-            engine.chzzk_shortform_card = lambda clip_uid, video_id, rec_id: {
+            engine.chzzk_shortform_card = lambda clip_uid, video_id, rec_id, cookie_header="": {
                 "card": {"vod": {"BaseURL": ["https://cdn.example.test/clip.mp4"], "@width": 1280, "@height": 720}},
                 "interaction": {"subscription": {"name": "독케익"}},
             }
@@ -2329,6 +2333,7 @@ for line in sys.stdin:
         meta = engine.parse_hls_media_playlist(playlist, "https://cdn.example.test/stream/index.m3u8")
         self.assertEqual(meta["init_map_url"], "https://cdn.example.test/stream/init.m4s")
         self.assertEqual(meta["segment_urls"], ["https://cdn.example.test/stream/seg0.m4v"])
+        self.assertEqual(meta["segment_durations"], [1.0])
 
     def test_download_hls_parallel_writes_fmp4_init_before_segments(self):
         playlist = '\n'.join(
@@ -2756,6 +2761,290 @@ for line in sys.stdin:
 
         self.assertEqual(calls, {"parallel": 1, "ydl": 0})
 
+    def test_chzzk_candidates_estimate_size_from_playback_bandwidth(self):
+        mp4_candidates = engine.chzzk_candidates_from_media(
+            [
+                {
+                    "url": "https://cdn.example.test/replay.mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "bandwidth": 8_202_000,
+                    "fps": 60,
+                }
+            ],
+            "https://chzzk.naver.com/video/13929299",
+            "Replay Title",
+            "",
+            100,
+        )
+        hls_candidates = engine.chzzk_candidates_from_media(
+            [
+                {
+                    "url": "https://cdn.example.test/master.m3u8",
+                    "width": 1920,
+                    "height": 1080,
+                    "bandwidth": 4_000_000,
+                    "fps": 60,
+                }
+            ],
+            "https://chzzk.naver.com/video/13929299",
+            "Replay Title",
+            "",
+            100,
+        )
+
+        expected_mp4 = int(8_202_000 * engine.CHZZK_PEAK_BANDWIDTH_SIZE_FACTOR * 100 / 8)
+        expected_hls = int(4_000_000 * engine.CHZZK_PEAK_BANDWIDTH_SIZE_FACTOR * 100 / 8)
+        self.assertEqual(mp4_candidates[0]["size_source"], "bitrate")
+        self.assertEqual(mp4_candidates[0]["sort_bytes"], expected_mp4)
+        self.assertEqual(hls_candidates[0]["size_source"], "bitrate")
+        self.assertEqual(hls_candidates[0]["sort_bytes"], expected_hls)
+        self.assertEqual(hls_candidates[0]["filesize_approx"], hls_candidates[0]["sort_bytes"])
+
+    def test_chzzk_adult_video_requires_cookies_when_logged_out(self):
+        original_detail = engine.chzzk_video_detail
+        try:
+            engine.chzzk_video_detail = lambda video_no, cookie_header="": {
+                "content": {
+                    "videoNo": 42,
+                    "videoTitle": "Adult VOD",
+                    "duration": 120,
+                    "adult": True,
+                    "videoId": "video-id",
+                    "inKey": "in-key",
+                }
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "로그인 쿠키"):
+                engine.analyze_chzzk_video("https://chzzk.naver.com/video/42", cookie_source="없음")
+        finally:
+            engine.chzzk_video_detail = original_detail
+
+    def test_chzzk_adult_video_allows_analysis_with_login_cookies(self):
+        original_detail = engine.chzzk_video_detail
+        original_playback = engine.chzzk_video_playback
+        original_cookie_header = engine.cookie_header_for_source
+        original_enrich = engine.enrich_missing_sizes
+        try:
+            engine.cookie_header_for_source = lambda cookie_source: "NID_AUT=fake"
+            engine.chzzk_video_detail = lambda video_no, cookie_header="": {
+                "content": {
+                    "videoNo": 42,
+                    "videoTitle": "Adult VOD",
+                    "duration": 120,
+                    "adult": True,
+                    "videoId": "video-id",
+                    "inKey": "in-key",
+                }
+            }
+            engine.chzzk_video_playback = lambda video_id, in_key, video_no, cookie_header="": {
+                "period": [
+                    {
+                        "adaptationSet": [
+                            {
+                                "representation": [
+                                    {
+                                        "width": 1920,
+                                        "height": 1080,
+                                        "bandwidth": 4_000_000,
+                                        "baseURL": [{"value": "https://cdn.example.test/master.m3u8"}],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            engine.enrich_missing_sizes = lambda candidates, *args, **kwargs: candidates
+            engine.enrich_chzzk_candidate_sizes = lambda candidates, *args, **kwargs: candidates
+
+            result = engine.analyze_chzzk_video("https://chzzk.naver.com/video/42", cookie_source="Chrome")
+
+            self.assertEqual(result["candidates"][0]["url"], "https://cdn.example.test/master.m3u8")
+            self.assertGreater(result["candidates"][0]["sort_bytes"], 0)
+        finally:
+            engine.chzzk_video_detail = original_detail
+            if original_playback is None:
+                delattr(engine, "chzzk_video_playback")
+            else:
+                engine.chzzk_video_playback = original_playback
+            engine.cookie_header_for_source = original_cookie_header
+            engine.enrich_missing_sizes = original_enrich
+
+    def test_download_candidate_uses_parallel_download_for_clipped_chzzk_hls_candidates(self):
+        calls = {"segment": 0, "parallel": 0}
+
+        def fake_segment(url, candidate, output_dir, on_event=None):
+            del url, output_dir, on_event
+            calls["segment"] += 1
+            return {"ok": True, "output_dir": ".", "output_path": "segment.mp4"}
+
+        def fake_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
+            del url, output_dir, on_event, ffmpeg_exe
+            calls["parallel"] += 1
+            self.assertEqual((candidate or {}).get("clip_range"), {"start": 30.0, "end": 90.0})
+            return {"ok": True, "output_dir": ".", "output_path": "out.mp4"}
+
+        original_segment = engine.download_direct_media_segment
+        original_parallel = engine.download_hls_parallel
+        original_cookie = engine.candidate_with_request_cookies
+        try:
+            engine.download_direct_media_segment = fake_segment
+            engine.download_hls_parallel = fake_parallel
+            engine.candidate_with_request_cookies = lambda candidate, cookie_source: candidate
+            engine.download_candidate(
+                "https://chzzk.naver.com/video/14056968",
+                {
+                    "source": "https://chzzk.naver.com/video/14056968",
+                    "url": "https://cdn.example.test/master.m3u8",
+                    "format_selector": "best",
+                    "output_ext": "mp4",
+                    "ext": "m3u8",
+                    "title": "CHZZK VOD",
+                    "clip_range": {"start": 30, "end": 90},
+                },
+                "C:/Temp",
+            )
+        finally:
+            engine.download_direct_media_segment = original_segment
+            engine.download_hls_parallel = original_parallel
+            engine.candidate_with_request_cookies = original_cookie
+
+        self.assertEqual(calls, {"segment": 0, "parallel": 1})
+
+    def test_hls_segment_indices_for_clip_range_selects_overlapping_segments(self):
+        durations = [10.0, 10.0, 10.0, 10.0, 10.0]
+        self.assertEqual(engine.hls_segment_indices_for_clip_range(durations, 0, 10), [0])
+        self.assertEqual(engine.hls_segment_indices_for_clip_range(durations, 5, 25), [0, 1, 2])
+        self.assertEqual(engine.hls_segment_indices_for_clip_range(durations, 30, None), [3, 4])
+
+    def test_hls_clip_trim_params_trims_leading_and_trailing_segment_padding(self):
+        segment_count = 140
+        durations = [10.0] * segment_count
+        playlist_meta = {
+            "segment_durations": durations,
+            "segment_urls": [f"https://cdn.example.test/seg{i}.ts" for i in range(segment_count)],
+        }
+        clip_range = {"start": 120, "end": 1380}
+        params = engine.hls_clip_trim_params(playlist_meta, clip_range)
+        self.assertEqual(params["in_file_start"], 0.0)
+        self.assertEqual(params["out_duration"], 1260.0)
+        self.assertEqual(params["clip_start"], 120.0)
+        self.assertEqual(params["clip_end"], 1380.0)
+
+    def test_cleanup_partial_output_files_removes_part_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "Video [02m00s-12m00s].mp4"
+            part_path = output_path.with_name(output_path.name + ".part")
+            media_path = part_path.with_suffix(part_path.suffix + ".media")
+            segment_path = part_path.with_name(part_path.name + ".0")
+            part_path.write_bytes(b"part")
+            media_path.write_bytes(b"media")
+            segment_path.write_bytes(b"seg")
+            self.assertTrue(engine.cleanup_partial_output_files(output_path))
+            self.assertFalse(part_path.exists())
+            self.assertFalse(media_path.exists())
+            self.assertFalse(segment_path.exists())
+
+    def test_hls_clip_trim_params_offsets_into_first_downloaded_segment(self):
+        durations = [10.0] * 20
+        playlist_meta = {
+            "segment_durations": durations,
+            "segment_urls": [f"https://cdn.example.test/seg{i}.ts" for i in range(len(durations))],
+        }
+        clip_range = {"start": 125, "end": 145}
+        params = engine.hls_clip_trim_params(playlist_meta, clip_range)
+        self.assertEqual(params["in_file_start"], 5.0)
+        self.assertEqual(params["out_duration"], 20.0)
+
+    def test_download_hls_parallel_trims_clipped_output_to_exact_duration(self):
+        segment_count = 150
+        playlist_lines = ["#EXTM3U"]
+        payloads = {}
+        for index in range(segment_count):
+            playlist_lines.append("#EXTINF:10.0,")
+            playlist_lines.append(f"seg{index}.ts")
+            payloads[f"https://cdn.example.test/seg{index}.ts"] = f"SEG{index}".encode()
+        playlist = "\n".join(playlist_lines) + "\n"
+        trim_calls = []
+        events = []
+
+        def fake_resolve(url, headers):
+            del url, headers
+            return "https://cdn.example.test/index.m3u8", playlist
+
+        def fake_urlopen(request, timeout=45):
+            del timeout
+
+            class Response:
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def read(self, size=-1):
+                    if size is None or size < 0:
+                        data = self._payload
+                        self._payload = b""
+                        return data
+                    chunk = self._payload[:size]
+                    self._payload = self._payload[size:]
+                    return chunk
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    del exc_type, exc, tb
+
+            return Response(payloads[request.full_url])
+
+        def fake_remux(input_path, output_path, ffmpeg_exe, output_format="mp4"):
+            del ffmpeg_exe, output_format
+            Path(output_path).write_bytes(Path(input_path).read_bytes())
+
+        original_resolve = engine.resolve_hls_media_playlist
+        original_urlopen = engine.parallel_http_urlopen
+        original_remux = engine.remux_ts_file_to_mp4
+        original_trim = engine.trim_downloaded_media_to_clip_range
+        try:
+            engine.resolve_hls_media_playlist = fake_resolve
+            engine.parallel_http_urlopen = fake_urlopen
+            engine.remux_ts_file_to_mp4 = fake_remux
+
+            def capture_trim(output_path, trim_params, candidate=None, ffmpeg_exe=None, on_event=None):
+                trim_calls.append((str(output_path), dict(trim_params)))
+                if on_event:
+                    on_event({"type": "progress", "percent": 100, "message": "마무리 중"})
+                return output_path
+
+            engine.trim_downloaded_media_to_clip_range = capture_trim
+            with tempfile.TemporaryDirectory() as temp_dir:
+                result = engine.download_hls_parallel(
+                    "https://cdn.example.test/master.m3u8",
+                    {
+                        "title": "Clip VOD",
+                        "display_title": "Clip VOD",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "source": "https://chzzk.naver.com/video/1",
+                        "clip_range": {"start": 120, "end": 1380},
+                        "source_duration": 1500,
+                    },
+                    temp_dir,
+                    on_event=events.append,
+                    ffmpeg_exe="ffmpeg-test",
+                )
+                output = Path(result["output_path"])
+                self.assertTrue(output.is_file())
+        finally:
+            engine.resolve_hls_media_playlist = original_resolve
+            engine.parallel_http_urlopen = original_urlopen
+            engine.remux_ts_file_to_mp4 = original_remux
+            engine.trim_downloaded_media_to_clip_range = original_trim
+
+        self.assertEqual(len(trim_calls), 1)
+        self.assertEqual(trim_calls[0][1]["out_duration"], 1260.0)
+        self.assertTrue(any(event.get("type") == "progress" and event.get("percent") == 100 for event in events))
+
     def test_chzzk_display_title_keeps_channel_separator_when_title_starts_with_channel(self):
         self.assertEqual(
             engine.chzzk_display_title("독케익 퇴근각", "독케익"),
@@ -2767,7 +3056,7 @@ for line in sys.stdin:
         original_playback = getattr(engine, "chzzk_video_playback", None)
         original_enrich = engine.enrich_missing_sizes
         try:
-            engine.chzzk_video_detail = lambda video_no: {
+            engine.chzzk_video_detail = lambda video_no, cookie_header="": {
                 "content": {
                     "videoNo": 13929299,
                     "videoId": "video-id",
@@ -2779,7 +3068,7 @@ for line in sys.stdin:
                     "channel": {"channelName": "독케익"},
                 }
             }
-            engine.chzzk_video_playback = lambda video_id, in_key, video_no: {
+            engine.chzzk_video_playback = lambda video_id, in_key, video_no, cookie_header="": {
                 "period": [
                     {
                         "adaptationSet": [
@@ -3270,7 +3559,7 @@ for line in sys.stdin:
         self.assertEqual(requested_ranges, ["bytes=5-"])
 
     def test_large_direct_media_download_uses_parallel_range_requests(self):
-        content = bytes((index % 251 for index in range(1024 * 1024)))
+        content = bytes((index % 251 for index in range(4 * 1024 * 1024)))
         events = []
         ranges = []
         original_urlopen = engine.parallel_http_urlopen
@@ -3339,13 +3628,12 @@ for line in sys.stdin:
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
 
-        self.assertGreater(len(ranges), 1)
+        self.assertEqual(len(ranges), 2)
         self.assertTrue(all(value.startswith("bytes=") for value in ranges))
         self.assertTrue(any(event.get("type") == "progress" and event.get("speed_text") for event in events))
 
-    def test_parallel_direct_media_resumes_existing_segment_part(self):
+    def test_parallel_direct_media_keeps_segment_parts_out_of_output_dir(self):
         content = b"abcdefghij"
-        requested_ranges = []
         original_urlopen = engine.parallel_http_urlopen
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
         original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
@@ -3373,7 +3661,6 @@ for line in sys.stdin:
         def fake_urlopen(request, timeout=30):
             del timeout
             range_header = request.get_header("Range")
-            requested_ranges.append(range_header)
             start_text, end_text = range_header.removeprefix("bytes=").split("-", 1)
             start = int(start_text)
             end = int(end_text)
@@ -3385,8 +3672,6 @@ for line in sys.stdin:
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = 1
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "Video.mp4"
-                part = output.with_name("Video.mp4.part")
-                part.with_name("Video.mp4.part.0").write_bytes(b"abc")
                 result = engine.download_direct_media_parallel(
                     "https://cdn.example.test/video.mp4",
                     output,
@@ -3395,12 +3680,12 @@ for line in sys.stdin:
                     part_size=5,
                 )
                 self.assertEqual(result.read_bytes(), content)
+                leftover_parts = sorted(output.parent.glob(f"{output.name}.part.*"))
+                self.assertEqual(leftover_parts, [])
         finally:
             engine.parallel_http_urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
-
-        self.assertIn("bytes=3-4", requested_ranges)
 
     def test_parallel_direct_media_falls_back_when_range_request_is_ignored(self):
         content = b"x" * (512 * 1024)

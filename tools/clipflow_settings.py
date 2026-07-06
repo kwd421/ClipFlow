@@ -412,15 +412,11 @@ class SettingsMixin:
         raw = self.settings.value(DOWNLOAD_HISTORY_SETTING, "", str) or ""
         if not raw:
             return
-
-        def worker():
-            try:
-                items = json.loads(raw)
-            except (TypeError, ValueError):
-                items = None
-            _dispatch_to_main_thread(lambda: self._apply_restored_history(items))
-
-        threading.Thread(target=worker, name="clipflow-history-load", daemon=True).start()
+        try:
+            items = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        self._apply_restored_history(items)
 
     def _app_updater(self):
         app = QApplication.instance()

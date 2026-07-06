@@ -145,6 +145,130 @@ class DownloadMixin:
 
         return extract_local_segment
 
+    def _clip_range_tuple(self, candidate):
+        clip_range = engine.clip_range_from_candidate(candidate or {})
+        if not clip_range:
+            return None
+        return (clip_range.get("start"), clip_range.get("end"))
+
+    def _row_owns_clip_range(self, row, clip_tuple):
+        if not clip_tuple:
+            return True
+        if not row or not row.get("fixed_candidate"):
+            return False
+        return self._clip_range_tuple(row.get("candidate") or {}) == clip_tuple
+
+    def _row_clip_download_base_candidate(self, row):
+        base = row.get("download_base_candidate") if row else None
+        if isinstance(base, dict) and base:
+            return dict(base)
+        candidate = dict((row or {}).get("candidate") or {})
+        clip_range = candidate.get("clip_range")
+        if not clip_range or row.get("fixed_candidate"):
+            return candidate
+        cleaned = dict(candidate)
+        suffix = engine.clip_range_suffix(clip_range)
+        for key in ("title", "display_title"):
+            text = str(cleaned.get(key) or "")
+            if suffix and text.endswith(suffix):
+                cleaned[key] = text[: -len(suffix)].rstrip()
+        cleaned.pop("clip_range", None)
+        cleaned.pop("clip_cut_mode", None)
+        source_duration = engine.safe_int(cleaned.get("source_duration"))
+        if source_duration:
+            cleaned["duration"] = source_duration
+        source_size = engine.safe_int(cleaned.get("source_filesize"))
+        if source_size:
+            cleaned["sort_bytes"] = source_size
+            if engine.safe_int(cleaned.get("filesize")):
+                cleaned["filesize"] = source_size
+                cleaned["filesize_approx"] = 0
+            else:
+                cleaned["filesize"] = 0
+                cleaned["filesize_approx"] = source_size
+        return cleaned
+
+    def _restore_row_base_display_if_needed(self, row):
+        if not row or row.get("fixed_candidate"):
+            return
+        base = self._row_clip_download_base_candidate(row)
+        if not base:
+            return
+        current = dict(row.get("candidate") or {})
+        if current == base:
+            return
+        row["candidate"] = base
+        saved_qualities = row.get("download_base_qualities")
+        if isinstance(saved_qualities, list) and saved_qualities:
+            row["qualities"] = list(saved_qualities)
+            saved_options = row.get("download_base_quality_options")
+            row["quality_options"] = list(saved_options) if isinstance(saved_options, list) and saved_options else build_quality_options(row["qualities"])
+        widget = row.get("widget")
+        if widget:
+            widget.refresh()
+
+    def _clip_spawn_candidate_from_row(self, row, prepared_candidate):
+        prepared = dict(prepared_candidate or {})
+        base = self._row_clip_download_base_candidate(row)
+        if base and not base.get("clip_range"):
+            rebuilt = dict(base)
+            clip_range = engine.clip_range_from_candidate(prepared)
+            if clip_range:
+                rebuilt["clip_range"] = clip_range
+                cut_mode = prepared.get("clip_cut_mode")
+                if cut_mode:
+                    rebuilt["clip_cut_mode"] = cut_mode
+                prepared = engine.candidate_with_clip_range_metadata(rebuilt)
+        return prepared
+
+    def _should_spawn_clip_sibling_row(self, row):
+        if not row:
+            return False
+        if row.get("status") == COMPLETED_STATUS:
+            return True
+        if hasattr(self, "_row_is_downloading") and self._row_is_downloading(row):
+            return True
+        if row in getattr(self, "queued_download_rows", []):
+            return True
+        return False
+
+    def _spawn_clip_range_download_row(self, source_row, prepared_candidate):
+        if not source_row or not prepared_candidate:
+            return None
+        prepared = dict(prepared_candidate)
+        if prepared.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
+            prepared = engine.candidate_with_clip_range_metadata(prepared)
+        created_order = self._next_row_sequence()
+        new_row = {
+            "id": f"{source_row.get('id') or 'row'}-clip-{created_order}",
+            "kind": source_row.get("kind") or "video",
+            "candidate": prepared,
+            "qualities": [prepared],
+            "quality_options": build_quality_options([prepared]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "fixed_candidate": True,
+            "analysis_source_url": source_row.get("analysis_source_url") or source_row.get("source_url") or "",
+            "source_url": source_row.get("source_url") or prepared.get("source") or prepared.get("url") or "",
+            "input_url": source_row.get("input_url") or source_row.get("source_url") or "",
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "parent_playlist_id": source_row.get("parent_playlist_id") or "",
+            "is_playlist_child": bool(source_row.get("is_playlist_child")),
+            "playlist_child_index": source_row.get("playlist_child_index") or 0,
+            "playlist_key": source_row.get("playlist_key") or "",
+        }
+        insert_at = self.rows.index(source_row) + 1
+        self.rows.insert(insert_at, new_row)
+        if hasattr(self, "_render_rows"):
+            self._render_rows()
+        return new_row
+
     def start_download_for_row(self, row):
         if row not in self.rows:
             return
@@ -167,15 +291,24 @@ class DownloadMixin:
         except ValueError as exc:
             self._set_row_download_error(row, str(exc))
             return
-        if prepared_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
+        requested_clip = self._clip_range_tuple(prepared_candidate)
+        if requested_clip and not self._row_owns_clip_range(row, requested_clip):
+            if self._should_spawn_clip_sibling_row(row):
+                self._restore_row_base_display_if_needed(row)
+                spawn_candidate = self._clip_spawn_candidate_from_row(row, prepared_candidate)
+                sibling = self._spawn_clip_range_download_row(row, spawn_candidate)
+                if sibling:
+                    self.start_download_for_row(sibling)
+                    return
+        if requested_clip and self._row_owns_clip_range(row, requested_clip) and hasattr(self, "_apply_download_candidate_to_row"):
             self._apply_download_candidate_to_row(row, prepared_candidate)
         candidate = prepared_candidate
 
-        if self._row_is_downloading(row):
-            self._set_status("이미 다운로드 중")
-            return
-        if row in self.queued_download_rows:
-            self._set_status("다운로드 대기 중")
+        if self._row_is_downloading(row) or row in self.queued_download_rows:
+            if self._row_is_downloading(row):
+                self._set_status("이미 다운로드 중")
+            else:
+                self._set_status("다운로드 대기 중")
             return
         existing_output = self._existing_output_path_for_row(row, candidate)
         if existing_output:
@@ -314,6 +447,7 @@ class DownloadMixin:
         row.pop("analysis_loading", None)
         row.pop("child_loading", None)
         row["download_starting"] = True
+        row.pop("download_finishing", None)
         widget = row.get("widget")
         if widget:
             widget.set_status("다운로드 중")
@@ -419,7 +553,9 @@ class DownloadMixin:
                         wait()
 
     def _set_row_paused(self, row):
+        self._cleanup_row_partial_files(row)
         row["download_starting"] = False
+        row.pop("download_finishing", None)
         row["status"] = PAUSED_STATUS
         row["status_detail"] = ""
         row["progress_text"] = row.get("progress_text") or ""
@@ -433,7 +569,9 @@ class DownloadMixin:
     def _set_row_download_error(self, row, message):
         message = str(message or "")
         if row:
+            self._cleanup_row_partial_files(row)
             row["download_starting"] = False
+            row.pop("download_finishing", None)
             row["status"] = ERROR_STATUS
             row["status_detail"] = message
             row["progress"] = 0
@@ -468,6 +606,18 @@ class DownloadMixin:
         self.download_thread = first.get("thread") if first else None
         self.download_worker = first.get("worker") if first else None
         self.active_download_row = first.get("row") if first else None
+
+    def _cleanup_row_partial_files(self, row, candidate=None):
+        if not row:
+            return
+        try:
+            selected = candidate or self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+            output_dir = self._output_dir_for_row(row, selected)
+            output_path = engine.final_output_path_for_candidate(selected, output_dir)
+            if output_path:
+                engine.cleanup_partial_output_files(output_path)
+        except Exception:
+            pass
 
     def _existing_output_path_for_row(self, row, candidate):
         saved_output = row.get("output_path") or ""
@@ -615,17 +765,27 @@ class DownloadMixin:
                 self._set_row_paused(row)
                 return
             row["download_starting"] = False
-            selected = self.selected_candidate_for_row_ref(row)
-            if selected:
-                row["candidate"] = selected
-                row["qualities"] = [selected]
-                row["quality_options"] = build_quality_options([selected])
+            row.pop("download_finishing", None)
+            clip_locked = bool(engine.clip_range_from_candidate(row.get("candidate") or {}))
+            if clip_locked:
+                row["fixed_candidate"] = True
+            elif not row.get("local_segment_source_path"):
+                row.pop("fixed_candidate", None)
+            if not row.get("fixed_candidate"):
+                selected = self.selected_candidate_for_row_ref(row)
+                if selected:
+                    row["candidate"] = selected
+                    row["qualities"] = [selected]
+                    row["quality_options"] = build_quality_options([selected])
             self._resolve_finished_output_path(row, result)
             self._apply_actual_output_size(row)
+            row["status"] = COMPLETED_STATUS
+            row["progress"] = 100
+            row["progress_text"] = "완료"
             widget = row.get("widget")
             if widget:
                 widget.refresh()
-                widget.set_status("완료")
+                widget.set_status(COMPLETED_STATUS)
                 widget.set_progress(100, "완료")
                 widget._refresh_actions()
             self._save_completed_history()
@@ -682,7 +842,9 @@ class DownloadMixin:
             if row.pop("download_cancel_requested", False):
                 self._set_row_paused(row)
                 return
+            self._cleanup_row_partial_files(row)
             row["download_starting"] = False
+            row.pop("download_finishing", None)
             widget = row.get("widget")
             row["messages"].append(message)
             if widget:
