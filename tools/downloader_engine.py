@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -47,7 +48,7 @@ SIZE_PROBE_LIMIT = 12
 DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_MIN_SIZE = 2 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
-DIRECT_MEDIA_PARALLEL_WORKERS = 4
+DIRECT_MEDIA_PARALLEL_WORKERS = 24
 DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 PAGE_THUMBNAIL_TIMEOUT = 8
@@ -56,15 +57,15 @@ BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
 BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
-BROWSER_DOM_HLS_PARALLEL_WORKERS = 24
 # HLS parallel: workers = concurrent segment fetches; max_in_flight caps queued futures
 # and temp files so multi-hour VODs do not retain all segments in RAM.
-HLS_PARALLEL_WORKERS = 24
-HLS_PARALLEL_MAX_IN_FLIGHT = 96
+HLS_PARALLEL_WORKERS = 32
+HLS_PARALLEL_MAX_IN_FLIGHT = 64
 HLS_SEGMENT_READ_CHUNK = 512 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
-YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 16
+YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 24
 YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+_PARALLEL_HTTP_SESSION_LOCAL = threading.local()
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -3932,7 +3933,7 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
     downloaded = existing_size if append else 0
     started_at = time.monotonic()
     last_progress = 0.0
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with parallel_http_urlopen(request, timeout=30) as response:
         if append and safe_int(getattr(response, "status", 200)) != 206:
             append = False
             downloaded = 0
@@ -3961,9 +3962,9 @@ def direct_media_parallel_part_size(total, workers=None):
     total = max(1, safe_int(total))
     if total >= DIRECT_MEDIA_PARALLEL_THRESHOLD:
         return DIRECT_MEDIA_PARALLEL_PART_SIZE
-    target_parts = max(workers * 2, workers)
+    target_parts = max(workers * 4, workers * 2, workers)
     adaptive = (total + target_parts - 1) // target_parts
-    return max(256 * 1024, min(DIRECT_MEDIA_PARALLEL_PART_SIZE, adaptive))
+    return max(1, min(DIRECT_MEDIA_PARALLEL_PART_SIZE, adaptive))
 
 
 def should_use_parallel_direct_download(url, headers, total):
@@ -3991,7 +3992,7 @@ def direct_media_ranges(total, part_size=None):
 def direct_media_range_supported(url, headers):
     range_headers = {**headers, "Range": "bytes=0-0"}
     request = urllib.request.Request(url, headers=range_headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with parallel_http_urlopen(request, timeout=30) as response:
         if safe_int(getattr(response, "status", 206)) != 206:
             return False
         content_range = str(getattr(response, "headers", {}).get("Content-Range", "") or "")
@@ -4035,7 +4036,7 @@ def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size
         if stop_event.is_set():
             return b""
         request = urllib.request.Request(url, headers={**remote_headers, "Range": f"bytes={start}-{end}"})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with parallel_http_urlopen(request, timeout=30) as response:
             if safe_int(getattr(response, "status", 206)) != 206:
                 raise DirectMediaRangeUnsupported("Direct media proxy range request was not honored.")
             data = response.read()
@@ -4158,7 +4159,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
         range_headers = {**headers, "Range": f"bytes={resume_start}-{end}"}
         request = urllib.request.Request(url, headers=range_headers)
         written = existing_size if mode == "ab" else 0
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with parallel_http_urlopen(request, timeout=30) as response:
             if safe_int(getattr(response, "status", 206)) != 206:
                 raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
             with segment_path.open(mode) as file:
@@ -4228,9 +4229,87 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     }
 
 
+class _CurlResponseWrapper:
+    def __init__(self, response):
+        self._response = response
+        self._iter = response.iter_content()
+        self._buffer = b""
+        self.headers = response.headers
+        self.status = response.status_code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        self.close()
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            chunks = []
+            if self._buffer:
+                chunks.append(self._buffer)
+                self._buffer = b""
+            for chunk in self._iter:
+                if chunk:
+                    chunks.append(chunk)
+            self.close()
+            return b"".join(chunks)
+        while len(self._buffer) < size:
+            try:
+                chunk = next(self._iter)
+            except StopIteration:
+                break
+            if chunk:
+                self._buffer += chunk
+        result = self._buffer[:size]
+        self._buffer = self._buffer[size:]
+        return result
+
+    def close(self):
+        response = getattr(self, "_response", None)
+        if response is not None:
+            self._response = None
+            response.close()
+
+
+def _parallel_http_session():
+    session = getattr(_PARALLEL_HTTP_SESSION_LOCAL, "session", None)
+    if session is not None:
+        return session if session is not False else None
+    try:
+        apply_curl_cffi_system_dns_patch()
+        from curl_cffi import requests as curl_requests
+
+        session = curl_requests.Session(impersonate="chrome")
+    except ImportError:
+        session = False
+    _PARALLEL_HTTP_SESSION_LOCAL.session = session
+    return session if session is not False else None
+
+
+def parallel_http_urlopen(request, timeout=30):
+    session = _parallel_http_session()
+    if session is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+    headers = dict(request.header_items()) if hasattr(request, "header_items") else dict(request.headers)
+    response = session.get(url, headers=headers, timeout=timeout, stream=True)
+    if safe_int(getattr(response, "status_code", 200)) >= 400:
+        raise urllib.error.HTTPError(
+            url,
+            safe_int(response.status_code),
+            getattr(response, "reason", ""),
+            response.headers,
+            None,
+        )
+    return _CurlResponseWrapper(response)
+
+
 def fetch_hls_playlist_text(url, headers, timeout=30):
     request = urllib.request.Request(str(url or ""), headers=dict(headers or {}))
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with parallel_http_urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
@@ -4292,11 +4371,46 @@ def hls_aes128_iv(media_sequence, segment_index, fixed_iv=None):
 
 def fetch_hls_aes128_key(key_url, headers):
     request = urllib.request.Request(str(key_url or ""), headers=dict(headers or {}))
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with parallel_http_urlopen(request, timeout=30) as response:
         key = response.read()
     if len(key) != 16:
         raise RuntimeError(f"HLS AES-128 key must be 16 bytes, got {len(key)}")
     return key
+
+
+def iter_hls_cipher_blocks(chunk_iter):
+    buffer = b""
+    for chunk in chunk_iter:
+        if not chunk:
+            continue
+        buffer += chunk
+        while len(buffer) >= 16:
+            yield buffer[:16]
+            buffer = buffer[16:]
+    if buffer:
+        raise RuntimeError("Encrypted HLS segment size is not a multiple of 16.")
+
+
+def decrypt_hls_aes128_cbc_stream(cipher_block_iter, output_file, key, iv):
+    try:
+        from Cryptodome.Cipher import AES
+    except ImportError as exc:
+        raise RuntimeError("PyCryptodome is required for encrypted HLS downloads.") from exc
+    cipher = AES.new(key, AES.MODE_ECB)
+    prev_cipher_block = iv
+    last_plain = b""
+    for cipher_block in cipher_block_iter:
+        plain_block = bytes(a ^ b for a, b in zip(cipher.decrypt(cipher_block), prev_cipher_block))
+        prev_cipher_block = cipher_block
+        if last_plain:
+            output_file.write(last_plain)
+        last_plain = plain_block
+    if not last_plain:
+        return
+    pad = last_plain[-1]
+    if 1 <= pad <= 16 and last_plain.endswith(bytes([pad]) * pad):
+        last_plain = last_plain[:-pad]
+    output_file.write(last_plain)
 
 
 def decrypt_hls_aes128_segment(encrypted, key, iv):
@@ -4451,7 +4565,7 @@ def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
 
 def fetch_hls_segment_payload(index, segment_url, aes_key, playlist_meta, headers):
     request = urllib.request.Request(segment_url, headers=dict(headers))
-    with urllib.request.urlopen(request, timeout=45) as response:
+    with parallel_http_urlopen(request, timeout=45) as response:
         if aes_key is None:
             chunks = []
             while True:
@@ -4460,17 +4574,24 @@ def fetch_hls_segment_payload(index, segment_url, aes_key, playlist_meta, header
                     break
                 chunks.append(chunk)
             return b"".join(chunks)
-        payload = response.read()
-    if aes_key is not None:
+
+        def chunk_iter():
+            while True:
+                chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+
+        buffer = io.BytesIO()
         iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
-        payload = decrypt_hls_aes128_segment(payload, aes_key, iv)
-    return payload
+        decrypt_hls_aes128_cbc_stream(iter_hls_cipher_blocks(chunk_iter()), buffer, aes_key, iv)
+        return buffer.getvalue()
 
 
 def download_hls_segment_to_path(index, segment_url, segment_path, aes_key, playlist_meta, headers):
     segment_path = Path(segment_path)
     request = urllib.request.Request(segment_url, headers=dict(headers))
-    with urllib.request.urlopen(request, timeout=45) as response:
+    with parallel_http_urlopen(request, timeout=45) as response:
         if aes_key is None:
             with segment_path.open("wb") as segment_file:
                 while True:
@@ -4479,9 +4600,17 @@ def download_hls_segment_to_path(index, segment_url, segment_path, aes_key, play
                         break
                     segment_file.write(chunk)
             return index, segment_path
-        payload = response.read()
-    iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
-    segment_path.write_bytes(decrypt_hls_aes128_segment(payload, aes_key, iv))
+
+        def chunk_iter():
+            while True:
+                chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+
+        iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
+        with segment_path.open("wb") as segment_file:
+            decrypt_hls_aes128_cbc_stream(iter_hls_cipher_blocks(chunk_iter()), segment_file, aes_key, iv)
     return index, segment_path
 
 

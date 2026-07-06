@@ -521,7 +521,6 @@ class DownloaderEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(options.get("concurrent_fragment_downloads"), engine.YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS)
-        self.assertEqual(options["concurrent_fragment_downloads"], 16)
         self.assertEqual(options.get("http_chunk_size"), engine.YTDLP_HTTP_CHUNK_SIZE)
 
     def test_download_options_only_convert_video_when_target_is_not_mp4(self):
@@ -1786,8 +1785,8 @@ for line in sys.stdin:
 
     def test_direct_media_parallel_part_size_scales_down_for_small_files(self):
         self.assertEqual(
-            engine.direct_media_parallel_part_size(7 * 1024 * 1024),
-            896 * 1024,
+            engine.direct_media_parallel_part_size(7 * 1024 * 1024, workers=4),
+            458752,
         )
         self.assertEqual(
             engine.direct_media_parallel_part_size(128 * 1024 * 1024),
@@ -1797,7 +1796,7 @@ for line in sys.stdin:
     def test_small_direct_media_download_uses_parallel_when_range_supported(self):
         content = b"x" * (3 * 1024 * 1024)
         ranges = []
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
         original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
 
@@ -1840,7 +1839,7 @@ for line in sys.stdin:
             )
 
         try:
-            engine.urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = 4
             with tempfile.TemporaryDirectory() as temp:
@@ -1857,7 +1856,7 @@ for line in sys.stdin:
                 )
                 self.assertEqual(Path(result["output_path"]).read_bytes(), content)
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
 
@@ -2095,6 +2094,7 @@ for line in sys.stdin:
             ],
         )
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS-only full disk access paths")
     def test_full_disk_access_provoke_paths_include_chrome_cookies(self):
         paths = engine.full_disk_access_provoke_paths("chrome")
         self.assertTrue(any(path.endswith("/Cookies") for path in paths))
@@ -2360,11 +2360,11 @@ for line in sys.stdin:
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
         original_resolve = engine.resolve_hls_media_playlist
-        original_urlopen = urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_remux = engine.remux_ts_file_to_mp4
         try:
             engine.resolve_hls_media_playlist = fake_resolve
-            urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.remux_ts_file_to_mp4 = fake_remux
             with tempfile.TemporaryDirectory() as temp_dir:
                 result = engine.download_hls_parallel(
@@ -2384,7 +2384,7 @@ for line in sys.stdin:
                 self.assertEqual(output.read_bytes(), b"SEG0SEG1SEG2-MP4")
         finally:
             engine.resolve_hls_media_playlist = original_resolve
-            urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.remux_ts_file_to_mp4 = original_remux
 
     def test_download_hls_parallel_keeps_in_flight_bounded_for_many_segments(self):
@@ -2438,11 +2438,11 @@ for line in sys.stdin:
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
         original_resolve = engine.resolve_hls_media_playlist
-        original_urlopen = urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_remux = engine.remux_ts_file_to_mp4
         try:
             engine.resolve_hls_media_playlist = fake_resolve
-            urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.remux_ts_file_to_mp4 = fake_remux
             with tempfile.TemporaryDirectory() as temp_dir:
                 result = engine.download_hls_parallel(
@@ -2464,7 +2464,7 @@ for line in sys.stdin:
                 self.assertLessEqual(peak_in_flight["value"], engine.HLS_PARALLEL_MAX_IN_FLIGHT)
         finally:
             engine.resolve_hls_media_playlist = original_resolve
-            urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.remux_ts_file_to_mp4 = original_remux
 
     def test_download_candidate_routes_chzzk_hls_to_parallel_downloader(self):
@@ -2906,7 +2906,7 @@ for line in sys.stdin:
     def test_direct_media_download_progress_includes_speed_text(self):
         events = []
         chunks = [b"a" * (512 * 1024), b"b" * (512 * 1024)]
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_monotonic = engine.time.monotonic
         ticks = iter([10.0, 10.5, 10.5, 11.0, 11.0, 11.0])
 
@@ -2924,7 +2924,7 @@ for line in sys.stdin:
                 return chunks.pop(0) if chunks else b""
 
         try:
-            engine.urllib.request.urlopen = lambda request, timeout=30: FakeResponse()
+            engine.parallel_http_urlopen = lambda request, timeout=30: FakeResponse()
             engine.time.monotonic = lambda: next(ticks)
             with tempfile.TemporaryDirectory() as temp:
                 engine.download_direct_media(
@@ -2939,7 +2939,7 @@ for line in sys.stdin:
                     on_event=events.append,
                 )
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.time.monotonic = original_monotonic
 
         progress_events = [event for event in events if event.get("type") == "progress"]
@@ -2949,7 +2949,7 @@ for line in sys.stdin:
         self.assertIn(progress_events[0]["speed_text"], progress_events[0]["message"])
 
     def test_direct_media_single_rejects_short_download_when_total_is_known(self):
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
 
         class FakeResponse:
             headers = {"Content-Length": str(1024 * 1024)}
@@ -2968,7 +2968,7 @@ for line in sys.stdin:
                 return b""
 
         try:
-            engine.urllib.request.urlopen = lambda request, timeout=30: FakeResponse()
+            engine.parallel_http_urlopen = lambda request, timeout=30: FakeResponse()
             with tempfile.TemporaryDirectory() as temp:
                 candidate = {
                     "title": "Video",
@@ -2981,10 +2981,10 @@ for line in sys.stdin:
                     engine.download_direct_media("https://cdn.example.test/video.mp4", candidate, temp)
                 self.assertFalse((Path(temp) / "Video.mp4").exists())
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
 
     def test_direct_media_single_resumes_existing_part_file(self):
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         requested_ranges = []
 
         class FakeResponse:
@@ -3010,7 +3010,7 @@ for line in sys.stdin:
             return FakeResponse()
 
         try:
-            engine.urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "Video.mp4"
                 output.with_name("Video.mp4.part").write_bytes(b"hello")
@@ -3022,7 +3022,7 @@ for line in sys.stdin:
                 )
                 self.assertEqual(part.read_bytes(), b"helloworld")
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
 
         self.assertEqual(requested_ranges, ["bytes=5-"])
 
@@ -3030,7 +3030,7 @@ for line in sys.stdin:
         content = bytes((index % 251 for index in range(1024 * 1024)))
         events = []
         ranges = []
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
         original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
@@ -3072,7 +3072,7 @@ for line in sys.stdin:
             )
 
         try:
-            engine.urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 1
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 256 * 1024
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = 2
@@ -3091,7 +3091,7 @@ for line in sys.stdin:
                 )
                 self.assertEqual(Path(result["output_path"]).read_bytes(), content)
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
@@ -3103,7 +3103,7 @@ for line in sys.stdin:
     def test_parallel_direct_media_resumes_existing_segment_part(self):
         content = b"abcdefghij"
         requested_ranges = []
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
         original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
 
@@ -3137,7 +3137,7 @@ for line in sys.stdin:
             return FakeResponse(content[start : end + 1])
 
         try:
-            engine.urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 5
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = 1
             with tempfile.TemporaryDirectory() as temp:
@@ -3149,10 +3149,11 @@ for line in sys.stdin:
                     output,
                     {},
                     len(content),
+                    part_size=5,
                 )
                 self.assertEqual(result.read_bytes(), content)
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
 
@@ -3161,7 +3162,7 @@ for line in sys.stdin:
     def test_parallel_direct_media_falls_back_when_range_request_is_ignored(self):
         content = b"x" * (512 * 1024)
         events = []
-        original_urlopen = engine.urllib.request.urlopen
+        original_urlopen = engine.parallel_http_urlopen
         original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
 
@@ -3192,7 +3193,7 @@ for line in sys.stdin:
             return FakeResponse(content, 200)
 
         try:
-            engine.urllib.request.urlopen = fake_urlopen
+            engine.parallel_http_urlopen = fake_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 1
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 256 * 1024
             with tempfile.TemporaryDirectory() as temp:
@@ -3210,7 +3211,7 @@ for line in sys.stdin:
                 )
                 self.assertEqual(Path(result["output_path"]).read_bytes(), content)
         finally:
-            engine.urllib.request.urlopen = original_urlopen
+            engine.parallel_http_urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
 
