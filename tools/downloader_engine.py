@@ -80,6 +80,9 @@ CHZZK_AUTO_ROUTE_MIN_BYTES = 64 * 1024 * 1024
 CHZZK_ROUTE_PROBE_BYTES = _env_int("CLIPFLOW_CHZZK_PROBE_MB", 4, 1, 32) * 1024 * 1024
 CHZZK_ROUTE_PROBE_HLS_SEGMENTS = _env_int("CLIPFLOW_CHZZK_PROBE_HLS_SEGMENTS", 3, 1, 8)
 CHZZK_ROUTE_PROBE_TIMEOUT = _env_int("CLIPFLOW_CHZZK_PROBE_TIMEOUT_SEC", 12, 3, 30)
+CHZZK_ROUTE_LARGE_VOD_BYTES = 10 * 1024 * 1024 * 1024
+CHZZK_ROUTE_LONG_VOD_SECONDS = 3600
+CHZZK_DIRECT_RANGE_THROTTLE_RATIO = 0.65
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -4208,6 +4211,103 @@ def chzzk_probe_hls_speed(url, headers, segment_count=None):
         return 0.0
 
 
+def chzzk_media_url_host(url):
+    try:
+        return urllib.parse.urlparse(str(url or "")).netloc or ""
+    except ValueError:
+        return ""
+
+
+def chzzk_probe_direct_speed_profile(url, headers, total):
+    total = max(1, safe_int(total))
+    probe_bytes = CHZZK_ROUTE_PROBE_BYTES
+    mid_offset = min(max(probe_bytes, total // 2), max(0, total - probe_bytes))
+    start_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=0)
+    mid_bps = 0.0
+    if total > probe_bytes * 2:
+        mid_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=mid_offset)
+    throttle_ratio = (mid_bps / start_bps) if start_bps > 0 and mid_bps > 0 else 0.0
+    throttle_detected = bool(
+        start_bps > 0
+        and mid_bps > 0
+        and throttle_ratio < CHZZK_DIRECT_RANGE_THROTTLE_RATIO
+    )
+    return {
+        "start_bps": start_bps,
+        "mid_bps": mid_bps,
+        "mid_offset": mid_offset,
+        "throttle_ratio": throttle_ratio,
+        "throttle_detected": throttle_detected,
+    }
+
+
+def chzzk_hls_route_profile(url, headers):
+    profile = {
+        "segment_count": 0,
+        "probe_bps": 0.0,
+        "encrypted": False,
+        "fmp4": False,
+    }
+    try:
+        playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+        playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+        segment_urls = list(playlist_meta.get("segment_urls") or [])
+        profile["segment_count"] = len(segment_urls)
+        profile["fmp4"] = bool(playlist_meta.get("init_map_url"))
+        profile["encrypted"] = hls_playlist_parallel_encryption(playlist_text) == "aes-128"
+        profile["probe_bps"] = chzzk_probe_hls_speed(url, headers)
+    except (OSError, urllib.error.URLError, RuntimeError, ValueError):
+        pass
+    return profile
+
+
+def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, total, duration):
+    direct_score = 0.0
+    hls_score = 0.0
+    reasons = []
+
+    if direct_profile.get("throttle_detected"):
+        hls_score += 4.0
+        reasons.append(f"direct-range-throttle(ratio={direct_profile.get('throttle_ratio', 0):.2f})")
+    elif float(direct_profile.get("throttle_ratio") or 0) >= 0.85:
+        direct_score += 2.0
+        reasons.append("direct-range-stable")
+
+    start_bps = float(direct_profile.get("start_bps") or 0)
+    hls_bps = float(hls_profile.get("probe_bps") or 0)
+    if hls_bps > 0 and start_bps > 0:
+        if hls_bps > start_bps * 1.15:
+            hls_score += 3.0
+            reasons.append(f"hls-probe-faster({display_size(hls_bps)}/s)")
+        elif start_bps > hls_bps * 1.15:
+            direct_score += 3.0
+            reasons.append(f"direct-probe-faster({display_size(start_bps)}/s)")
+
+    total = safe_int(total)
+    duration = safe_int(duration)
+    if total >= CHZZK_ROUTE_LARGE_VOD_BYTES and duration >= CHZZK_ROUTE_LONG_VOD_SECONDS:
+        hls_score += 2.0
+        reasons.append("large-long-vod")
+
+    segment_count = safe_int(hls_profile.get("segment_count"))
+    if segment_count >= 300:
+        hls_score += 1.0
+        reasons.append(f"hls-many-segments({segment_count})")
+
+    workers = direct_media_worker_count(direct_candidate)
+    part_size = direct_media_part_size_for_candidate(total, direct_candidate, workers)
+    range_count = len(list(direct_media_ranges(total, part_size=part_size)))
+    if range_count <= workers * 2 and direct_profile.get("throttle_detected"):
+        hls_score += 1.0
+        reasons.append(f"direct-few-ranges({range_count})")
+
+    if hls_profile.get("encrypted"):
+        hls_score += 0.5
+        reasons.append("hls-encrypted")
+
+    return direct_score, hls_score, reasons
+
+
 def chzzk_alternative_direct_candidate(candidate, page_url, cookie_source, on_event=None):
     hint = chzzk_source_hint(
         candidate.get("source"),
@@ -4270,7 +4370,7 @@ def chzzk_paired_route_candidates(candidate, page_url, cookie_source, on_event=N
     return direct_candidate, hls_candidate
 
 
-def chzzk_choose_download_route(direct_candidate, hls_candidate, on_event=None):
+def chzzk_choose_download_route(direct_candidate, hls_candidate, total=0, duration=0, on_event=None):
     direct_candidate = dict(direct_candidate or {})
     hls_candidate = dict(hls_candidate or {})
     direct_url = str(direct_candidate.get("url") or "")
@@ -4280,49 +4380,85 @@ def chzzk_choose_download_route(direct_candidate, hls_candidate, on_event=None):
     if not hls_url:
         return "direct", direct_candidate
 
-    emit_event(on_event, "status", message="CHZZK direct/HLS 속도 비교 중")
+    total = safe_int(total) or candidate_expected_size(direct_candidate)
+    duration = safe_int(duration) or safe_int(direct_candidate.get("duration")) or safe_int(hls_candidate.get("duration"))
+
+    emit_event(on_event, "status", message="CHZZK direct/HLS 경로 분석 중")
     direct_headers = direct_media_request_headers(direct_candidate)
     hls_headers = direct_media_request_headers(hls_candidate)
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        direct_future = executor.submit(chzzk_probe_direct_speed, direct_url, direct_headers)
-        hls_future = executor.submit(chzzk_probe_hls_speed, hls_url, hls_headers)
-        direct_speed = float(direct_future.result() or 0.0)
-        hls_speed = float(hls_future.result() or 0.0)
+        direct_future = executor.submit(chzzk_probe_direct_speed_profile, direct_url, direct_headers, total)
+        hls_future = executor.submit(chzzk_hls_route_profile, hls_url, hls_headers)
+        direct_profile = direct_future.result()
+        hls_profile = hls_future.result()
+
+    direct_score, hls_score, reasons = chzzk_route_signal_scores(
+        direct_profile,
+        hls_profile,
+        direct_candidate,
+        total,
+        duration,
+    )
 
     emit_event(
         on_event,
         "log",
         message=(
-            f"CHZZK route probe: direct={display_size(direct_speed)}/s "
-            f"hls={display_size(hls_speed)}/s"
+            f"CHZZK route signals direct_host={chzzk_media_url_host(direct_url)} "
+            f"start={display_size(direct_profile.get('start_bps'))}/s "
+            f"mid@{direct_profile.get('mid_offset')}={display_size(direct_profile.get('mid_bps'))}/s "
+            f"throttle={'yes' if direct_profile.get('throttle_detected') else 'no'}"
         ),
     )
-    if direct_speed <= 0 and hls_speed <= 0:
-        emit_event(on_event, "log", message="CHZZK route probe inconclusive; defaulting to direct")
-        return "direct", direct_candidate
-    if hls_speed <= 0:
-        return "direct", direct_candidate
-    if direct_speed <= 0:
-        return "hls", hls_candidate
-    if hls_speed > direct_speed:
-        emit_event(
-            on_event,
-            "log",
-            message=(
-                f"CHZZK auto-route: selected hls "
-                f"({display_size(hls_speed)}/s > {display_size(direct_speed)}/s)"
-            ),
-        )
-        return "hls", hls_candidate
     emit_event(
         on_event,
         "log",
         message=(
-            f"CHZZK auto-route: selected direct "
-            f"({display_size(direct_speed)}/s >= {display_size(hls_speed)}/s)"
+            f"CHZZK route signals hls_host={chzzk_media_url_host(hls_url)} "
+            f"segments={hls_profile.get('segment_count')} "
+            f"probe={display_size(hls_profile.get('probe_bps'))}/s "
+            f"fmp4={'yes' if hls_profile.get('fmp4') else 'no'} "
+            f"encrypted={'yes' if hls_profile.get('encrypted') else 'no'}"
         ),
     )
-    return "direct", direct_candidate
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK route signals vod total={display_size(total)} "
+            f"duration={display_duration(duration) if duration else 'unknown'}"
+        ),
+    )
+
+    if direct_score <= 0 and hls_score <= 0:
+        emit_event(on_event, "log", message="CHZZK route signals inconclusive; defaulting to direct")
+        return "direct", direct_candidate
+
+    if hls_score > direct_score:
+        route = "hls"
+        chosen = hls_candidate
+    elif direct_score > hls_score:
+        route = "direct"
+        chosen = direct_candidate
+    else:
+        start_bps = float(direct_profile.get("start_bps") or 0)
+        hls_bps = float(hls_profile.get("probe_bps") or 0)
+        if hls_bps > start_bps:
+            route = "hls"
+            chosen = hls_candidate
+        else:
+            route = "direct"
+            chosen = direct_candidate
+
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK auto-route: selected {route} "
+            f"(score direct={direct_score:.1f} hls={hls_score:.1f}; {', '.join(reasons) or 'tie-break'})"
+        ),
+    )
+    return route, chosen
 
 
 def refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=None):
@@ -4411,7 +4547,13 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
         if hls_candidate:
             hls_candidate = candidate_with_request_cookies(hls_candidate, cookie_source)
         if direct_candidate and hls_candidate:
-            route, chosen = chzzk_choose_download_route(direct_candidate, hls_candidate, on_event=on_event)
+            route, chosen = chzzk_choose_download_route(
+                direct_candidate,
+                hls_candidate,
+                total=total,
+                duration=safe_int(candidate.get("duration")),
+                on_event=on_event,
+            )
             if route == "hls":
                 hls_url = str(chosen.get("url") or "").strip() or target_url
                 emit_event(

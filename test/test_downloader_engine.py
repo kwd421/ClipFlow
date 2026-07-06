@@ -3192,18 +3192,29 @@ for line in sys.stdin:
             "height": 1080,
             "is_manifest": True,
         }
-        original_direct_probe = engine.chzzk_probe_direct_speed
-        original_hls_probe = engine.chzzk_probe_hls_speed
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
 
         try:
-            engine.chzzk_probe_direct_speed = lambda *args, **kwargs: 4 * 1024 * 1024
-            engine.chzzk_probe_hls_speed = lambda *args, **kwargs: 12 * 1024 * 1024
-            route, chosen = engine.chzzk_choose_download_route(direct, hls)
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 4 * 1024 * 1024,
+                "mid_bps": 4 * 1024 * 1024,
+                "mid_offset": 1000,
+                "throttle_ratio": 1.0,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 120,
+                "probe_bps": 12 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": True,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=80 * 1024**3, duration=7200)
             self.assertEqual(route, "hls")
             self.assertEqual(chosen["url"], hls["url"])
         finally:
-            engine.chzzk_probe_direct_speed = original_direct_probe
-            engine.chzzk_probe_hls_speed = original_hls_probe
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
 
     def test_chzzk_choose_download_route_picks_direct_when_probe_is_faster(self):
         direct = {
@@ -3217,18 +3228,65 @@ for line in sys.stdin:
             "height": 1080,
             "is_manifest": True,
         }
-        original_direct_probe = engine.chzzk_probe_direct_speed
-        original_hls_probe = engine.chzzk_probe_hls_speed
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
 
         try:
-            engine.chzzk_probe_direct_speed = lambda *args, **kwargs: 20 * 1024 * 1024
-            engine.chzzk_probe_hls_speed = lambda *args, **kwargs: 8 * 1024 * 1024
-            route, chosen = engine.chzzk_choose_download_route(direct, hls)
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 20 * 1024 * 1024,
+                "mid_bps": 18 * 1024 * 1024,
+                "mid_offset": 1000,
+                "throttle_ratio": 0.9,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 120,
+                "probe_bps": 8 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": True,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=80 * 1024**3, duration=7200)
             self.assertEqual(route, "direct")
             self.assertEqual(chosen["url"], direct["url"])
         finally:
-            engine.chzzk_probe_direct_speed = original_direct_probe
-            engine.chzzk_probe_hls_speed = original_hls_probe
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
+
+    def test_chzzk_choose_download_route_prefers_hls_on_direct_range_throttle(self):
+        direct = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/vod.m3u8",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
+
+        try:
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 40 * 1024 * 1024,
+                "mid_bps": 4 * 1024 * 1024,
+                "mid_offset": 25_000_000_000,
+                "throttle_ratio": 0.1,
+                "throttle_detected": True,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 500,
+                "probe_bps": 10 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": True,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=50 * 1024**3, duration=7200)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
 
     def test_download_chzzk_starts_hls_when_probe_selects_hls(self):
         events = []
@@ -3258,8 +3316,8 @@ for line in sys.stdin:
             del page_url, cookie_source, on_event
             return cand, hls_candidate
 
-        def fake_choose(direct_candidate, hls_cand, on_event=None):
-            del on_event
+        def fake_choose(direct_candidate, hls_cand, total=0, duration=0, on_event=None):
+            del direct_candidate, total, duration, on_event
             return "hls", hls_cand
 
         def fake_hls(url, cand, output_dir, on_event=None):
