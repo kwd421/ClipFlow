@@ -2317,6 +2317,98 @@ for line in sys.stdin:
             )
         )
 
+    def test_parse_hls_media_playlist_reads_init_map_url(self):
+        playlist = '\n'.join(
+            [
+                "#EXTM3U",
+                '#EXT-X-MAP:URI="init.m4s"',
+                "#EXTINF:1,",
+                "seg0.m4v",
+            ]
+        )
+        meta = engine.parse_hls_media_playlist(playlist, "https://cdn.example.test/stream/index.m3u8")
+        self.assertEqual(meta["init_map_url"], "https://cdn.example.test/stream/init.m4s")
+        self.assertEqual(meta["segment_urls"], ["https://cdn.example.test/stream/seg0.m4v"])
+
+    def test_download_hls_parallel_writes_fmp4_init_before_segments(self):
+        playlist = '\n'.join(
+            [
+                "#EXTM3U",
+                '#EXT-X-MAP:URI="init.m4s"',
+                "#EXTINF:1,",
+                "seg0.m4v",
+                "#EXTINF:1,",
+                "seg1.m4v",
+            ]
+        )
+        payloads = {
+            "https://cdn.example.test/init.m4s": b"INIT",
+            "https://cdn.example.test/seg0.m4v": b"SEG0",
+            "https://cdn.example.test/seg1.m4v": b"SEG1",
+        }
+        fetched = []
+
+        def fake_resolve(url, headers):
+            del url, headers
+            return "https://cdn.example.test/index.m3u8", playlist
+
+        def fake_urlopen(request, timeout=45):
+            del timeout
+            fetched.append(request.full_url)
+
+            class Response:
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def read(self, size=-1):
+                    if size is None or size < 0:
+                        data = self._payload
+                        self._payload = b""
+                        return data
+                    chunk = self._payload[:size]
+                    self._payload = self._payload[size:]
+                    return chunk
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    del exc_type, exc, tb
+
+            return Response(payloads[request.full_url])
+
+        original_resolve = engine.resolve_hls_media_playlist
+        original_urlopen = engine.parallel_http_urlopen
+        try:
+            engine.resolve_hls_media_playlist = fake_resolve
+            engine.parallel_http_urlopen = fake_urlopen
+            with tempfile.TemporaryDirectory() as temp_dir:
+                result = engine.download_hls_parallel(
+                    "https://cdn.example.test/master.m3u8",
+                    {
+                        "title": "fMP4 HLS",
+                        "display_title": "fMP4 HLS",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "source": "https://chzzk.naver.com/video/1",
+                    },
+                    temp_dir,
+                )
+                output = Path(result["output_path"])
+                self.assertEqual(output.read_bytes(), b"INITSEG0SEG1")
+        finally:
+            engine.resolve_hls_media_playlist = original_resolve
+            engine.parallel_http_urlopen = original_urlopen
+
+        self.assertEqual(
+            fetched,
+            [
+                "https://cdn.example.test/init.m4s",
+                "https://cdn.example.test/seg0.m4v",
+                "https://cdn.example.test/seg1.m4v",
+            ],
+        )
+
     def test_download_hls_parallel_writes_segments_in_order(self):
         playlist = "#EXTM3U\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n"
         payloads = {
@@ -2476,6 +2568,147 @@ for line in sys.stdin:
             engine.resolve_hls_media_playlist = original_resolve
             engine.parallel_http_urlopen = original_urlopen
             engine.remux_ts_file_to_mp4 = original_remux
+
+    def test_download_hls_parallel_retries_failed_segments(self):
+        playlist = "#EXTM3U\n#EXTINF:1,\nseg0.ts\n"
+        payloads = {"https://cdn.example.test/seg0.ts": b"SEG0"}
+        attempts = {"count": 0}
+
+        def fake_resolve(url, headers):
+            del url, headers
+            return "https://cdn.example.test/index.m3u8", playlist
+
+        def fake_urlopen(request, timeout=45):
+            del timeout
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError("transient network error")
+
+            class Response:
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def read(self, size=-1):
+                    if size is None or size < 0:
+                        data = self._payload
+                        self._payload = b""
+                        return data
+                    chunk = self._payload[:size]
+                    self._payload = self._payload[size:]
+                    return chunk
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    del exc_type, exc, tb
+
+            return Response(payloads[request.full_url])
+
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+            del ffmpeg_exe, output_format
+            Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
+
+        original_resolve = engine.resolve_hls_media_playlist
+        original_urlopen = engine.parallel_http_urlopen
+        original_remux = engine.remux_ts_file_to_mp4
+        original_sleep = engine.time.sleep
+        try:
+            engine.resolve_hls_media_playlist = fake_resolve
+            engine.parallel_http_urlopen = fake_urlopen
+            engine.remux_ts_file_to_mp4 = fake_remux
+            engine.time.sleep = lambda _seconds: None
+            with tempfile.TemporaryDirectory() as temp_dir:
+                result = engine.download_hls_parallel(
+                    "https://cdn.example.test/master.m3u8",
+                    {
+                        "title": "Retry HLS",
+                        "display_title": "Retry HLS",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "source": "https://chzzk.naver.com/video/1",
+                    },
+                    temp_dir,
+                )
+                output = Path(result["output_path"])
+                self.assertEqual(output.read_bytes(), b"SEG0-MP4")
+        finally:
+            engine.resolve_hls_media_playlist = original_resolve
+            engine.parallel_http_urlopen = original_urlopen
+            engine.remux_ts_file_to_mp4 = original_remux
+            engine.time.sleep = original_sleep
+
+        self.assertGreaterEqual(attempts["count"], 2)
+
+    def test_download_hls_parallel_segment_limit_truncates_playlist(self):
+        playlist = "#EXTM3U\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n"
+        fetched = []
+
+        def fake_resolve(url, headers):
+            del url, headers
+            return "https://cdn.example.test/index.m3u8", playlist
+
+        def fake_urlopen(request, timeout=45):
+            del timeout
+            fetched.append(request.full_url)
+
+            class Response:
+                def __init__(self, url):
+                    self._payload = url.encode()
+
+                def read(self, size=-1):
+                    if size is None or size < 0:
+                        data = self._payload
+                        self._payload = b""
+                        return data
+                    chunk = self._payload[:size]
+                    self._payload = self._payload[size:]
+                    return chunk
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    del exc_type, exc, tb
+
+            return Response(request.full_url)
+
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+            del ffmpeg_exe, output_format
+            Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
+
+        original_resolve = engine.resolve_hls_media_playlist
+        original_urlopen = engine.parallel_http_urlopen
+        original_remux = engine.remux_ts_file_to_mp4
+        try:
+            engine.resolve_hls_media_playlist = fake_resolve
+            engine.parallel_http_urlopen = fake_urlopen
+            engine.remux_ts_file_to_mp4 = fake_remux
+            with tempfile.TemporaryDirectory() as temp_dir:
+                engine.download_hls_parallel(
+                    "https://cdn.example.test/master.m3u8",
+                    {
+                        "title": "Limited HLS",
+                        "display_title": "Limited HLS",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "source": "https://chzzk.naver.com/video/1",
+                    },
+                    temp_dir,
+                    segment_limit=2,
+                )
+        finally:
+            engine.resolve_hls_media_playlist = original_resolve
+            engine.parallel_http_urlopen = original_urlopen
+            engine.remux_ts_file_to_mp4 = original_remux
+
+        self.assertEqual(
+            fetched,
+            [
+                "https://cdn.example.test/seg0.ts",
+                "https://cdn.example.test/seg1.ts",
+            ],
+        )
 
     def test_download_candidate_routes_chzzk_hls_to_parallel_downloader(self):
         calls = {"parallel": 0, "ydl": 0}

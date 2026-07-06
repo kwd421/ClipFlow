@@ -1,9 +1,10 @@
-import io
+import http.client
 import json
 import os
 import re
 import html as html_lib
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -63,9 +64,12 @@ HLS_PARALLEL_WORKERS = 56
 HLS_PARALLEL_MAX_IN_FLIGHT = 56
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
+HLS_SEGMENT_RETRIES = 3
 YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 32
 YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+_PARALLEL_HTTP_STATE = threading.local()
 _HLS_PARALLEL_PIPELINE_OBSERVER = None
+_HLS_PARALLEL_PIPELINE_OBSERVER_LOCK = threading.Lock()
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -4229,8 +4233,106 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     }
 
 
+class _PersistentHttpResponse:
+    def __init__(self, response):
+        self._response = response
+        self.status = response.status
+        self.headers = {key: value for key, value in response.getheaders()}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        self.close()
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            return self._response.read()
+        return self._response.read(size)
+
+    def close(self):
+        try:
+            while self._response.read(64 * 1024):
+                pass
+        except Exception:
+            pass
+
+
+def _reset_parallel_http_connection(connection_key):
+    state = _PARALLEL_HTTP_STATE
+    connections = getattr(state, "connections", None)
+    if not connections:
+        return
+    connection = connections.pop(connection_key, None)
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def _reset_parallel_http_connections_for_thread():
+    state = _PARALLEL_HTTP_STATE
+    connections = getattr(state, "connections", None)
+    if not connections:
+        return
+    for connection_key in list(connections.keys()):
+        _reset_parallel_http_connection(connection_key)
+
+
 def parallel_http_urlopen(request, timeout=30):
-    # Parallel download paths use urllib: curl_cffi is not safe under ThreadPoolExecutor on Windows.
+    # Thread-local HTTP keep-alive: curl_cffi is not safe under ThreadPoolExecutor on Windows.
+    url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
+    if hasattr(request, "header_items"):
+        headers = dict(request.header_items())
+    else:
+        headers = dict(getattr(request, "headers", {}) or {})
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.hostname:
+        return urllib.request.urlopen(request, timeout=timeout)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    connection_key = (parsed.scheme, parsed.hostname, port)
+    state = _PARALLEL_HTTP_STATE
+    if not hasattr(state, "connections"):
+        state.connections = {}
+    last_exc = None
+    for attempt in range(2):
+        connection = state.connections.get(connection_key)
+        try:
+            if connection is None:
+                if parsed.scheme == "https":
+                    connection = http.client.HTTPSConnection(
+                        parsed.hostname,
+                        port,
+                        timeout=timeout,
+                        context=ssl.create_default_context(),
+                    )
+                else:
+                    connection = http.client.HTTPConnection(parsed.hostname, port, timeout=timeout)
+                state.connections[connection_key] = connection
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            if response.status >= 400:
+                body = response.read()
+                raise urllib.error.HTTPError(
+                    url,
+                    response.status,
+                    response.reason,
+                    response.getheaders(),
+                    body,
+                )
+            return _PersistentHttpResponse(response)
+        except Exception as exc:
+            last_exc = exc
+            _reset_parallel_http_connection(connection_key)
+            if attempt == 0:
+                continue
+            break
     return urllib.request.urlopen(request, timeout=timeout)
 
 
@@ -4267,11 +4369,16 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
     media_sequence = 0
     key_url = ""
     key_iv = None
+    init_map_url = ""
     segment_urls = []
     for line in str(playlist_text or "").splitlines():
         line = line.strip()
         if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
             media_sequence = safe_int(line.split(":", 1)[1])
+        elif line.startswith("#EXT-X-MAP:"):
+            uri_match = re.search(r'URI="([^"]+)"', line)
+            if uri_match:
+                init_map_url = urllib.parse.urljoin(playlist_url, uri_match.group(1))
         elif line.startswith("#EXT-X-KEY:"):
             uri_match = re.search(r'URI="([^"]+)"', line)
             if uri_match:
@@ -4285,6 +4392,7 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
         "media_sequence": media_sequence,
         "key_url": key_url,
         "key_iv": key_iv,
+        "init_map_url": init_map_url,
         "segment_urls": segment_urls,
     }
 
@@ -4306,14 +4414,14 @@ def fetch_hls_aes128_key(key_url, headers):
 
 
 def iter_hls_cipher_blocks(chunk_iter):
-    buffer = b""
+    buffer = bytearray()
     for chunk in chunk_iter:
         if not chunk:
             continue
-        buffer += chunk
+        buffer.extend(chunk)
         while len(buffer) >= 16:
-            yield buffer[:16]
-            buffer = buffer[16:]
+            yield bytes(buffer[:16])
+            del buffer[:16]
     if buffer:
         raise RuntimeError("Encrypted HLS segment size is not a multiple of 16.")
 
@@ -4452,6 +4560,45 @@ def remux_ts_concat_to_mp4(ts_paths, output_path, ffmpeg_exe, output_format="mp4
         raise RuntimeError((completed.stderr or completed.stdout or "HLS remux failed.").strip())
 
 
+def stream_hls_url_to_file(url, headers, output_file, timeout=45):
+    request = urllib.request.Request(str(url or ""), headers=dict(headers or {}))
+    with parallel_http_urlopen(request, timeout=timeout) as response:
+        while True:
+            chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+            if not chunk:
+                break
+            output_file.write(chunk)
+
+
+def remux_fmp4_file_to_mp4(fmp4_path, output_path, ffmpeg_exe, output_format="mp4"):
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-hide_banner",
+        "-f",
+        "mp4",
+        "-i",
+        str(fmp4_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        output_format,
+        str(output_path),
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **_hidden_subprocess_kwargs(),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "fMP4 remux failed.").strip())
+
+
 def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
     command = [
         str(ffmpeg_exe),
@@ -4488,31 +4635,6 @@ def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
     if not playlist_meta["key_url"]:
         raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
     return fetch_hls_aes128_key(playlist_meta["key_url"], headers)
-
-
-def fetch_hls_segment_payload(index, segment_url, aes_key, playlist_meta, headers):
-    request = urllib.request.Request(segment_url, headers=dict(headers))
-    with parallel_http_urlopen(request, timeout=45) as response:
-        if aes_key is None:
-            chunks = []
-            while True:
-                chunk = response.read(HLS_SEGMENT_READ_CHUNK)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            return b"".join(chunks)
-
-        def chunk_iter():
-            while True:
-                chunk = response.read(HLS_SEGMENT_READ_CHUNK)
-                if not chunk:
-                    break
-                yield chunk
-
-        buffer = io.BytesIO()
-        iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
-        decrypt_hls_aes128_cbc_stream(iter_hls_cipher_blocks(chunk_iter()), buffer, aes_key, iv)
-        return buffer.getvalue()
 
 
 def download_hls_segment_to_path(index, segment_url, segment_path, aes_key, playlist_meta, headers):
@@ -4558,7 +4680,9 @@ def clear_hls_parallel_pipeline_observer():
 
 def _notify_hls_parallel_pipeline(in_flight_count, pending_count):
     observer = _HLS_PARALLEL_PIPELINE_OBSERVER
-    if observer:
+    if not observer:
+        return
+    with _HLS_PARALLEL_PIPELINE_OBSERVER_LOCK:
         observer(in_flight_count, pending_count)
 
 
@@ -4617,14 +4741,14 @@ def emit_hls_parallel_progress(
     return time.monotonic(), downloaded_bytes
 
 
-def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
+def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, segment_limit=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
     if output_path is None:
         raise RuntimeError("HLS output path could not be determined.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     part_path = output_path.with_name(output_path.name + ".part")
-    part_ts_path = part_path.with_suffix(part_path.suffix + ".ts")
+    part_media_path = part_path.with_suffix(part_path.suffix + ".media")
     ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
     if not ffmpeg_exe:
         raise RuntimeError("ffmpeg is required for parallel HLS downloads")
@@ -4632,9 +4756,14 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
     duration = safe_int((candidate or {}).get("duration"))
     playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
     playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+    init_map_url = str(playlist_meta.get("init_map_url") or "")
+    is_fmp4 = bool(init_map_url)
     segment_urls = playlist_meta["segment_urls"]
     if not segment_urls:
         raise RuntimeError("HLS media playlist had no segments.")
+    limit = safe_int(segment_limit)
+    if limit > 0:
+        segment_urls = segment_urls[:limit]
     aes_key = hls_parallel_aes_key(playlist_text, playlist_meta, headers)
     workers = max(1, min(HLS_PARALLEL_WORKERS, len(segment_urls)))
     max_in_flight = max(workers, min(HLS_PARALLEL_MAX_IN_FLIGHT, len(segment_urls)))
@@ -4651,19 +4780,36 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
     in_flight = {}
 
     try:
-        with tempfile.TemporaryDirectory(prefix="clipflow-hls-") as temp_dir, part_ts_path.open("wb") as output_file:
+        with tempfile.TemporaryDirectory(prefix="clipflow-hls-") as temp_dir, part_media_path.open("wb") as output_file:
             temp_root = Path(temp_dir)
+            if init_map_url:
+                emit_event(on_event, "status", message="Downloading HLS init segment")
+                stream_hls_url_to_file(init_map_url, headers, output_file)
 
             def fetch_segment(index, segment_url):
                 segment_path = temp_root / f"seg_{index:08d}.ts"
-                return download_hls_segment_to_path(
-                    index,
-                    segment_url,
-                    segment_path,
-                    aes_key,
-                    playlist_meta,
-                    headers,
-                )
+                last_exc = None
+                for attempt in range(max(1, HLS_SEGMENT_RETRIES)):
+                    try:
+                        if segment_path.exists():
+                            try:
+                                segment_path.unlink()
+                            except OSError:
+                                pass
+                        return download_hls_segment_to_path(
+                            index,
+                            segment_url,
+                            segment_path,
+                            aes_key,
+                            playlist_meta,
+                            headers,
+                        )
+                    except Exception as exc:
+                        last_exc = exc
+                        _reset_parallel_http_connections_for_thread()
+                        if attempt + 1 < HLS_SEGMENT_RETRIES:
+                            time.sleep(0.2 * (attempt + 1))
+                raise last_exc
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 while next_submit_index < total_segments and len(in_flight) < max_in_flight:
@@ -4725,15 +4871,15 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
             force=True,
         )
         emit_event(on_event, "status", message="Finalizing HLS download")
-        remux_ts_file_to_mp4(
-            part_ts_path,
-            part_path,
-            ffmpeg_exe,
-            output_format=normalized_output_ext((candidate or {}).get("output_ext")) or "mp4",
-        )
+        output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
+        if is_fmp4:
+            # CMAF init + fragment concat is already MP4; skip ffmpeg remux for throughput.
+            part_media_path.replace(part_path)
+        else:
+            remux_ts_file_to_mp4(part_media_path, part_path, ffmpeg_exe, output_format=output_format)
     finally:
         try:
-            part_ts_path.unlink()
+            part_media_path.unlink()
         except OSError:
             pass
     if not part_path.exists() or part_path.stat().st_size <= 0:
