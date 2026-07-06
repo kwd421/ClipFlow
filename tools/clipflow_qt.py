@@ -1741,18 +1741,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _on_download_thread_finished(self):
         self._handle_thread_finished(self.sender())
 
-    def _progress_is_finishing_phase(self, row, percent, message=""):
-        if row and row.get("status") == COMPLETED_STATUS:
-            return False
-        text = str(message or "")
-        finishing_msg = any(token in text for token in ("마무리", "컷", "remux", "Remux"))
-        return finishing_msg and percent >= 99
-
     def _display_progress_for_row(self, row, percent, event):
         percent = max(0, min(100, int(float(percent or 0))))
-        message = str((event or {}).get("message") or "").strip() if isinstance(event, dict) else ""
-        if self._progress_is_finishing_phase(row, percent, message):
-            return 100, "마무리 중", True
         return percent, self._progress_text(percent, event), False
 
     def _handle_engine_event_for(self, row, event):
@@ -1762,16 +1752,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if event_type == "progress":
             if row and (row.get("download_cancel_requested") or row.get("status") == PAUSED_STATUS):
                 return
-            percent, text, is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
+            percent, text, _is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
             if row and row.get("download_starting"):
                 row["download_starting"] = False
                 if widget:
                     widget.set_status(DOWNLOAD_STATUS)
             if row:
-                if is_finishing:
-                    row["download_finishing"] = True
-                elif percent < 99:
-                    row.pop("download_finishing", None)
+                row.pop("download_finishing", None)
             if widget:
                 # Avoid the heavy set_status() on every progress tick (it does
                 # spinner/visibility work + a filesystem stat in _refresh_actions).
@@ -1779,11 +1766,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 # it once if it somehow drifted.
                 if row.get("status") != DOWNLOAD_STATUS:
                     widget.set_status(DOWNLOAD_STATUS)
-                if is_finishing:
-                    widget.set_finishing(text)
-                else:
-                    widget.set_progress(percent, text)
-            status_text = text if is_finishing else (text or "다운로드 중")
+                widget.set_progress(percent, text)
+            status_text = text or "다운로드 중"
             if hasattr(self, "status_label") and self.status_label.text() != status_text:
                 self.status_label.setText(status_text)
         elif event_type == "file":
@@ -1796,10 +1780,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 if hasattr(self, "status_label"):
                     self.status_label.setText(message)
                 if row and row.get("status") == DOWNLOAD_STATUS and widget:
-                    if any(token in str(message) for token in ("마무리", "컷")):
-                        row["download_finishing"] = True
-                        widget.set_finishing("마무리 중")
-                    elif row.get("download_starting"):
+                    if row.get("download_starting"):
                         widget.set_progress(0, engine.compact_text(message, 48))
                 elif row and row.get("download_starting") and widget:
                     widget.set_progress(0, engine.compact_text(message, 48))

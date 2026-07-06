@@ -1682,12 +1682,13 @@ def parse_content_range(value):
     return safe_int(match.group(1)) if match else 0
 
 
-def http_content_length(url, timeout=3):
+def http_content_length(url, timeout=3, headers=None):
     if not str(url or "").lower().startswith(("http://", "https://")):
         return 0
     headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": ACCEPT_LANGUAGE,
+        **dict(headers or {}),
     }
     try:
         request = urllib.request.Request(url, headers=headers, method="HEAD")
@@ -4238,6 +4239,43 @@ def browser_dom_manifest_movflags(candidate):
     return "+faststart"
 
 
+def byte_download_eta_seconds(downloaded_bytes, total_bytes, speed_bps):
+    total_bytes = safe_int(total_bytes)
+    downloaded_bytes = max(0, safe_int(downloaded_bytes))
+    speed_bps = float(speed_bps or 0)
+    if total_bytes <= 0 or speed_bps <= 0 or downloaded_bytes >= total_bytes:
+        return 0
+    return max(0, int((total_bytes - downloaded_bytes) / speed_bps))
+
+
+def emit_byte_download_progress(on_event, downloaded_bytes, total_bytes, speed_bps, percent=None):
+    total_bytes = safe_int(total_bytes)
+    downloaded_bytes = max(0, safe_int(downloaded_bytes))
+    if not total_bytes:
+        return
+    if percent is None:
+        percent = max(0, min(100, downloaded_bytes * 100 / total_bytes))
+    speed_label = f"{display_size(speed_bps)}/s" if speed_bps > 0 else ""
+    eta = byte_download_eta_seconds(downloaded_bytes, total_bytes, speed_bps)
+    eta_text = display_duration(eta) if eta > 0 else ""
+    message = f"{percent:.1f}%"
+    if speed_label:
+        message = f"{message} · {speed_label}"
+    if eta_text:
+        message = f"{message} · ETA {eta_text}"
+    emit_event(
+        on_event,
+        "progress",
+        percent=percent,
+        downloaded=downloaded_bytes,
+        total=total_bytes,
+        speed=speed_bps,
+        speed_text=speed_label,
+        eta_text=eta_text,
+        message=message,
+    )
+
+
 def emit_manifest_download_progress(
     on_event,
     current_sec,
@@ -4262,15 +4300,10 @@ def emit_manifest_download_progress(
         elapsed = max(0.001, now - float(started_at))
         speed_bps = downloaded_bytes / elapsed
     speed_label = f"{display_size(speed_bps)}/s" if speed_bps > 0 else ""
-    remaining_bytes = max(0, int(total_bytes) - int(downloaded_bytes)) if total_bytes else 0
-    eta = 0
-    if speed_bps > 0 and remaining_bytes:
-        eta = int(remaining_bytes / speed_bps)
-    elif started_at is not None and current_sec > 0:
-        remaining = max(0.0, float(duration_sec) - float(current_sec))
-        elapsed = max(0.001, now - float(started_at))
-        eta = int(remaining * elapsed / float(current_sec))
-    eta_text = display_duration(eta) if eta else ""
+    eta_text = ""
+    if speed_bps > 0 and safe_int(total_bytes) > 0:
+        eta = byte_download_eta_seconds(downloaded_bytes, total_bytes, speed_bps)
+        eta_text = display_duration(eta) if eta > 0 else ""
     if speed_label and eta_text:
         message = f"{percent:.1f}% · {speed_label} · ETA {eta_text}"
     elif speed_label:
@@ -4292,31 +4325,16 @@ def emit_manifest_download_progress(
     )
 
 
-def emit_direct_download_progress(on_event, downloaded, total, started_at):
+def emit_direct_download_progress(on_event, downloaded, total, started_at, last_bytes=0, last_emit_at=None):
     if not total:
         return
     now = time.monotonic()
-    percent = max(0, min(100, downloaded * 100 / total))
-    elapsed = max(0.001, now - started_at)
-    speed = downloaded / elapsed
-    eta = max(0, int((total - downloaded) / speed)) if speed > 0 else 0
-    speed_text = f"{display_size(speed)}/s"
-    eta_text = display_duration(eta)
-    message = f"{percent:.1f}% {speed_text}"
-    if eta_text:
-        message = f"{message} ETA {eta_text}"
-    emit_event(
-        on_event,
-        "progress",
-        percent=percent,
-        downloaded=downloaded,
-        total=total,
-        speed=speed,
-        eta=eta,
-        speed_text=speed_text,
-        eta_text=eta_text,
-        message=message,
-    )
+    speed = 0.0
+    if last_emit_at is not None and downloaded > last_bytes:
+        speed = max(0.0, (downloaded - last_bytes) / max(0.001, now - float(last_emit_at)))
+    elif started_at is not None and downloaded > 0:
+        speed = downloaded / max(0.001, now - float(started_at))
+    emit_byte_download_progress(on_event, downloaded, total, speed)
 
 
 def download_direct_media_single(url, output_path, headers, total=0, on_event=None):
@@ -4331,7 +4349,7 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
     request = urllib.request.Request(url, headers=request_headers)
     downloaded = existing_size if append else 0
     started_at = time.monotonic()
-    last_progress = 0.0
+    last_progress = {"time": 0.0, "bytes": 0}
     with parallel_http_urlopen(request, timeout=30) as response:
         if append and safe_int(getattr(response, "status", 200)) != 206:
             append = False
@@ -4348,9 +4366,17 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
                 file.write(chunk)
                 downloaded += len(chunk)
                 now = time.monotonic()
-                if total and (now - last_progress >= 0.25 or downloaded >= total):
-                    last_progress = now
-                    emit_direct_download_progress(on_event, downloaded, total, started_at)
+                if total and (now - last_progress["time"] >= 0.25 or downloaded >= total):
+                    emit_direct_download_progress(
+                        on_event,
+                        downloaded,
+                        total,
+                        started_at,
+                        last_bytes=last_progress["bytes"],
+                        last_emit_at=last_progress["time"] or None,
+                    )
+                    last_progress["time"] = now
+                    last_progress["bytes"] = downloaded
     if total and downloaded != total:
         raise RuntimeError(f"Direct media download incomplete: downloaded {downloaded} bytes, expected {total}.")
     return part_path
@@ -4531,7 +4557,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
     downloaded_lock = threading.Lock()
     progress_lock = threading.Lock()
     started_at = time.monotonic()
-    last_progress = {"value": 0.0}
+    last_progress = {"value": 0.0, "bytes": 0}
 
     def report(delta):
         nonlocal downloaded
@@ -4541,8 +4567,16 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
             current = downloaded
         with progress_lock:
             if now - last_progress["value"] >= 0.25 or current >= total:
+                emit_direct_download_progress(
+                    on_event,
+                    current,
+                    total,
+                    started_at,
+                    last_bytes=last_progress["bytes"],
+                    last_emit_at=last_progress["value"] or None,
+                )
                 last_progress["value"] = now
-                emit_direct_download_progress(on_event, current, total, started_at)
+                last_progress["bytes"] = current
 
     def download_range(range_info):
         index, start, end, segment_path = range_info
@@ -4589,6 +4623,12 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
     return part_path
 
 
+def resolve_direct_media_total(url, headers, candidate):
+    estimated = candidate_expected_size(candidate)
+    probed = http_content_length(url, headers=headers)
+    return probed or estimated
+
+
 def download_direct_media(url, candidate, output_dir, on_event=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
@@ -4596,7 +4636,7 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
         raise RuntimeError("Direct media output path could not be determined.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     headers = direct_media_request_headers(candidate)
-    total = candidate_expected_size(candidate)
+    total = resolve_direct_media_total(url, headers, candidate)
     use_parallel = should_use_parallel_direct_download(url, headers, total)
     emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
     if use_parallel:
@@ -4888,8 +4928,7 @@ def trim_downloaded_media_to_clip_range(output_path, trim_params, candidate=None
     if out_duration is not None:
         command += ["-t", str(out_duration)]
     command += ["-c", "copy", "-movflags", "+faststart", "-f", output_format, str(trimmed_path)]
-    emit_event(on_event, "status", message="마무리 중")
-    emit_event(on_event, "progress", percent=100, message="마무리 중")
+    emit_event(on_event, "log", message="Trimming downloaded clip range")
     try:
         run_ffmpeg_command(command, error_label="ffmpeg clip trim failed")
     except RuntimeError:
@@ -5369,8 +5408,7 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                             last_emit_at,
                             last_emit_bytes,
                         )
-        emit_event(on_event, "progress", percent=100, message="마무리 중")
-        emit_event(on_event, "status", message="마무리 중")
+        emit_event(on_event, "log", message="Finalizing HLS output")
         output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
         if is_fmp4:
             # CMAF init + fragment concat is already MP4; skip ffmpeg remux for throughput.
@@ -5677,41 +5715,50 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     reader_done = False
     last_percent = -1.0
     stderr_text = ""
+    clip_bytes = candidate_expected_size(candidate)
+    last_output_size = 0
+    last_output_emit_at = 0.0
 
     def emit_ffmpeg_progress():
-        nonlocal last_progress, last_percent
+        nonlocal last_progress, last_percent, last_output_size, last_output_emit_at
         raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
         current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
         if duration:
             percent = max(0, min(100, current * 100 / duration))
         else:
             percent = 0
-        if duration and percent <= last_percent and percent < 99:
-            return
-        if duration:
-            percent = min(percent, 99.0)
-        last_percent = percent
-        last_progress = time.monotonic()
-        speed_text = str(progress_values.get("speed") or "").strip()
-        speed_label = ffmpeg_progress_speed_label(speed_text, cut_mode)
         output_size = safe_int(progress_values.get("total_size"))
-        output_speed_label = ""
-        if output_size > 0:
-            output_elapsed = max(0.001, time.monotonic() - segment_started_at)
-            output_speed_label = f"{display_size(output_size / output_elapsed)}/s"
-        eta_text = display_duration(max(0, int(round(duration - current)))) if duration else ""
+        if clip_bytes and output_size:
+            percent = max(percent, min(99.0, output_size * 100 / clip_bytes))
+        if percent <= last_percent and percent < 99:
+            return
+        percent = min(percent, 99.0)
+        last_percent = percent
+        now = time.monotonic()
+        speed_bps = 0.0
+        if last_output_emit_at and output_size > last_output_size:
+            speed_bps = max(0.0, (output_size - last_output_size) / max(0.001, now - last_output_emit_at))
+        elif output_size > 0:
+            speed_bps = output_size / max(0.001, now - segment_started_at)
+        last_progress = now
+        last_output_size = output_size
+        last_output_emit_at = now
+        speed_label = f"{display_size(speed_bps)}/s" if speed_bps > 0 else ""
+        eta = byte_download_eta_seconds(output_size, clip_bytes, speed_bps) if clip_bytes else 0
+        eta_text = display_duration(eta) if eta > 0 else ""
         message = f"{percent:.1f}%"
-        if output_speed_label:
-            message = f"{message} {output_speed_label}"
         if speed_label:
-            message = f"{message} {speed_label}"
+            message = f"{message} · {speed_label}"
         if eta_text:
-            message = f"{message} ETA {eta_text}"
+            message = f"{message} · ETA {eta_text}"
         emit_event(
             on_event,
             "progress",
             percent=percent,
-            speed_text=speed_text,
+            downloaded=output_size,
+            total=clip_bytes,
+            speed=speed_bps,
+            speed_text=speed_label,
             eta_text=eta_text,
             message=message,
         )
