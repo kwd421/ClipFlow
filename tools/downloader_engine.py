@@ -56,7 +56,15 @@ BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
 BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
-BROWSER_DOM_HLS_PARALLEL_WORKERS = 8
+BROWSER_DOM_HLS_PARALLEL_WORKERS = 24
+# HLS parallel: workers = concurrent segment fetches; max_in_flight caps queued futures
+# and temp files so multi-hour VODs do not retain all segments in RAM.
+HLS_PARALLEL_WORKERS = 24
+HLS_PARALLEL_MAX_IN_FLIGHT = 96
+HLS_SEGMENT_READ_CHUNK = 512 * 1024
+HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
+YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 16
+YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -2406,7 +2414,8 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             "continuedl": True,
             "retries": 10,
             "fragment_retries": 10,
-            "concurrent_fragment_downloads": 1,
+            "concurrent_fragment_downloads": YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS,
+            "http_chunk_size": YTDLP_HTTP_CHUNK_SIZE,
             "progress_hooks": [progress_hook(on_event)],
             "postprocessor_hooks": [postprocessor_hook(on_event)],
         }
@@ -3780,6 +3789,12 @@ def is_chzzk_direct_mp4_candidate(candidate):
     )
 
 
+def is_chzzk_hls_candidate(candidate):
+    source = str((candidate or {}).get("source") or "")
+    media_url = str((candidate or {}).get("url") or "").lower()
+    return "chzzk.naver.com/" in source and ".m3u8" in media_url
+
+
 def is_browser_dom_manifest_candidate(candidate):
     format_id = str((candidate or {}).get("format_id") or "")
     if not format_id.startswith("browser-"):
@@ -4396,95 +4411,256 @@ def remux_ts_concat_to_mp4(ts_paths, output_path, ffmpeg_exe, output_format="mp4
         raise RuntimeError((completed.stderr or completed.stdout or "HLS remux failed.").strip())
 
 
-def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
+def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-hide_banner",
+        "-i",
+        str(ts_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        output_format,
+        str(output_path),
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **_hidden_subprocess_kwargs(),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "HLS remux failed.").strip())
+
+
+def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
+    encryption = hls_playlist_parallel_encryption(playlist_text)
+    if encryption is None:
+        raise RuntimeError("HLS encryption method is not supported for parallel download.")
+    if encryption != "aes-128":
+        return None
+    if not playlist_meta["key_url"]:
+        raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
+    return fetch_hls_aes128_key(playlist_meta["key_url"], headers)
+
+
+def fetch_hls_segment_payload(index, segment_url, aes_key, playlist_meta, headers):
+    request = urllib.request.Request(segment_url, headers=dict(headers))
+    with urllib.request.urlopen(request, timeout=45) as response:
+        if aes_key is None:
+            chunks = []
+            while True:
+                chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        payload = response.read()
+    if aes_key is not None:
+        iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
+        payload = decrypt_hls_aes128_segment(payload, aes_key, iv)
+    return payload
+
+
+def download_hls_segment_to_path(index, segment_url, segment_path, aes_key, playlist_meta, headers):
+    segment_path = Path(segment_path)
+    request = urllib.request.Request(segment_url, headers=dict(headers))
+    with urllib.request.urlopen(request, timeout=45) as response:
+        if aes_key is None:
+            with segment_path.open("wb") as segment_file:
+                while True:
+                    chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+                    if not chunk:
+                        break
+                    segment_file.write(chunk)
+            return index, segment_path
+        payload = response.read()
+    iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
+    segment_path.write_bytes(decrypt_hls_aes128_segment(payload, aes_key, iv))
+    return index, segment_path
+
+
+def append_hls_segment_file(output_file, segment_path):
+    with segment_path.open("rb") as segment_file:
+        shutil.copyfileobj(segment_file, output_file, HLS_SEGMENT_READ_CHUNK)
+
+
+def emit_hls_parallel_progress(
+    on_event,
+    candidate,
+    completed_segments,
+    total_segments,
+    downloaded_bytes,
+    duration,
+    started_at,
+    last_emit_at,
+    last_emit_bytes,
+    force=False,
+):
+    if not force and completed_segments < total_segments:
+        now = time.monotonic()
+        if now - float(last_emit_at or 0.0) < HLS_PARALLEL_PROGRESS_INTERVAL:
+            return last_emit_at, last_emit_bytes
+    expected_total = candidate_expected_size(candidate)
+    if duration:
+        current_sec = int(duration * completed_segments / total_segments)
+        emit_manifest_download_progress(
+            on_event,
+            current_sec,
+            duration,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=expected_total or manifest_progress_total_bytes(
+                candidate,
+                downloaded_bytes,
+                max(1, current_sec),
+                duration,
+            ),
+            started_at=started_at,
+            last_bytes=last_emit_bytes,
+            last_emit_at=last_emit_at,
+        )
+    else:
+        percent = completed_segments * 100 / total_segments
+        now = time.monotonic()
+        if last_emit_at is not None and downloaded_bytes > last_emit_bytes:
+            speed = max(0.0, (downloaded_bytes - last_emit_bytes) / max(0.001, now - float(last_emit_at)))
+        else:
+            speed = downloaded_bytes / max(0.001, now - float(started_at))
+        speed_text = f"{display_size(speed)}/s"
+        emit_event(
+            on_event,
+            "progress",
+            percent=percent,
+            downloaded=downloaded_bytes,
+            total=expected_total or downloaded_bytes,
+            speed=speed,
+            speed_text=speed_text,
+            message=f"{percent:.1f}% · {speed_text}",
+        )
+    return time.monotonic(), downloaded_bytes
+
+
+def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
     if output_path is None:
-        raise RuntimeError("Browser DOM manifest output path could not be determined.")
+        raise RuntimeError("HLS output path could not be determined.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     part_path = output_path.with_name(output_path.name + ".part")
+    part_ts_path = part_path.with_suffix(part_path.suffix + ".ts")
     ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
     if not ffmpeg_exe:
-        raise RuntimeError("ffmpeg is required for browser DOM manifest downloads")
+        raise RuntimeError("ffmpeg is required for parallel HLS downloads")
     headers = direct_media_request_headers(candidate)
     duration = safe_int((candidate or {}).get("duration"))
     playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
     playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
     segment_urls = playlist_meta["segment_urls"]
-    if not browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
-        raise RuntimeError("HLS stream is not eligible for parallel segment download.")
-    encryption = hls_playlist_parallel_encryption(playlist_text)
-    aes_key = None
-    if encryption == "aes-128":
-        if not playlist_meta["key_url"]:
-            raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
-        aes_key = fetch_hls_aes128_key(playlist_meta["key_url"], headers)
-    emit_event(on_event, "status", message=f"Downloading {len(segment_urls)} HLS segments in parallel")
+    if not segment_urls:
+        raise RuntimeError("HLS media playlist had no segments.")
+    aes_key = hls_parallel_aes_key(playlist_text, playlist_meta, headers)
+    workers = max(1, min(HLS_PARALLEL_WORKERS, len(segment_urls)))
+    max_in_flight = max(workers, min(HLS_PARALLEL_MAX_IN_FLIGHT, len(segment_urls)))
+    total_segments = len(segment_urls)
+    emit_event(on_event, "status", message=f"Downloading {total_segments} HLS segments in parallel")
     started_at = time.monotonic()
     last_emit_at = started_at
     last_emit_bytes = 0
     downloaded_bytes = 0
+    completed_segments = 0
+    next_write_index = 0
+    next_submit_index = 0
+    pending_paths = {}
+    in_flight = {}
 
-    def fetch_segment(index_url):
-        index, segment_url = index_url
-        request = urllib.request.Request(segment_url, headers=dict(headers))
-        with urllib.request.urlopen(request, timeout=45) as response:
-            payload = response.read()
-        if aes_key is not None:
-            iv = hls_aes128_iv(playlist_meta["media_sequence"], index, playlist_meta["key_iv"])
-            payload = decrypt_hls_aes128_segment(payload, aes_key, iv)
-        return index, payload
+    try:
+        with tempfile.TemporaryDirectory(prefix="clipflow-hls-") as temp_dir, part_ts_path.open("wb") as output_file:
+            temp_root = Path(temp_dir)
 
-    segment_paths = [None] * len(segment_urls)
-    workers = max(1, min(BROWSER_DOM_HLS_PARALLEL_WORKERS, len(segment_urls)))
-    expected_total = candidate_expected_size(candidate)
-    with tempfile.TemporaryDirectory(prefix="clipflow-hls-") as temp_dir:
-        temp_root = Path(temp_dir)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(fetch_segment, item) for item in enumerate(segment_urls)]
-            completed_segments = 0
-            for future in concurrent.futures.as_completed(futures):
-                index, payload = future.result()
-                segment_path = temp_root / f"seg_{index:05d}.ts"
-                segment_path.write_bytes(payload)
-                segment_paths[index] = segment_path
-                downloaded_bytes += len(payload)
-                completed_segments += 1
-                if duration:
-                    current_sec = int(duration * completed_segments / len(segment_urls))
-                    emit_manifest_download_progress(
-                        on_event,
-                        current_sec,
-                        duration,
-                        downloaded_bytes=downloaded_bytes,
-                        total_bytes=expected_total or manifest_progress_total_bytes(candidate, downloaded_bytes, max(1, current_sec), duration),
-                        started_at=started_at,
-                        last_bytes=last_emit_bytes,
-                        last_emit_at=last_emit_at,
+            def fetch_segment(index, segment_url):
+                segment_path = temp_root / f"seg_{index:08d}.ts"
+                return download_hls_segment_to_path(
+                    index,
+                    segment_url,
+                    segment_path,
+                    aes_key,
+                    playlist_meta,
+                    headers,
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                while next_submit_index < total_segments and len(in_flight) < max_in_flight:
+                    index = next_submit_index
+                    future = executor.submit(fetch_segment, index, segment_urls[index])
+                    in_flight[future] = index
+                    next_submit_index += 1
+
+                while in_flight:
+                    done, _pending = concurrent.futures.wait(
+                        in_flight,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
                     )
-                else:
-                    percent = completed_segments * 100 / len(segment_urls)
-                    elapsed = max(0.001, time.monotonic() - started_at)
-                    speed = downloaded_bytes / elapsed
-                    speed_text = f"{display_size(speed)}/s"
-                    emit_event(
-                        on_event,
-                        "progress",
-                        percent=percent,
-                        downloaded=downloaded_bytes,
-                        total=expected_total or downloaded_bytes,
-                        speed=speed,
-                        speed_text=speed_text,
-                        message=f"{percent:.1f}% · {speed_text}",
-                    )
-                last_emit_bytes = downloaded_bytes
-                last_emit_at = time.monotonic()
-        remux_ts_concat_to_mp4(
-            segment_paths,
+                    for future in done:
+                        del in_flight[future]
+                        index, segment_path = future.result()
+                        pending_paths[index] = segment_path
+                        while next_write_index in pending_paths:
+                            segment_file = pending_paths[next_write_index]
+                            segment_size = segment_file.stat().st_size
+                            append_hls_segment_file(output_file, segment_file)
+                            downloaded_bytes += segment_size
+                            completed_segments += 1
+                            pending_paths.pop(next_write_index)
+                            try:
+                                segment_file.unlink()
+                            except OSError:
+                                pass
+                            next_write_index += 1
+                        if next_submit_index < total_segments:
+                            submit_index = next_submit_index
+                            new_future = executor.submit(fetch_segment, submit_index, segment_urls[submit_index])
+                            in_flight[new_future] = submit_index
+                            next_submit_index += 1
+                        last_emit_at, last_emit_bytes = emit_hls_parallel_progress(
+                            on_event,
+                            candidate,
+                            completed_segments,
+                            total_segments,
+                            downloaded_bytes,
+                            duration,
+                            started_at,
+                            last_emit_at,
+                            last_emit_bytes,
+                        )
+        emit_hls_parallel_progress(
+            on_event,
+            candidate,
+            total_segments,
+            total_segments,
+            downloaded_bytes,
+            duration,
+            started_at,
+            last_emit_at,
+            last_emit_bytes,
+            force=True,
+        )
+        emit_event(on_event, "status", message="Finalizing HLS download")
+        remux_ts_file_to_mp4(
+            part_ts_path,
             part_path,
             ffmpeg_exe,
             output_format=normalized_output_ext((candidate or {}).get("output_ext")) or "mp4",
         )
+    finally:
+        try:
+            part_ts_path.unlink()
+        except OSError:
+            pass
     if not part_path.exists() or part_path.stat().st_size <= 0:
         raise RuntimeError("Parallel HLS download produced an empty file.")
     part_path.replace(output_path)
@@ -4496,6 +4672,16 @@ def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None,
         "output_path": str(output_path),
         "target_url": url,
     }
+
+
+def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
+    headers = direct_media_request_headers(candidate)
+    playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+    playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+    segment_urls = playlist_meta["segment_urls"]
+    if not browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
+        raise RuntimeError("HLS stream is not eligible for parallel segment download.")
+    return download_hls_parallel(url, candidate, output_dir, on_event=on_event, ffmpeg_exe=ffmpeg_exe)
 
 
 def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, runner=None, no_progress_timeout=None):
@@ -4877,6 +5063,11 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         if clip_range_from_candidate(candidate):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+    if is_chzzk_hls_candidate(candidate):
+        try:
+            return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
+        except Exception as exc:
+            emit_event(on_event, "log", message=f"Parallel HLS download unavailable: {exc}")
     if is_direct_https_mp4_candidate(candidate):
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
 
