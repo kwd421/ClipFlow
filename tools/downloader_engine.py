@@ -113,6 +113,14 @@ class DirectMediaRangeUnsupported(RuntimeError):
     pass
 
 
+class DirectMediaTotalChanged(RuntimeError):
+    # 416 returned Content-Range whose /total differs from the planned total;
+    # the caller should rebuild ranges with the new total and retry once.
+    def __init__(self, actual_total):
+        super().__init__(f"Direct media total changed to {actual_total}")
+        self.actual_total = actual_total
+
+
 class ChzzkDirectSlowFallback(RuntimeError):
     pass
 _YOUTUBE_DL_FACTORY = None
@@ -4873,14 +4881,28 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
                         last_progress["bytes"] = downloaded
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and append:
-            # Resume offset was past EOF (stale .part, expired URL, changed size).
-            # Drop the partial file and fetch from the start once.
-            try:
-                part_path.unlink()
-            except OSError:
-                pass
-            emit_event(on_event, "log", message="Resume range rejected (416); restarting direct download from 0")
-            return download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
+            # Resume offset past EOF. First check Content-Range for the real
+            # total so we can clamp the partial instead of blindly restarting.
+            actual_total = parse_content_range(exc.headers.get("Content-Range"))
+            if actual_total and existing_size >= actual_total:
+                # .part already covers the whole file; nothing to resume.
+                return part_path
+            if actual_total and existing_size < actual_total:
+                # .part is shorter than the real file; the resume offset was
+                # rejected for another reason (token/URL changed). Drop and
+                # restart this range from 0 once.
+                try:
+                    part_path.unlink()
+                except OSError:
+                    pass
+                emit_event(on_event, "log", message=f"Resume range rejected (416, real size {actual_total}); restarting direct download from 0")
+            else:
+                try:
+                    part_path.unlink()
+                except OSError:
+                    pass
+                emit_event(on_event, "log", message="Resume range rejected (416); restarting direct download from 0")
+            return download_direct_media_single(url, output_path, headers, total=actual_total or total, on_event=on_event)
         raise
     if total and downloaded != total:
         raise RuntimeError(f"Direct media download incomplete: downloaded {downloaded} bytes, expected {total}.")
@@ -5141,12 +5163,31 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                         written += len(chunk)
                         report(len(chunk))
         except urllib.error.HTTPError as exc:
-            if exc.code == 416 and mode == "ab":
-                # Stale .part segment: resume offset past EOF. Restart this range from start.
+            if exc.code == 416:
+                # 416 means the requested byte range is past EOF. Use
+                # Content-Range to learn the real total so we can decide:
+                # - if the whole file is already on disk, finish this range
+                # - if our planned total was wrong, surface it so the caller
+                #   can rebuild the range list
+                actual_total = parse_content_range(exc.headers.get("Content-Range"))
+                if actual_total and start >= actual_total:
+                    # This range is entirely past EOF; nothing to write.
+                    return index, segment_path
+                if actual_total and actual_total != total:
+                    raise DirectMediaTotalChanged(actual_total)
+                # total matches but the resume offset was rejected (stale
+                # .part, transient URL/CDN swap). Drop this segment and
+                # re-request bytes={start}-{end} once.
                 try:
                     segment_path.unlink()
                 except OSError:
                     pass
+                if mode == "ab":
+                    emit_event(
+                        on_event,
+                        "log",
+                        message=f"Range {start}-{end} resume rejected (416); restarting segment {index} from {start}",
+                    )
                 range_headers = {**headers, "Range": f"bytes={start}-{end}"}
                 request = urllib.request.Request(url, headers=range_headers)
                 written = 0
@@ -5171,18 +5212,38 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
 
     with tempfile.TemporaryDirectory(prefix="clipflow-direct-") as temp_dir:
         temp_root = Path(temp_dir)
-        ranges = [
-            (index, start, end, temp_root / f"seg_{index:08d}.part")
-            for index, start, end in direct_media_ranges(total, part_size=resolved_part_size)
-        ]
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-                completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
-        except ChzzkDirectSlowFallback:
-            abort_event.set()
-            if part_path.exists():
-                part_path.unlink()
-            raise
+        planned_total = total
+        for attempt in range(2):
+            ranges = [
+                (index, start, end, temp_root / f"seg_{index:08d}.part")
+                for index, start, end in direct_media_ranges(planned_total, part_size=resolved_part_size)
+            ]
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
+                break
+            except ChzzkDirectSlowFallback:
+                abort_event.set()
+                if part_path.exists():
+                    part_path.unlink()
+                raise
+            except DirectMediaTotalChanged as exc:
+                if attempt == 0 and exc.actual_total and exc.actual_total != planned_total:
+                    emit_event(
+                        on_event,
+                        "log",
+                        message=f"Direct media total changed {planned_total} -> {exc.actual_total}; rebuilding ranges",
+                    )
+                    planned_total = exc.actual_total
+                    for _index, _start, _end, seg_path in ranges:
+                        try:
+                            seg_path.unlink()
+                        except OSError:
+                            pass
+                    continue
+                raise
+        else:
+            raise RuntimeError("Direct media range rebuild exhausted")
         emit_event(on_event, "status", message="Finalizing direct download")
         with part_path.open("wb") as output_file:
             for _index, segment_path in completed:
