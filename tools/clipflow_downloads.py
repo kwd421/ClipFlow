@@ -682,8 +682,18 @@ class DownloadMixin:
             QTimer.singleShot(600, lambda r=row: self._finish_delayed_pause_cleanup(r))
             return
         # Thread gone: now safe to wipe partials. finished-handler may already have cleaned.
-        if row.pop("_pause_cleanup_pending", False) or row.pop("download_cancel_requested", False):
-            self._set_row_paused(row)
+        if row.get("_pause_cleanup_pending") or row.get("download_cancel_requested"):
+            self._complete_pause_cleanup(row)
+
+    def _complete_pause_cleanup(self, row):
+        """Finish pause after workers exit; optionally resume if user clicked during cleanup."""
+        if not row:
+            return
+        should_resume = bool(row.pop("_resume_after_pause_cleanup", False))
+        row.pop("_pause_cleanup_pending", None)
+        self._set_row_paused(row)
+        if should_resume and row in self.rows:
+            QTimer.singleShot(0, lambda r=row: self.resume_download_for_row(r))
 
     def _cancel_active_download_item(self, item):
         """Request cancel and wait briefly. Returns True if the worker thread has stopped."""
@@ -762,6 +772,13 @@ class DownloadMixin:
     def resume_download_for_row(self, row):
         if not row or row not in self.rows:
             return
+        # Do not clear cancel flags or start a second worker while the old one is exiting.
+        if row.get("_pause_cleanup_pending") or (
+            row.get("status") == PAUSED_STATUS and self._row_is_downloading(row)
+        ):
+            row["_resume_after_pause_cleanup"] = True
+            self._set_status("일시정지 정리 후 다시 시작합니다")
+            return
         if row.get("kind") == "playlist":
             needs_analysis_resume = bool(row.get("_playlist_analysis_resume") or row.get("analysis_loading"))
             for child in self._playlist_children_for_parent(row):
@@ -792,6 +809,7 @@ class DownloadMixin:
             return
         if row.get("status") == PAUSED_STATUS:
             row.pop("download_cancel_requested", None)
+            row.pop("_resume_after_pause_cleanup", None)
             self.start_download_for_row(row)
 
     def _sync_legacy_download_refs(self):
@@ -1041,8 +1059,8 @@ class DownloadMixin:
 
     def _download_finished_for(self, row, result):
         if row:
-            if row.pop("download_cancel_requested", False):
-                self._set_row_paused(row)
+            if row.pop("download_cancel_requested", False) or row.get("_pause_cleanup_pending"):
+                self._complete_pause_cleanup(row)
                 return
             row["download_starting"] = False
             row.pop("download_finishing", None)
@@ -1120,8 +1138,8 @@ class DownloadMixin:
     def _download_failed_for(self, row, message):
         message = engine.strip_ansi(message)
         if row:
-            if row.pop("download_cancel_requested", False):
-                self._set_row_paused(row)
+            if row.pop("download_cancel_requested", False) or row.get("_pause_cleanup_pending"):
+                self._complete_pause_cleanup(row)
                 return
             self._cleanup_row_partial_files(row)
             row["download_starting"] = False
