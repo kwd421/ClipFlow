@@ -126,7 +126,7 @@ def prune_thumbnail_cache_for_rows(rows):
     return prune_thumbnail_cache(collect_thumbnail_urls_from_rows(rows))
 
 
-def cleanup_stale_temp_artifacts(max_age_hours=6):
+def cleanup_stale_temp_artifacts(max_age_hours=1):
     """Remove leftover ClipFlow temp dirs/files under the system temp folder.
 
     Crash / forced-kill can leave TemporaryDirectory contents behind
@@ -137,7 +137,7 @@ def cleanup_stale_temp_artifacts(max_age_hours=6):
     import time
 
     root = Path(tempfile.gettempdir())
-    cutoff = time.time() - max(1, int(max_age_hours or 6)) * 3600
+    cutoff = time.time() - max(1, int(max_age_hours or 1)) * 3600
     removed = 0
     try:
         entries = list(root.iterdir())
@@ -165,4 +165,86 @@ def cleanup_stale_temp_artifacts(max_age_hours=6):
             removed += 1
         except OSError:
             pass
+    return removed
+
+
+def is_partial_artifact_name(name):
+    """True for download resume/temp names, never complete media alone."""
+    lower = str(name or "").lower()
+    if not lower:
+        return False
+    if lower.endswith(".part") or lower.endswith(".part.media"):
+        return True
+    if ".trim.part." in lower:
+        return True
+    # yt-dlp fragment siblings: video.mp4.part-Frag1 / video.mp4.part.ytdl
+    if ".part." in lower or ".part-" in lower:
+        return True
+    return False
+
+
+def _resolve_path_key(path):
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:
+        return str(Path(path).expanduser())
+
+
+def _iter_partial_scan_dirs(folder):
+    """Save folder + one level of subdirs (playlist output folders)."""
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        return
+    yield root
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.is_dir():
+            yield child
+
+
+def cleanup_orphan_partial_outputs(folders, protected_paths=None, max_age_hours=1):
+    """Delete stale ``.part*`` files in save folders that no active row owns.
+
+    - Only names that look like download partials (never plain ``.mp4``).
+    - Skip paths in ``protected_paths`` (current list / active downloads).
+    - Skip files newer than ``max_age_hours`` so a live receive is safe.
+    """
+    import time
+
+    protected = {_resolve_path_key(p) for p in (protected_paths or set()) if p}
+    cutoff = time.time() - max(1, int(max_age_hours or 1)) * 3600
+    removed = 0
+    seen_dirs = set()
+    for folder in folders or []:
+        text = str(folder or "").strip()
+        if not text:
+            continue
+        for directory in _iter_partial_scan_dirs(text):
+            dir_key = _resolve_path_key(directory)
+            if dir_key in seen_dirs:
+                continue
+            seen_dirs.add(dir_key)
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if not path.is_file() or not is_partial_artifact_name(path.name):
+                    continue
+                key = _resolve_path_key(path)
+                if key in protected:
+                    continue
+                try:
+                    if path.stat().st_mtime > cutoff:
+                        continue
+                except OSError:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
     return removed

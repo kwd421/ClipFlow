@@ -210,7 +210,9 @@ if (-not $SkipUpload) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw "GitHub CLI (gh) is required for release upload"
     }
-    if (gh release view $Tag --repo $Repo 2>$null) {
+    # Do not let "release not found" on stderr trip ErrorActionPreference=Stop.
+    $null = gh release view $Tag --repo $Repo 2>$null
+    if ($LASTEXITCODE -eq 0) {
         gh release upload $Tag $releaseExe --repo $Repo --clobber
     }
     else {
@@ -218,6 +220,16 @@ if (-not $SkipUpload) {
             --repo $Repo `
             --title "ClipFlow $Version" `
             --notes-file $releaseNotesPath
+    }
+    # Guard: uploaded asset size must match the signed local artifact.
+    $assetJson = gh release view $Tag --repo $Repo --json assets | ConvertFrom-Json
+    $remoteAsset = $assetJson.assets | Where-Object { $_.name -eq (Split-Path $releaseExe -Leaf) } | Select-Object -First 1
+    $localLen = (Get-Item $releaseExe).Length
+    if (-not $remoteAsset) {
+        throw "Uploaded release asset missing on $Repo $Tag"
+    }
+    if ([int64]$remoteAsset.size -ne [int64]$localLen) {
+        throw "Release asset size mismatch: remote=$($remoteAsset.size) local=$localLen (re-upload signed file)"
     }
 }
 

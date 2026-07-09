@@ -2,6 +2,7 @@ import os
 import sys
 import time
 from collections import OrderedDict, deque
+from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot, qInstallMessageHandler
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QInputMethodEvent, QPainter, QPainterPath, QPen, QPixmap
@@ -262,8 +263,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._build_ui()
         self._load_completed_history()
         self._refresh_primary_action()
-        # Drop crash leftovers under %TEMP% (hls/direct/browser-profile dirs, etc.).
-        QTimer.singleShot(0, self._cleanup_stale_temp_artifacts)
+        # Drop crash leftovers: TEMP clipflow-* dirs + orphan .part* in save folders.
+        QTimer.singleShot(0, self._cleanup_stale_artifacts)
+
+    def _cleanup_stale_artifacts(self):
+        self._cleanup_stale_temp_artifacts()
+        self._cleanup_orphan_partial_outputs()
 
     def _cleanup_stale_temp_artifacts(self):
         try:
@@ -271,7 +276,93 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         except ImportError:
             from clipflow_cache import cleanup_stale_temp_artifacts
         try:
-            cleanup_stale_temp_artifacts(max_age_hours=6)
+            cleanup_stale_temp_artifacts(max_age_hours=1)
+        except Exception:
+            pass
+
+    def _protected_partial_paths(self):
+        """Outputs still owned by list rows or in-flight downloads — never orphan-delete."""
+        try:
+            from tools import downloader_engine as engine
+        except ImportError:
+            import downloader_engine as engine
+        protected = set()
+        rows = [row for row in (getattr(self, "rows", None) or []) if isinstance(row, dict)]
+        for item in getattr(self, "active_downloads", None) or []:
+            row = item.get("row") if isinstance(item, dict) else None
+            if isinstance(row, dict) and row not in rows:
+                rows.append(row)
+        for row in rows:
+            try:
+                selected = None
+                if hasattr(self, "selected_candidate_for_row_ref"):
+                    selected = self.selected_candidate_for_row_ref(row)
+                selected = selected or row.get("active_download_candidate") or row.get("candidate") or {}
+                output_dir = (
+                    self._output_dir_for_row(row, selected)
+                    if hasattr(self, "_output_dir_for_row")
+                    else (self.folder_input.text() if hasattr(self, "folder_input") else "")
+                )
+                output_path = engine.final_output_path_for_candidate(selected, output_dir)
+                if output_path is None and row.get("output_path"):
+                    output_path = Path(str(row.get("output_path")))
+                if output_path is not None:
+                    try:
+                        protected.add(str(Path(output_path).expanduser().resolve()))
+                    except OSError:
+                        protected.add(str(Path(output_path).expanduser()))
+                    for part in engine.partial_output_paths_for_target(output_path):
+                        try:
+                            protected.add(str(Path(part).expanduser().resolve()))
+                        except OSError:
+                            protected.add(str(Path(part).expanduser()))
+                saved = str(row.get("output_path") or "").strip()
+                if saved:
+                    try:
+                        protected.add(str(Path(saved).expanduser().resolve()))
+                    except OSError:
+                        protected.add(str(Path(saved).expanduser()))
+            except Exception:
+                continue
+        return protected
+
+    def _orphan_partial_scan_folders(self):
+        folders = []
+        if hasattr(self, "folder_input"):
+            text = str(self.folder_input.text() or "").strip()
+            if text:
+                folders.append(text)
+        for row in getattr(self, "rows", None) or []:
+            if not isinstance(row, dict):
+                continue
+            saved = str(row.get("output_path") or "").strip()
+            if saved:
+                try:
+                    folders.append(str(Path(saved).expanduser().parent))
+                except Exception:
+                    pass
+        # Unique preserve order
+        seen = set()
+        unique = []
+        for folder in folders:
+            key = str(Path(folder).expanduser())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(folder)
+        return unique
+
+    def _cleanup_orphan_partial_outputs(self):
+        try:
+            from tools.clipflow_cache import cleanup_orphan_partial_outputs
+        except ImportError:
+            from clipflow_cache import cleanup_orphan_partial_outputs
+        try:
+            cleanup_orphan_partial_outputs(
+                self._orphan_partial_scan_folders(),
+                protected_paths=self._protected_partial_paths(),
+                max_age_hours=1,
+            )
         except Exception:
             pass
 
