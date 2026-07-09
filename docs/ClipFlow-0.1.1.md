@@ -1,3 +1,5 @@
 # ClipFlow 0.1.1
 
-Notarized ClipFlow release with Sparkle automatic update support.
+## 변경 사항
+
+- 자동 업데이트 지원을 유지한 안정화 릴리스입니다.
