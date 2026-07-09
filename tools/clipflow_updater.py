@@ -77,7 +77,9 @@ def updater_feed_url_candidates():
 
 
 def updater_public_ed_key():
-    return _updater_env("CLIPFLOW_SPARKLE_PUBLIC_ED_KEY") or _frozen_build_value("PUBLIC_ED_KEY")
+    if sys.platform == "darwin":
+        return _updater_env("CLIPFLOW_SPARKLE_PUBLIC_ED_KEY") or _frozen_build_value("PUBLIC_ED_KEY")
+    return _updater_env("CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY") or _frozen_build_value("PUBLIC_ED_KEY")
 
 
 def updater_app_version():

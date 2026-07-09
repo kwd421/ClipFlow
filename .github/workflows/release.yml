@@ -57,7 +57,7 @@ jobs:
       - name: Build, sign, and update appcast
         shell: pwsh
         env:
-          CLIPFLOW_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.CLIPFLOW_SPARKLE_PUBLIC_ED_KEY }}
+          CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY: ${{ secrets.CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY }}
         run: |
           & build-helper/release_windows.ps1 `
             -Version $env:CLIPFLOW_VERSION `

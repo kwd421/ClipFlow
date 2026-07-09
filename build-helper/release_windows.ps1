@@ -31,7 +31,7 @@ function Get-WinSparklePublicKey {
         [string]$ToolPath,
         [string]$KeyPath
     )
-    $existing = if ($env:CLIPFLOW_SPARKLE_PUBLIC_ED_KEY) { $env:CLIPFLOW_SPARKLE_PUBLIC_ED_KEY.Trim() } else { "" }
+    $existing = if ($env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY) { $env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY.Trim() } else { "" }
     if ($existing) {
         return $existing
     }
@@ -154,7 +154,7 @@ $publicKey = Get-WinSparklePublicKey -ToolPath $winSparkleTool -KeyPath $Private
 $env:CLIPFLOW_VERSION = $Version
 $env:CLIPFLOW_BUILD_NUMBER = $BuildNumber
 $env:CLIPFLOW_WINSPARKLE_FEED_URL = $FeedUrl
-$env:CLIPFLOW_SPARKLE_PUBLIC_ED_KEY = $publicKey
+$env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY = $publicKey
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "build_windows.ps1") -SkipTests

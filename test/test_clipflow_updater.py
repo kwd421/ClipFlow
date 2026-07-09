@@ -31,6 +31,40 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             ):
                 self.assertEqual(updater.updater_feed_url(), "https://example.test/macos.xml")
 
+    def test_updater_public_ed_key_prefers_winsparkle_env_on_windows(self):
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY": "windows-key",
+                    "CLIPFLOW_SPARKLE_PUBLIC_ED_KEY": "mac-key",
+                },
+                clear=False,
+            ):
+                self.assertEqual(updater.updater_public_ed_key(), "windows-key")
+
+    def test_updater_public_ed_key_uses_sparkle_env_on_macos(self):
+        with mock.patch.object(updater.sys, "platform", "darwin"):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY": "windows-key",
+                    "CLIPFLOW_SPARKLE_PUBLIC_ED_KEY": "mac-key",
+                },
+                clear=False,
+            ):
+                self.assertEqual(updater.updater_public_ed_key(), "mac-key")
+
+    def test_updater_public_ed_key_ignores_sparkle_env_on_windows(self):
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.object(updater.sys, "frozen", False, create=True):
+                with mock.patch.dict(
+                    os.environ,
+                    {"CLIPFLOW_SPARKLE_PUBLIC_ED_KEY": "mac-key"},
+                    clear=True,
+                ):
+                    self.assertEqual(updater.updater_public_ed_key(), "")
+
     def test_updater_configured_reads_baked_values_in_frozen_build(self):
         baked = mock.Mock(
             FEED_URL="https://example.test/windows.xml",
@@ -38,36 +72,41 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             VERSION="1.2.3",
             BUILD_NUMBER="123",
         )
-        with mock.patch.object(updater.sys, "frozen", True, create=True):
-            with mock.patch.dict(os.environ, {}, clear=True):
-                with mock.patch.object(updater, "_frozen_build_config", return_value=baked):
-                    self.assertTrue(updater.updater_configured())
-                    self.assertEqual(updater.updater_feed_url(), "https://example.test/windows.xml")
-                    self.assertEqual(updater.updater_public_ed_key(), "abc123")
-                    self.assertEqual(updater.updater_app_version(), "1.2.3")
-                    self.assertEqual(updater.updater_build_number(), "123")
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.object(updater.sys, "frozen", True, create=True):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch.object(updater, "_frozen_build_config", return_value=baked):
+                        self.assertTrue(updater.updater_configured())
+                        self.assertEqual(updater.updater_feed_url(), "https://example.test/windows.xml")
+                        self.assertEqual(updater.updater_public_ed_key(), "abc123")
+                        self.assertEqual(updater.updater_app_version(), "1.2.3")
+                        self.assertEqual(updater.updater_build_number(), "123")
 
     def test_updater_configured_requires_feed_url(self):
         with mock.patch.object(updater.sys, "platform", "win32"):
             with mock.patch.dict(os.environ, {}, clear=True):
                 with mock.patch.object(updater, "_frozen_build_value", return_value=""):
                     self.assertTrue(updater.updater_configured())
-        with mock.patch.dict(
-            os.environ,
-            {
-                "CLIPFLOW_WINSPARKLE_FEED_URL": "https://example.test/windows.xml",
-                "CLIPFLOW_SPARKLE_PUBLIC_ED_KEY": "abc123",
-            },
-            clear=False,
-        ):
-            self.assertTrue(updater.updater_configured())
-            self.assertTrue(updater.winsparkle_installer_ready())
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLIPFLOW_WINSPARKLE_FEED_URL": "https://example.test/windows.xml",
+                    "CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY": "abc123",
+                },
+                clear=False,
+            ):
+                self.assertTrue(updater.updater_configured())
+                self.assertTrue(updater.winsparkle_installer_ready())
 
     def test_startup_update_is_available_uses_feed_fallbacks(self):
-        with mock.patch.object(updater, "updater_feed_url", return_value=""), mock.patch.object(
-            updater, "_latest_appcast_build_number", side_effect=[Exception("pages down"), 105]
-        ), mock.patch.object(updater, "updater_build_number", return_value="104"):
-            self.assertTrue(updater.startup_update_is_available())
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.object(updater, "updater_feed_url", return_value=""), mock.patch.object(
+                updater,
+                "_appcast_items",
+                side_effect=[Exception("pages down"), [{"build": 105, "version": "1.0.5"}]],
+            ), mock.patch.object(updater, "updater_build_number", return_value="104"):
+                self.assertTrue(updater.startup_update_is_available())
 
     def test_start_winsparkle_updater_returns_http_checker_without_installer_key(self):
         baked = mock.Mock(
