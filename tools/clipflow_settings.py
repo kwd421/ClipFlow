@@ -409,16 +409,24 @@ class SettingsMixin:
         self._render_rows()
         if repaired_missing_parents:
             self._save_completed_history()
+        if hasattr(self, "_prune_orphan_media_cache"):
+            self._prune_orphan_media_cache()
 
     def _load_completed_history(self):
         raw = self.settings.value(DOWNLOAD_HISTORY_SETTING, "", str) or ""
         if not raw:
+            if hasattr(self, "_prune_orphan_media_cache"):
+                self._prune_orphan_media_cache()
             return
         try:
             items = json.loads(raw)
         except (TypeError, ValueError):
+            if hasattr(self, "_prune_orphan_media_cache"):
+                self._prune_orphan_media_cache()
             return
         self._apply_restored_history(items)
+        if hasattr(self, "_prune_orphan_media_cache"):
+            self._prune_orphan_media_cache()
 
     def _app_updater(self):
         app = QApplication.instance()

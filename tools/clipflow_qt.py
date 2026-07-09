@@ -255,6 +255,18 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._build_ui()
         self._load_completed_history()
         self._refresh_primary_action()
+        # Drop crash leftovers under %TEMP% (hls/direct/browser-profile dirs, etc.).
+        QTimer.singleShot(0, self._cleanup_stale_temp_artifacts)
+
+    def _cleanup_stale_temp_artifacts(self):
+        try:
+            from tools.clipflow_cache import cleanup_stale_temp_artifacts
+        except ImportError:
+            from clipflow_cache import cleanup_stale_temp_artifacts
+        try:
+            cleanup_stale_temp_artifacts(max_age_hours=6)
+        except Exception:
+            pass
 
     def _initial_window_size(self):
         size = self.settings.value(WINDOW_SIZE_SETTING, WINDOW_DEFAULT_SIZE, QSize)

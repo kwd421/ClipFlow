@@ -159,6 +159,17 @@ class ActionMixin:
         }
         return analysis_url in row_urls
 
+    def _prune_orphan_media_cache(self):
+        """Drop disk thumbnails for cards no longer in the list."""
+        try:
+            from tools.clipflow_cache import prune_thumbnail_cache_for_rows
+        except ImportError:
+            from clipflow_cache import prune_thumbnail_cache_for_rows
+        try:
+            prune_thumbnail_cache_for_rows(getattr(self, "rows", None) or [])
+        except Exception:
+            pass
+
     def remove_row(self, row):
         if row.get("kind") == "playlist":
             if self._playlist_remove_blocked(row):
@@ -181,6 +192,7 @@ class ActionMixin:
             if transfer_hover:
                 self._queue_hover_row_at_index(index)
             self._save_completed_history()
+            self._prune_orphan_media_cache()
 
     def _playlist_is_paused(self, row):
         if not row:
@@ -309,6 +321,7 @@ class ActionMixin:
         if transfer_hover and index >= 0:
             self._queue_hover_row_at_index(min(index, max(0, len(self.rows) - 1)))
         self._save_completed_history()
+        self._prune_orphan_media_cache()
 
     def _confirm_playlist_remove_choice(self, completed_count, incomplete_count, analyzing):
         """Return list-remove choice or None if cancelled. Does not delete files."""
@@ -402,6 +415,7 @@ class ActionMixin:
         if transfer_hover and removed_indexes:
             self._queue_hover_row_at_index(min(removed_indexes))
         self._save_completed_history()
+        self._prune_orphan_media_cache()
 
     def _settings_bool(self, key, default=False):
         settings = getattr(self, "settings", None)
@@ -614,6 +628,7 @@ class ActionMixin:
         self._render_rows()
         if transfer_hover:
             self._queue_hover_row_at_index(index)
+        self._prune_orphan_media_cache()
 
     def _create_delete_confirm_dialog(self, output_path, row=None):
         permanent = self._permanent_delete_enabled()

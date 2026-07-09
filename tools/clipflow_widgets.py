@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 try:
+    from tools.clipflow_cache import load_cached_thumbnail_bytes, store_cached_thumbnail_bytes
     from tools.clipflow_icons import (
         ICON_COLOR,
         ICON_DISABLED_COLOR,
@@ -36,6 +37,7 @@ try:
     from tools.clipflow_theme import THUMBNAIL_WIDTH
     from tools import clipflow_theme as theme
 except ImportError:
+    from clipflow_cache import load_cached_thumbnail_bytes, store_cached_thumbnail_bytes
     from clipflow_icons import (
         ICON_COLOR,
         ICON_DISABLED_COLOR,
@@ -1662,6 +1664,13 @@ class ThumbnailPlaceholder(QFrame):
         if parsed.scheme() not in {"http", "https"}:
             self.update()
             return
+        # Prefer disk cache so we own lifecycle (prune when list drops the card).
+        cached = load_cached_thumbnail_bytes(url)
+        if cached:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(cached):
+                self._set_pixmap(pixmap)
+                return
         request = QNetworkRequest(parsed)
         if referer:
             request.setRawHeader(b"Referer", str(referer).encode("utf-8"))
@@ -1679,6 +1688,7 @@ class ThumbnailPlaceholder(QFrame):
         try:
             payload = _reply_bytes(reply)
             if payload:
+                store_cached_thumbnail_bytes(self.thumbnail_url, payload)
                 pixmap = QPixmap()
                 if pixmap.loadFromData(payload):
                     self._set_pixmap(pixmap)
