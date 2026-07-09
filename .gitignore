@@ -1,36 +1,127 @@
+# --- Python ---
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
 
-.DS_Store
-
+# --- Virtual envs ---
 .venv/
 venv/
 env/
 
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- App / agent session junk ---
+.grok/
+.superloopy/
+agent-tools/
+terminals/
+tmp_qt_logs/
+docs/codex-session-handoff.md
+
+# --- Build outputs (never commit packaged apps) ---
 build/
 dist/
+dist-*/
+build-helper/**/*-build/
 build-helper/UniversalMP4BrowserDownloader-build/
+*.egg-info/
+*.spec.bak
 
+# --- Binaries / installers ---
 *.exe
 !build-helper/third_party/winsparkle/**/winsparkle-tool.exe
 *.msi
 *.dmg
 *.pkg
 *.app/
+*.app.zip
+*.dll
+!build-helper/third_party/winsparkle/**/*.dll
+*.so
+*.dylib
+*.bin
+*.pdb
+*.lib
+!build-helper/third_party/winsparkle/**/*.lib
 
-verification-summary.json
-*.tmp
-*.log
+# --- Archives (easy to accidentally add huge zips) ---
+*.zip
+!build-helper/third_party/winsparkle/**/*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
+*.iso
 
+# --- Media / download outputs ---
 downloads/
+downloads-*/
+downloads-verify/
+clipflow_manual_verify/
+manual_verification*/
+manual_verification_*/
+**/manual_verification*/
 *.mp4
+*.mkv
 *.webm
+*.mov
+*.m4v
+*.avi
+*.flv
+*.ts
+*.m2ts
+*.mp3
+*.m4a
+*.aac
+*.flac
 *.wav
+*.ogg
+*.opus
+*.part
+*.ytdl
+*.temp
+*.thumb
+*.favicon
 
+# --- Images that are clearly runtime/test dumps (keep assets/ tracked) ---
+clipflow_*.png
+clipflow-*.png
+clipflow_*.jpg
+clipflow-*.jpg
+*_verify.png
+*_preview.png
+
+# --- Logs / temp / local dumps ---
+*.tmp
+*.temp
+*.log
+*.out
+*.err
+*.dmp
+*.stackdump
+verification-summary.json
+*_diff*.txt
+_verify_*.py
+_git_*.py
+_peek_*.py
+_delete_*.py
+
+# --- Third-party build caches under build-helper ---
 build-helper/third_party/**/*.pdb
 build-helper/third_party/**/*.zip
-
-.grok/
-terminals/
-manual_verification_downloads_utf8_fix/
-docs/codex-session-handoff.md
