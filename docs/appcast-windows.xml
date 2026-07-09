@@ -1,7 +1,17 @@
-﻿<?xml version="1.0" standalone="yes"?>
+<?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>ClipFlow</title>
+        <item>
+            <title>1.1.0</title>
+            <pubDate>Thu, 09 Jul 2026 14:24:42 +0000</pubDate>
+            <link>https://github.com/kwd421/ClipFlow</link>
+            <sparkle:version>10100</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://kwd421.github.io/ClipFlow/ClipFlow-1.1.0.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/kwd421/ClipFlow/releases/download/v1.1.0/ClipFlow-1.1.0.exe" length="88505501" type="application/octet-stream" sparkle:edSignature="c7dtPBctLvbWwb8j0poa9ZG+85YMed2pNho61XtxqOZhaAespMSf44Oye7+svJt8fY0Oj4G7UHlF+AKwqsh9Dw=="/>
+        </item>
         <item>
             <title>1.0.10</title>
             <pubDate>Thu, 09 Jul 2026 11:30:43 +0000</pubDate>
