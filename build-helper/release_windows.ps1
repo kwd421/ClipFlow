@@ -19,9 +19,9 @@ function ConvertTo-ClipFlowBuildNumber {
         $major = [int]$Matches[1]
         $minor = [int]$Matches[2]
         $patch = [int]$Matches[3]
-        if ($major -lt 10 -and $minor -lt 10 -and $patch -lt 10) {
-            return ($major * 100 + $minor * 10 + $patch).ToString()
-        }
+        # Monotonic across multi-digit components (1.0.9=10009, 1.0.10=10010, 1.1.0=10100).
+        # Older releases used major*100+minor*10+patch (e.g. 1.0.9=109); values stay ordered.
+        return ($major * 10000 + $minor * 100 + $patch).ToString()
     }
     return ($Value -replace '\.', '')
 }
