@@ -975,9 +975,10 @@ class DownloadRowWidget(QFrame):
             self.row_quality_label.stop_marquee()
             self.row_quality_label.hide()
 
-    def set_status(self, status, detail=""):
-        self.row["status"] = status
-        self.row["status_detail"] = detail
+    def set_status(self, status=None, detail=None):
+        # Display only — row dict is the source of truth (owner sets row first).
+        status = (self.row.get("status") or "준비") if status is None else status
+        detail = (self.row.get("status_detail") or "") if detail is None else detail
         self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
         self.setProperty("errored", "true" if status == ERROR_STATUS else "false")
         analyzing = status == ANALYZING_STATUS or (

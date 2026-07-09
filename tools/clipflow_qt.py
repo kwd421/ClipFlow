@@ -1581,9 +1581,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._playlist_event_parent_id = parent.get("id") or ""
         self._cookie_permission_prompt_shown = False
         self._set_status(ANALYZING_STATUS)
+        self._set_row_status(parent, ANALYZING_STATUS, "")
         widget = parent.get("widget")
         if widget:
-            widget.set_status(ANALYZING_STATUS)
             widget._refresh_actions()
         self.analysis_thread = QThread(self)
         self.analysis_worker = AnalyzeWorker(
@@ -2127,20 +2127,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             percent, text, is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
             if row and row.get("download_starting"):
                 row["download_starting"] = False
-                if widget:
-                    widget.set_status(DOWNLOAD_STATUS)
+                self._set_row_status(row, DOWNLOAD_STATUS, "")
             if row:
                 if is_finishing:
                     row["download_finishing"] = True
                 else:
                     row.pop("download_finishing", None)
             if widget:
-                # Avoid the heavy set_status() on every progress tick (it does
-                # spinner/visibility work + a filesystem stat in _refresh_actions).
-                # Status is already "다운로드 중" from _begin_download; only assert
-                # it once if it somehow drifted.
+                # Avoid heavy set_status on every tick; only re-assert if drifted.
                 if row.get("status") != DOWNLOAD_STATUS:
-                    widget.set_status(DOWNLOAD_STATUS)
+                    self._set_row_status(row, DOWNLOAD_STATUS, "")
                 if is_finishing:
                     widget.set_finishing(text)
                 else:
@@ -2153,9 +2149,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if row:
                 row["download_starting"] = False
                 row["download_finishing"] = True
-            if widget:
                 if row.get("status") != DOWNLOAD_STATUS:
-                    widget.set_status(DOWNLOAD_STATUS)
+                    self._set_row_status(row, DOWNLOAD_STATUS, "")
+            if widget:
                 widget.set_finishing(text)
             if hasattr(self, "status_label"):
                 self.status_label.setText(text)

@@ -30,6 +30,16 @@ except ImportError:
 
 
 class DownloadMixin:
+    def _set_row_status(self, row, status, detail=""):
+        """Update row model first; widget only paints (does not own status)."""
+        if not isinstance(row, dict):
+            return
+        row["status"] = status
+        row["status_detail"] = detail if detail is not None else ""
+        widget = row.get("widget")
+        if widget is not None:
+            widget.set_status(status, row["status_detail"])
+
     def _download_concurrency_limit(self):
         try:
             return max(1, min(3, int(getattr(self, "download_concurrency", DOWNLOAD_CONCURRENCY) or DOWNLOAD_CONCURRENCY)))
@@ -416,9 +426,9 @@ class DownloadMixin:
         if len(self.active_downloads) >= self._download_concurrency_limit():
             row["_queued_download_candidate"] = dict(candidate)
             self.queued_download_rows.append(row)
+            self._set_row_status(row, WAITING_STATUS, "")
             widget = row.get("widget")
             if widget:
-                widget.set_status("대기")
                 widget.set_progress(0, "")
             self._set_status("다운로드 대기 중")
             self._refresh_footer()
@@ -449,12 +459,11 @@ class DownloadMixin:
             before_active = len(self.active_downloads)
             before_queued = len(self.queued_download_rows)
             if child.get("status") not in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
-                child["status"] = DOWNLOAD_STATUS
                 child["progress"] = 0
                 child["progress_text"] = "0%"
+                self._set_row_status(child, DOWNLOAD_STATUS, "")
                 widget = child.get("widget")
                 if widget:
-                    widget.set_status(DOWNLOAD_STATUS)
                     widget.set_progress(0, "0%")
             self.start_download_for_row(child)
             if len(self.active_downloads) != before_active or len(self.queued_download_rows) != before_queued:
@@ -514,13 +523,11 @@ class DownloadMixin:
             status = READY_STATUS
             detail = f"{completed}/{total}" if completed else ""
             progress_text = ""
-        parent["status"] = status
-        parent["status_detail"] = detail
         parent["progress"] = progress
         parent["progress_text"] = progress_text
+        self._set_row_status(parent, status, detail)
         widget = parent.get("widget")
         if widget:
-            widget.set_status(status, detail)
             widget.set_progress(progress, progress_text)
 
     def _begin_download(self, row, candidate=None, download_func=None, *, prepared=False):
@@ -559,9 +566,9 @@ class DownloadMixin:
         row.pop("download_finishing", None)
         row.pop("_queued_download_candidate", None)
         row["active_download_candidate"] = dict(download_candidate)
+        self._set_row_status(row, DOWNLOAD_STATUS, "")
         widget = row.get("widget")
         if widget:
-            widget.set_status("다운로드 중")
             if resume_progress:
                 widget.set_progress(resume_progress, resume_progress_text or "이어받기 준비 중")
             else:
@@ -617,12 +624,10 @@ class DownloadMixin:
                 self._analysis_auto_download = False
             self._set_row_paused(row)
             if row.get("analysis_loading") or row.get("_playlist_analysis_resume"):
-                row["status"] = PAUSED_STATUS
-                row["status_detail"] = "분석 일시정지"
                 row["progress_text"] = "분석 일시정지"
+                self._set_row_status(row, PAUSED_STATUS, "분석 일시정지")
                 widget = row.get("widget")
                 if widget:
-                    widget.set_status(PAUSED_STATUS, "분석 일시정지")
                     widget._refresh_actions()
             self._refresh_playlist_parent_status(row)
             self._refresh_parent_for_child(row)
@@ -650,12 +655,10 @@ class DownloadMixin:
             self._set_row_paused(row)
         else:
             # Worker may still hold .part handles; delay cleanup until after exit.
-            row["status"] = PAUSED_STATUS
-            row["status_detail"] = "일시정지 정리 중"
             row["progress_text"] = row.get("progress_text") or ""
+            self._set_row_status(row, PAUSED_STATUS, "일시정지 정리 중")
             widget = row.get("widget")
             if widget:
-                widget.set_status(PAUSED_STATUS, "일시정지 정리 중")
                 widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
                 widget._refresh_actions()
             QTimer.singleShot(1200, lambda r=row: self._finish_delayed_pause_cleanup(r))
@@ -720,12 +723,10 @@ class DownloadMixin:
         row.pop("download_finishing", None)
         row.pop("active_download_candidate", None)
         row.pop("_queued_download_candidate", None)
-        row["status"] = PAUSED_STATUS
-        row["status_detail"] = ""
         row["progress_text"] = row.get("progress_text") or ""
+        self._set_row_status(row, PAUSED_STATUS, "")
         widget = row.get("widget")
         if widget:
-            widget.set_status(PAUSED_STATUS)
             widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
             widget._refresh_actions()
         self._set_status(PAUSED_STATUS)
@@ -738,14 +739,12 @@ class DownloadMixin:
             row.pop("download_finishing", None)
             row.pop("active_download_candidate", None)
             row.pop("_queued_download_candidate", None)
-            row["status"] = ERROR_STATUS
-            row["status_detail"] = message
             row["progress"] = 0
             row["progress_text"] = ""
             row.setdefault("messages", []).append(message)
+            self._set_row_status(row, ERROR_STATUS, message)
             widget = row.get("widget")
             if widget:
-                widget.set_status(ERROR_STATUS, message)
                 widget.set_progress(0, "")
                 widget._refresh_actions()
         self._set_status(message)
@@ -989,14 +988,12 @@ class DownloadMixin:
     def _mark_existing_output(self, row, output_path):
         row["output_path"] = str(output_path)
         self._apply_actual_output_size(row, output_path)
-        row["status"] = "완료"
-        row["status_detail"] = "이미 있는 파일"
         row["progress"] = 100
         row["progress_text"] = "이미 있는 파일"
+        self._set_row_status(row, COMPLETED_STATUS, "이미 있는 파일")
         widget = row.get("widget")
         if widget:
             widget.refresh()
-            widget.set_status("완료", "이미 있는 파일")
             widget.set_progress(100, "이미 있는 파일")
             widget._refresh_actions()
         if hasattr(self, "_render_rows"):
@@ -1021,11 +1018,10 @@ class DownloadMixin:
         row.pop("_existing_notice_token", None)
         if row.get("status") != "완료" or row.get("status_detail") != "이미 있는 파일":
             return
-        row["status_detail"] = ""
         row["progress_text"] = ""
+        self._set_row_status(row, COMPLETED_STATUS, "")
         widget = row.get("widget")
         if widget:
-            widget.set_status("완료", "")
             widget.set_progress(100, "")
             widget._refresh_actions()
 
@@ -1055,13 +1051,12 @@ class DownloadMixin:
                     row["quality_options"] = build_quality_options([selected])
             self._resolve_finished_output_path(row, result)
             self._apply_actual_output_size(row)
-            row["status"] = COMPLETED_STATUS
             row["progress"] = 100
             row["progress_text"] = "완료"
+            self._set_row_status(row, COMPLETED_STATUS, "")
             widget = row.get("widget")
             if widget:
                 widget.refresh()
-                widget.set_status(COMPLETED_STATUS)
                 widget.set_progress(100, "완료")
                 widget._refresh_actions()
             self._save_completed_history()
@@ -1121,10 +1116,10 @@ class DownloadMixin:
             self._cleanup_row_partial_files(row)
             row["download_starting"] = False
             row.pop("download_finishing", None)
+            row.setdefault("messages", []).append(message)
+            self._set_row_status(row, ERROR_STATUS, message)
             widget = row.get("widget")
-            row["messages"].append(message)
             if widget:
-                widget.set_status("오류", message)
                 widget.set_progress(0, "")
         self._set_status(f"{engine.classify_error(message)}: {message}")
         self._maybe_prompt_macos_cookie_permission(message)
