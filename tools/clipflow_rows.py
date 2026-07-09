@@ -275,6 +275,10 @@ class DownloadRowWidget(QFrame):
         self._analysis_ring_timer.setTimerType(Qt.PreciseTimer)
         self._analysis_ring_timer.setInterval(16)
         self._analysis_ring_timer.timeout.connect(self._advance_analysis_ring)
+        self._existing_flash_step = 0
+        self._existing_flash_timer = QTimer(self)
+        self._existing_flash_timer.setInterval(250)
+        self._existing_flash_timer.timeout.connect(self._advance_existing_flash)
         self._build()
         self.refresh()
 
@@ -767,6 +771,20 @@ class DownloadRowWidget(QFrame):
             self._analysis_ring_offset = (self._analysis_ring_offset + 0.08) % 4.0
         self.update()
 
+    def flash_existing_output_notice(self):
+        self._existing_flash_step = 0
+        self.setProperty("existingFlash", "true")
+        self._existing_flash_timer.stop()
+        self._existing_flash_timer.start()
+        self.update()
+
+    def _advance_existing_flash(self):
+        self._existing_flash_step += 1
+        if self._existing_flash_step >= 4:
+            self._existing_flash_timer.stop()
+            self.setProperty("existingFlash", "false")
+        self.update()
+
     def _analysis_ring_point(self, rect, phase):
         phase = float(phase or 0.0) % 4.0
         side = int(phase)
@@ -1016,6 +1034,12 @@ class DownloadRowWidget(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        if self.property("existingFlash") == "true":
+            color = QColor("#FFFFFF" if self._existing_flash_step % 2 == 0 else "#111111")
+            painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            return
+
         if errored:
             # Full red ring so a failed row is obvious at a glance.
             painter.setPen(QPen(QColor(theme.DANGER), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -1048,7 +1072,13 @@ class DownloadRowWidget(QFrame):
         if finishing:
             painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
-            pen = QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            rainbow = QLinearGradient(_rect.topLeft(), _rect.topRight())
+            rainbow.setColorAt(0.00, QColor("#2F80ED"))
+            rainbow.setColorAt(0.25, QColor("#9B51E0"))
+            rainbow.setColorAt(0.50, QColor("#EB5757"))
+            rainbow.setColorAt(0.75, QColor("#F2C94C"))
+            rainbow.setColorAt(1.00, QColor("#27AE60"))
+            pen = QPen(QBrush(rainbow), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(pen)
             painter.drawPath(self._analysis_dash_path(_rect))
             return

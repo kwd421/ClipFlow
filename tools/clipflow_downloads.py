@@ -164,7 +164,7 @@ class DownloadMixin:
             return dict(base)
         candidate = dict((row or {}).get("candidate") or {})
         clip_range = candidate.get("clip_range")
-        if not clip_range or row.get("fixed_candidate"):
+        if not clip_range:
             return candidate
         cleaned = dict(candidate)
         suffix = engine.clip_range_suffix(clip_range)
@@ -443,6 +443,9 @@ class DownloadMixin:
         self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
+        if row.get("status") != PAUSED_STATUS:
+            row["output_path"] = ""
+            row["status_detail"] = ""
         row["download_started_at"] = time.time()
         row.pop("analysis_loading", None)
         row.pop("child_loading", None)
@@ -726,12 +729,13 @@ class DownloadMixin:
             widget.set_status("완료", "이미 있는 파일")
             widget.set_progress(100, "이미 있는 파일")
             widget._refresh_actions()
-        if hasattr(self, "_next_row_sequence"):
-            row["created_order"] = self._next_row_sequence()
         if hasattr(self, "_render_rows"):
             self._render_rows()
         if hasattr(self, "_scroll_row_to_top"):
             self._scroll_row_to_top(row)
+        widget = row.get("widget")
+        if widget and hasattr(widget, "flash_existing_output_notice"):
+            widget.flash_existing_output_notice()
         token = time.monotonic()
         row["_existing_notice_token"] = token
         QTimer.singleShot(3000, lambda: self._clear_existing_output_notice(row, token))

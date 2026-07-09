@@ -387,6 +387,8 @@ class SettingsMixin:
             "messages": item.get("messages") or [],
             "created_order": created_order,
         }
+        if engine.clip_range_from_candidate(candidate):
+            row["fixed_candidate"] = True
         if hasattr(self, "_apply_actual_output_size"):
             self._apply_actual_output_size(row)
         return row

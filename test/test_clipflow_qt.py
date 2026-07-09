@@ -337,6 +337,172 @@ print(window.windowIcon().isNull())
             ],
         )
 
+    def test_primary_action_uses_plain_video_row_when_stale_segment_row_is_selected(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS, COMPLETED_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+url = "https://chzzk.naver.com/video/14056968"
+base_candidate = {"id": "hls", "title": "Video", "display_title": "Video", "url": "https://media.test/master.m3u8", "ext": "mp4"}
+segment_candidate = dict(base_candidate)
+segment_candidate["clip_range"] = {"start": 18000, "end": 18960}
+window.rows = [
+    {"id": "base", "status": READY_STATUS, "source_url": url, "input_url": url, "candidate": base_candidate, "quality_options": [base_candidate], "selected_index": 0},
+    {"id": "old-segment", "status": COMPLETED_STATUS, "source_url": url, "input_url": url, "candidate": segment_candidate, "quality_options": [segment_candidate], "selected_index": 0, "fixed_candidate": True, "output_path": "C:/missing/old-segment.mp4"},
+]
+window.url_input.setText(url)
+window.selected_row_index = 1
+started = []
+window._start_download = lambda: started.append(window.rows[window.selected_row_index]["id"])
+window._handle_primary_action()
+print(started)
+print(window.selected_row_index)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["['base']", "0"])
+
+    def test_direct_download_from_clip_locked_row_preserves_saved_segment_when_clip_inputs_are_empty(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+url = "https://chzzk.naver.com/video/14056968"
+base_candidate = {"id": "hls", "title": "Video", "display_title": "Video", "url": "https://media.test/master.m3u8", "ext": "mp4", "output_ext": "mp4", "duration": 600}
+clip_candidate = dict(base_candidate)
+clip_candidate["clip_range"] = {"start": 120, "end": 480}
+clip_candidate["display_title"] = "Video [02m00s-08m00s]"
+row = {
+    "id": "row",
+    "status": COMPLETED_STATUS,
+    "source_url": url,
+    "input_url": url,
+    "candidate": clip_candidate,
+    "download_base_candidate": base_candidate,
+    "quality_options": [clip_candidate],
+    "selected_index": 0,
+    "fixed_candidate": True,
+    "output_path": "C:/Downloads/Video [02m00s-08m00s].mp4",
+}
+window.rows = [row]
+window.url_input.setText(url)
+prepared = window._candidate_for_download(row, row["candidate"])
+print(prepared["display_title"])
+print("clip_range" in prepared)
+print(prepared["duration"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["Video [02m00s-08m00s]", "True", "360"])
+
+    def test_primary_action_does_not_treat_restored_clip_history_row_as_plain_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+url = "https://chzzk.naver.com/video/14056968"
+restored_candidate = {
+    "id": "hls",
+    "title": "Video [02m00s-08m00s]",
+    "display_title": "Video [02m00s-08m00s]",
+    "source": url,
+    "ext": "mp4",
+    "output_ext": "mp4",
+    "duration": 360,
+    "source_duration": 600,
+    "sort_bytes": 352500000,
+    "source_filesize": 1000000000,
+    "clip_range": {"start": 120, "end": 480},
+}
+row = window._history_row_from_item({
+    "candidate": restored_candidate,
+    "source_url": url,
+    "output_path": "C:/Downloads/Video [02m00s-08m00s].mp4",
+    "created_order": 1,
+})
+window.rows = [row]
+window.url_input.setText(url)
+window.selected_row_index = 0
+calls = []
+window._start_download = lambda: calls.append("download")
+window._start_analysis = lambda auto_download=False: calls.append(["analyze", auto_download])
+window._handle_primary_action()
+print(bool(row.get("fixed_candidate")))
+print(calls)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "[['analyze', True]]"])
+
+    def test_different_clip_from_clip_locked_row_uses_new_clip_range_not_saved_segment(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+url = "https://chzzk.naver.com/video/14056968"
+base_candidate = {"id": "hls", "title": "Video", "display_title": "Video", "url": "https://media.test/master.m3u8", "ext": "mp4", "output_ext": "mp4", "duration": 600}
+clip_candidate = dict(base_candidate)
+clip_candidate["clip_range"] = {"start": 120, "end": 480}
+clip_candidate["display_title"] = "Video [02m00s-08m00s]"
+row = {
+    "id": "row",
+    "status": COMPLETED_STATUS,
+    "source_url": url,
+    "input_url": url,
+    "candidate": clip_candidate,
+    "download_base_candidate": base_candidate,
+    "quality_options": [clip_candidate],
+    "selected_index": 0,
+    "fixed_candidate": True,
+    "output_path": "C:/Downloads/Video [02m00s-08m00s].mp4",
+}
+window.rows = [row]
+window.url_input.setText(url)
+window._applied_clip_start_text = "00:09:00"
+window._applied_clip_end_text = "00:10:00"
+prepared = window._candidate_for_download(row, row["candidate"])
+print(prepared["clip_range"])
+print(prepared["display_title"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["{'start': 540.0, 'end': 600.0}", "Video [09m00s-10m00s]"])
+
+    def test_finishing_progress_event_keeps_finishing_state_without_percent_text(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_STATUS
+from tools.clipflow_rows import DownloadRowWidget
+
+app = QApplication([])
+window = ClipFlowWindow()
+row = {"id": "row", "status": DOWNLOAD_STATUS, "candidate": {"title": "Video", "display_title": "Video"}}
+widget = DownloadRowWidget(window, row)
+row["widget"] = widget
+window.rows = [row]
+window._handle_engine_event_for(row, {"type": "progress", "percent": 100, "phase": "finishing", "message": "마무리 중", "eta_text": "01:20"})
+print(row.get("download_finishing"))
+print(row.get("progress_text"))
+print(widget.property("finishing"))
+print("%" in row.get("progress_text", ""))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "마무리 중 · ETA 01:20", "true", "False"])
+
     def test_clipflow_qt_global_download_preferences_drive_selected_candidate(self):
         script = r'''
 from PySide6.QtCore import QTimer
@@ -3953,6 +4119,39 @@ tempdir.cleanup()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["완료", "Already Here.mp4", "False", "이미 있는 파일", "False"])
+
+    def test_clipflow_qt_existing_output_keeps_row_order_and_flashes_existing_card(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+existing = Path(tempdir.name) / "Older Existing.mp4"
+existing.write_bytes(b"done")
+window = ClipFlowWindow()
+window._set_save_folder(tempdir.name)
+window._row_sequence = 2
+older_candidate = {"id": "older", "source": "https://media.test/older", "url": "https://media.test/older", "title": "Older Existing", "display_title": "Older Existing", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1}
+newer_candidate = {"id": "newer", "source": "https://media.test/newer", "url": "https://media.test/newer", "title": "Newer", "display_title": "Newer", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1}
+window.rows = [
+    {"id": "newer", "kind": "video", "candidate": newer_candidate, "qualities": [newer_candidate], "quality_options": [newer_candidate], "selected_index": 0, "selected_format_index": 0, "source_url": "https://media.test/newer", "input_url": "https://media.test/newer", "status": READY_STATUS, "progress": 0, "progress_text": "", "output_path": "", "messages": [], "created_order": 2},
+    {"id": "older", "kind": "video", "candidate": older_candidate, "qualities": [older_candidate], "quality_options": [older_candidate], "selected_index": 0, "selected_format_index": 0, "source_url": "https://media.test/older", "input_url": "https://media.test/older", "status": READY_STATUS, "progress": 0, "progress_text": "", "output_path": "", "messages": [], "created_order": 1},
+]
+window._render_rows()
+older = window.rows[1]
+window._mark_existing_output(older, existing)
+print([row["id"] for row in window.rows])
+print(older["created_order"])
+print(older["widget"].property("existingFlash"))
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["['newer', 'older']", "1", "true"])
 
     def test_clipflow_qt_partial_existing_output_does_not_skip_retry(self):
         script = r'''

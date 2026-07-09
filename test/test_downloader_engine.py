@@ -304,6 +304,32 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(engine.build_ydl_options(cookie_source="Edge")["cookiesfrombrowser"], ("edge",))
         self.assertEqual(engine.build_ydl_options(cookie_source="Firefox")["cookiesfrombrowser"], ("firefox",))
 
+    def test_cookie_header_from_jar_keeps_only_chzzk_auth_cookies(self):
+        class FakeCookie:
+            def __init__(self, name, value, domain):
+                self.name = name
+                self.value = value
+                self.domain = domain
+
+        jar = [
+            FakeCookie("NID_AUT", "auth", ".naver.com"),
+            FakeCookie("NID_SES", "session", ".naver.com"),
+            FakeCookie("NAC", "device", ".naver.com"),
+            FakeCookie("SPBLOCK_AIRECO_CAT_DATA", "x" * 3000, "shopsquare.naver.com"),
+            FakeCookie("recentKeyword", "spam", ".naver.com"),
+            FakeCookie("NID_AUT", "other-site", "example.com"),
+        ]
+
+        header = engine.cookie_header_from_jar(jar)
+
+        self.assertIn("NID_AUT=auth", header)
+        self.assertIn("NID_SES=session", header)
+        self.assertIn("NAC=device", header)
+        self.assertNotIn("SPBLOCK_AIRECO_CAT_DATA", header)
+        self.assertNotIn("recentKeyword", header)
+        self.assertNotIn("other-site", header)
+        self.assertLess(len(header), 200)
+
     def test_proxy_url_maps_to_yt_dlp_options(self):
         self.assertNotIn("proxy", engine.build_ydl_options(proxy_url=""))
         self.assertEqual(
@@ -2453,6 +2479,55 @@ for line in sys.stdin:
         self.assertEqual(meta["segment_urls"], ["https://cdn.example.test/stream/seg0.m4v"])
         self.assertEqual(meta["segment_durations"], [1.0])
 
+    def test_emit_hls_parallel_progress_reports_100_when_download_segments_complete(self):
+        events = []
+
+        engine.emit_hls_parallel_progress(
+            events.append,
+            {"title": "Video"},
+            completed_segments=10,
+            total_segments=10,
+            downloaded_bytes=1000,
+            duration=660,
+            started_at=1.0,
+            last_emit_at=2.0,
+            last_emit_bytes=900,
+        )
+
+        self.assertEqual(events[-1]["type"], "progress")
+        self.assertEqual(events[-1].get("percent"), 100)
+        self.assertEqual(events[-1].get("message"), "100%")
+        self.assertNotIn("ETA", events[-1].get("message", ""))
+
+    def test_ffmpeg_output_progress_emits_finishing_eta_without_percent_message(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "out.bin"
+            events = []
+            script = (
+                "import pathlib, sys, time\n"
+                "path = pathlib.Path(sys.argv[1])\n"
+                "with path.open('wb') as f:\n"
+                "    for _ in range(8):\n"
+                "        f.write(b'x' * 50000)\n"
+                "        f.flush()\n"
+                "        time.sleep(0.15)\n"
+            )
+
+            engine.run_ffmpeg_command_with_output_progress(
+                [sys.executable, "-c", script, str(output)],
+                output,
+                800000,
+                on_event=events.append,
+                timeout=10,
+                error_label="test writer failed",
+            )
+
+        finishing_events = [event for event in events if event.get("phase") == "finishing"]
+        self.assertTrue(finishing_events)
+        self.assertTrue(any(event.get("eta_text") for event in finishing_events))
+        self.assertTrue(all(event.get("message") == "마무리 중" for event in finishing_events))
+        self.assertTrue(all("%" not in event.get("message", "") for event in finishing_events))
+
     def test_download_hls_parallel_writes_fmp4_init_before_segments(self):
         playlist = '\n'.join(
             [
@@ -2570,7 +2645,7 @@ for line in sys.stdin:
 
             return Response(payload)
 
-        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
             del ffmpeg_exe, output_format
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
@@ -2650,7 +2725,7 @@ for line in sys.stdin:
 
             return Response(payloads[request.full_url])
 
-        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
             del ffmpeg_exe, output_format
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
@@ -2728,7 +2803,7 @@ for line in sys.stdin:
 
             return Response(payloads[request.full_url])
 
-        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
             del ffmpeg_exe, output_format
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
@@ -2796,7 +2871,7 @@ for line in sys.stdin:
 
             return Response(request.full_url)
 
-        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+        def fake_remux(ts_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
             del ffmpeg_exe, output_format
             Path(output_path).write_bytes(Path(ts_path).read_bytes() + b"-MP4")
 
@@ -3115,7 +3190,7 @@ for line in sys.stdin:
 
             return Response(payloads[request.full_url])
 
-        def fake_remux(input_path, output_path, ffmpeg_exe, output_format="mp4"):
+        def fake_remux(input_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
             del ffmpeg_exe, output_format
             Path(output_path).write_bytes(Path(input_path).read_bytes())
 
@@ -3551,7 +3626,60 @@ for line in sys.stdin:
         progress_events = [event for event in events if event.get("type") == "progress"]
         self.assertTrue(progress_events)
         self.assertEqual(progress_events[-1]["percent"], 100)
+        self.assertFalse(any(99 <= float(event.get("percent") or 0) < 100 for event in progress_events))
         self.assertTrue(any(event.get("type") == "file" and event.get("path") == result["output_path"] for event in events))
+
+    def test_download_direct_media_segment_switches_to_finishing_after_100_percent(self):
+        events = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command):
+                self.stdout = iter(["out_time_ms=10000000\n", "progress=continue\n"])
+                self._polls = 0
+                Path(command[-1]).write_bytes(b"x" * 100000)
+
+            def poll(self):
+                self._polls += 1
+                return None if self._polls < 8 else self.returncode
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        def fake_runner(command, **kwargs):
+            del kwargs
+            return FakeProcess(command)
+
+        with tempfile.TemporaryDirectory() as temp:
+            engine.download_direct_media_segment(
+                "https://cdn.example.test/clip.mp4",
+                {
+                    "title": "독케익 - Clip",
+                    "output_ext": "mp4",
+                    "ext": "mp4",
+                    "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                    "clip_range": {"start": 10, "end": 20},
+                    "sort_bytes": 200000,
+                },
+                temp,
+                on_event=events.append,
+                ffmpeg_exe="ffmpeg-test",
+                runner=fake_runner,
+                no_progress_timeout=5,
+            )
+
+        progress_events = [event for event in events if event.get("type") == "progress"]
+        self.assertTrue(any(event.get("message") == "100%" for event in progress_events))
+        finishing_events = [event for event in progress_events if event.get("phase") == "finishing"]
+        self.assertTrue(finishing_events)
+        self.assertTrue(all(event.get("message") == "마무리 중" for event in finishing_events))
+        self.assertFalse(any(99 <= float(event.get("percent") or 0) < 100 for event in progress_events))
 
     def test_download_direct_media_segment_proxy_uses_original_source_size(self):
         calls = []

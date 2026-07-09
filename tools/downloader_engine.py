@@ -449,21 +449,47 @@ def cookiesfile_from_env():
 
 
 CHZZK_COOKIE_DOMAIN_KEYWORDS = ("naver", "chzzk")
+# Auth cookies only. Dumping every *.naver.com cookie (shopping tooltips, ads, etc.)
+# can make the Cookie header huge and CHZZK APIs answer HTTP 400 Bad Request.
+CHZZK_COOKIE_NAMES = frozenset(
+    {
+        "nid_aut",
+        "nid_ses",
+        "nid_jkl",
+        "nid_jst",
+        "nid_buk",
+        "nac",
+        "nnb",
+    }
+)
 
 
-def cookie_header_from_jar(cookie_jar, domain_keywords=CHZZK_COOKIE_DOMAIN_KEYWORDS):
+def cookie_header_from_jar(
+    cookie_jar,
+    domain_keywords=CHZZK_COOKIE_DOMAIN_KEYWORDS,
+    allowed_names=CHZZK_COOKIE_NAMES,
+):
     if not cookie_jar:
         return ""
     pairs = {}
     keywords = tuple(str(keyword or "").lower() for keyword in (domain_keywords or ()) if str(keyword or "").strip())
+    allowed = None
+    if allowed_names is not None:
+        allowed = {str(name or "").strip().lower() for name in allowed_names if str(name or "").strip()}
+        if not allowed:
+            allowed = None
     for cookie in cookie_jar:
         domain = str(getattr(cookie, "domain", "") or "").lower()
         if keywords and not any(keyword in domain for keyword in keywords):
             continue
         name = getattr(cookie, "name", None)
         value = getattr(cookie, "value", None)
-        if name and value is not None:
-            pairs[str(name)] = str(value)
+        if not name or value is None:
+            continue
+        name_text = str(name)
+        if allowed is not None and name_text.lower() not in allowed:
+            continue
+        pairs[name_text] = str(value)
     return "; ".join(f"{name}={value}" for name, value in pairs.items())
 
 

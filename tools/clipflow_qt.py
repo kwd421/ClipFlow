@@ -748,7 +748,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 else:
                     self._start_analysis(auto_download=True)
                 return
-            if self._selected_row_can_download():
+            if self._selected_row_can_download() and self._selected_row_matches_current_download_target(current_url):
                 self._start_download()
                 return
             self.select_row(row_index)
@@ -1742,6 +1742,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._handle_thread_finished(self.sender())
 
     def _display_progress_for_row(self, row, percent, event):
+        if self._event_is_finishing(event):
+            return 100, self._finishing_progress_text(event), True
         percent = max(0, min(100, int(float(percent or 0))))
         return percent, self._progress_text(percent, event), False
 
@@ -1752,13 +1754,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if event_type == "progress":
             if row and (row.get("download_cancel_requested") or row.get("status") == PAUSED_STATUS):
                 return
-            percent, text, _is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
+            percent, text, is_finishing = self._display_progress_for_row(row, event.get("percent"), event)
             if row and row.get("download_starting"):
                 row["download_starting"] = False
                 if widget:
                     widget.set_status(DOWNLOAD_STATUS)
             if row:
-                row.pop("download_finishing", None)
+                if is_finishing:
+                    row["download_finishing"] = True
+                else:
+                    row.pop("download_finishing", None)
             if widget:
                 # Avoid the heavy set_status() on every progress tick (it does
                 # spinner/visibility work + a filesystem stat in _refresh_actions).
@@ -1766,12 +1771,28 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 # it once if it somehow drifted.
                 if row.get("status") != DOWNLOAD_STATUS:
                     widget.set_status(DOWNLOAD_STATUS)
-                widget.set_progress(percent, text)
+                if is_finishing:
+                    widget.set_finishing(text)
+                else:
+                    widget.set_progress(percent, text)
             status_text = text or "다운로드 중"
             if hasattr(self, "status_label") and self.status_label.text() != status_text:
                 self.status_label.setText(status_text)
+        elif event_type == "status" and self._event_is_finishing(event):
+            text = self._finishing_progress_text(event)
+            if row:
+                row["download_starting"] = False
+                row["download_finishing"] = True
+            if widget:
+                if row.get("status") != DOWNLOAD_STATUS:
+                    widget.set_status(DOWNLOAD_STATUS)
+                widget.set_finishing(text)
+            if hasattr(self, "status_label"):
+                self.status_label.setText(text)
+            self._append_event_message(text)
         elif event_type == "file":
             if row and event.get("path"):
+                row.pop("download_finishing", None)
                 row["output_path"] = str(event["path"])
                 if widget:
                     widget._refresh_actions()
@@ -1786,10 +1807,32 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                     widget.set_progress(0, engine.compact_text(message, 48))
                 self._append_event_message(message)
         elif event_type in {"log", "done"}:
+            if row and event_type == "done":
+                row.pop("download_finishing", None)
             if message:
                 if row and row.get("download_starting") and event_type == "log" and widget:
                     widget.set_progress(0, engine.compact_text(message, 48))
                 self._append_event_message(message)
+
+    def _event_is_finishing(self, event):
+        if not isinstance(event, dict):
+            return False
+        phase = str(event.get("phase") or "").strip().lower()
+        if phase in {"finishing", "finalizing"}:
+            return True
+        message = str(event.get("message") or "").strip().lower()
+        return message in {"finalizing hls output", "마무리 중"}
+
+    def _finishing_progress_text(self, event):
+        text = "마무리 중"
+        if isinstance(event, dict):
+            message = str(event.get("message") or "").strip()
+            if message and message.lower() != "finalizing hls output":
+                text = message
+            eta = str(event.get("eta_text") or "").strip()
+            if eta and "eta" not in text.lower():
+                text = f"{text} · ETA {eta}"
+        return text
 
     def _progress_text(self, percent, event):
         if isinstance(event, dict):
@@ -1899,7 +1942,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if playlist_key and row.get("kind") == "playlist" and self._playlist_key_for_row(row) == playlist_key:
                 return index
             if self._row_matches_url(row, url):
-                return index
+                if self._row_matches_current_download_target(row, url):
+                    return index
         return -1
 
     def _selected_row_can_download(self):
@@ -1923,6 +1967,32 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             str(row.get("input_url") or "").strip(),
         }
         return current_url in row_urls
+
+    def _selected_row_matches_current_download_target(self, url=None):
+        if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
+            return False
+        row = self.rows[self.selected_row_index]
+        return self._row_matches_current_download_target(row, url or self.url_input.text().strip())
+
+    def _row_matches_current_download_target(self, row, url):
+        if not row or not self._row_is_visible(row) or self._is_analysis_loading_row(row):
+            return False
+        if row.get("status") == ANALYZING_STATUS:
+            return False
+        if not self._row_matches_url(row, url):
+            return False
+        candidate = row.get("candidate") or {}
+        row_clip = engine.clip_range_from_candidate(candidate)
+        try:
+            ui_clip = self.current_clip_range()
+        except ValueError:
+            ui_clip = None
+        normalized_ui_clip = engine.clip_range_from_candidate({"clip_range": ui_clip}) if ui_clip else None
+        if row_clip and not normalized_ui_clip:
+            return False
+        if row_clip and normalized_ui_clip and row_clip != normalized_ui_clip:
+            return False
+        return True
 
     def _refresh_footer(self):
         return
