@@ -210,9 +210,17 @@ if (-not $SkipUpload) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw "GitHub CLI (gh) is required for release upload"
     }
-    # Do not let "release not found" on stderr trip ErrorActionPreference=Stop.
-    $null = gh release view $Tag --repo $Repo 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # Native gh writes "release not found" to stderr; with Stop that becomes terminating.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $null = & gh release view $Tag --repo $Repo 2>$null
+        $releaseExists = ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($releaseExists) {
         gh release upload $Tag $releaseExe --repo $Repo --clobber
     }
     else {
