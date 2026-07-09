@@ -76,12 +76,31 @@ _SIGNED_QUERY_KEYS = {
     "expires",
     "expire",
     "exp",
+    "policy",
+    "key-pair-id",
+    "x-amz-algorithm",
     "x-amz-signature",
     "x-amz-credential",
     "x-amz-date",
     "x-amz-expires",
     "x-amz-security-token",
     "x-amz-signedheaders",
+}
+
+_HISTORY_DROP_KEYS = {
+    "_cookie_header",
+    "http_headers",
+    "headers",
+}
+
+_HISTORY_URL_KEYS = {
+    "url",
+    "source",
+    "source_url",
+    "webpage_url",
+    "page_url",
+    "thumbnail",
+    "thumbnail_url",
 }
 
 
@@ -99,6 +118,26 @@ def _strip_signed_url_tokens(value):
     ]
     query = urllib.parse.urlencode(kept, doseq=True)
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
+
+
+def _sanitize_history_value(value):
+    """Recursively drop secrets and strip signed-URL tokens from history payloads."""
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in _HISTORY_DROP_KEYS:
+                continue
+            if lowered in _HISTORY_URL_KEYS:
+                cleaned[key] = _strip_signed_url_tokens(item)
+            else:
+                cleaned[key] = _sanitize_history_value(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_sanitize_history_value(item) for item in value]
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return _strip_signed_url_tokens(value)
+    return value
 
 
 class SettingsMixin:
@@ -323,8 +362,9 @@ class SettingsMixin:
             if row.get("status") != COMPLETED_STATUS and not include_playlist_parent:
                 continue
             candidate = row.get("candidate") or {}
-            candidate_payload = self._json_ready(candidate)
-            candidate_payload.pop("url", None)
+            candidate_payload = _sanitize_history_value(self._json_ready(candidate))
+            if isinstance(candidate_payload, dict):
+                candidate_payload.pop("url", None)
             payload.append(
                 {
                     "candidate": candidate_payload,

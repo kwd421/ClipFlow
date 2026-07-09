@@ -641,17 +641,41 @@ class DownloadMixin:
         if not items:
             return
         row["download_cancel_requested"] = True
+        all_stopped = True
         for item in items:
-            self._cancel_active_download_item(item)
+            if not self._cancel_active_download_item(item):
+                all_stopped = False
         self.active_downloads = [item for item in self.active_downloads if item.get("row") is not row]
-        self._set_row_paused(row)
+        if all_stopped:
+            self._set_row_paused(row)
+        else:
+            # Worker may still hold .part handles; delay cleanup until after exit.
+            row["status"] = PAUSED_STATUS
+            row["status_detail"] = "일시정지 정리 중"
+            row["progress_text"] = row.get("progress_text") or ""
+            widget = row.get("widget")
+            if widget:
+                widget.set_status(PAUSED_STATUS, "일시정지 정리 중")
+                widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
+                widget._refresh_actions()
+            QTimer.singleShot(1200, lambda r=row: self._finish_delayed_pause_cleanup(r))
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
         self._refresh_parent_for_child(row)
         self._start_queued_downloads()
 
+    def _finish_delayed_pause_cleanup(self, row):
+        if not row or row not in self.rows:
+            return
+        if self._row_is_downloading(row):
+            return
+        # Finished-handler may already have paused + cleaned.
+        if row.get("status") == PAUSED_STATUS or row.pop("download_cancel_requested", False):
+            self._set_row_paused(row)
+
     def _cancel_active_download_item(self, item):
+        """Request cancel and wait briefly. Returns True if the worker thread has stopped."""
         row = item.get("row")
         row_id = str((row or {}).get("id") or "")
         if row_id:
@@ -660,27 +684,35 @@ class DownloadMixin:
             except Exception:
                 pass
         thread = item.get("thread")
-        if thread:
-            for method_name in ("requestInterruption", "quit"):
-                method = getattr(thread, method_name, None)
-                if callable(method):
-                    method()
-            wait = getattr(thread, "wait", None)
-            stopped = True
+        if not thread:
+            return True
+        for method_name in ("requestInterruption", "quit"):
+            method = getattr(thread, method_name, None)
+            if callable(method):
+                method()
+        wait = getattr(thread, "wait", None)
+        stopped = True
+        if callable(wait):
+            try:
+                stopped = bool(wait(800))
+            except TypeError:
+                stopped = bool(wait())
+        if not stopped:
+            terminate = getattr(thread, "terminate", None)
+            if callable(terminate):
+                terminate()
             if callable(wait):
                 try:
-                    stopped = bool(wait(800))
+                    stopped = bool(wait(1000))
                 except TypeError:
-                    stopped = bool(wait())
-            if not stopped:
-                terminate = getattr(thread, "terminate", None)
-                if callable(terminate):
-                    terminate()
-                if callable(wait):
-                    try:
-                        wait(1000)
-                    except TypeError:
-                        wait()
+                    wait()
+                    stopped = not thread.isRunning()
+        if not stopped:
+            try:
+                stopped = not thread.isRunning()
+            except Exception:
+                stopped = False
+        return bool(stopped)
 
     def _set_row_paused(self, row):
         self._cleanup_row_partial_files(row)

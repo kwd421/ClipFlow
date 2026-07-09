@@ -1254,6 +1254,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return popup
 
     def clip_cut_mode(self):
+        # UI exposes only fast cut today; engine accurate branch is unused.
         return "fast"
 
     def _toggle_clip_range_popup(self):

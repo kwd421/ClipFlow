@@ -7,6 +7,7 @@ import plistlib
 import re
 import sys
 import threading
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -151,11 +152,26 @@ def _appcast_item_dict(item):
     version = short_version or str(build)
     if not notes_url and version:
         notes_url = f"https://kwd421.github.io/ClipFlow/ClipFlow-{version}.md"
+    notes_url = _trusted_release_notes_url(notes_url)
     return {
         "build": build,
         "version": version,
         "release_notes_url": notes_url,
     }
+
+
+def _trusted_release_notes_url(url):
+    """Only surface https notes from our publish hosts (appcast is not signed as HTML)."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme != "https":
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host in {"kwd421.github.io", "github.com", "www.github.com", "raw.githubusercontent.com"}:
+        return text
+    return ""
 
 
 def _appcast_items(feed_url):

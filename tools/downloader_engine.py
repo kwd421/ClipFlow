@@ -6928,6 +6928,12 @@ def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
         return None
     if not playlist_meta["key_url"]:
         raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
+    try:
+        from Cryptodome.Cipher import AES  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "AES-128 HLS needs pycryptodomex. Install requirements or use a non-parallel fallback path."
+        ) from exc
     return fetch_hls_aes128_key(playlist_meta["key_url"], headers)
 
 

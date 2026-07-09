@@ -115,8 +115,10 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             target()
             return mock.Mock()
 
-        on_found = lambda: seen.append(True)
-        with mock.patch.object(updater, "startup_update_is_available", return_value=True), mock.patch.object(
+        on_found = lambda info=None: seen.append(True)
+        with mock.patch.object(
+            updater, "fetch_startup_update_info", return_value={"version": "9.9.9", "build": 999}
+        ), mock.patch.object(
             updater, "_dispatch_to_main_thread", side_effect=lambda callback: callback()
         ), mock.patch.object(updater.threading, "Thread", side_effect=run_worker_immediately):
             instance.schedule_startup_check(on_found)

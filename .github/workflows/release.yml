@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
 
+# Serialize release publish so concurrent tags cannot race appcast pushes on main.
+concurrency:
+  group: clipflow-release-publish
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -26,7 +31,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v(.+)$') {
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
             throw "Release tag must look like v1.2.3, got: $tag"
           }
           "CLIPFLOW_VERSION=$($Matches[1])" >> $env:GITHUB_ENV

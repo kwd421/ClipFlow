@@ -1,5 +1,7 @@
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    # Dev/CI only — never enable for signed release artifacts.
+    [switch]$AllowUnpinnedYtDlpFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,7 +28,10 @@ try {
     Install-Requirements
 }
 catch {
-    Write-Host "Pinned requirements failed; retrying with latest PyPI yt-dlp for CI/release builds."
+    if (-not $AllowUnpinnedYtDlpFallback) {
+        throw
+    }
+    Write-Host "Pinned requirements failed; retrying with latest PyPI yt-dlp for CI/dev only."
     $ciRequirements = Join-Path $env:TEMP "clipflow-requirements-ci.txt"
     (Get-Content "requirements.txt") -replace '^yt-dlp==.*$', 'yt-dlp' | Set-Content $ciRequirements -Encoding utf8
     Invoke-PythonStep "pip install (CI fallback)" @("-m", "pip", "install", "-r", $ciRequirements)
