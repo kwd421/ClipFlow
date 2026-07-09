@@ -202,18 +202,20 @@ QFrame#UpdateToast {{
 }}
 QLabel#UpdateToastMessage {{
     color: {INK};
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 650;
+    margin: 0px;
+    padding: 0px;
 }}
-QPushButton#UpdateToastDismiss {{
-    color: {MUTED};
-    font-size: 16px;
-    font-weight: 700;
-    border: none;
+QToolButton#UpdateToastDismiss {{
     background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0px;
+    margin: 0px;
 }}
-QPushButton#UpdateToastDismiss:hover {{
-    color: {INK};
+QToolButton#UpdateToastDismiss:hover {{
+    background: {SURFACE_SOFT};
 }}
 QLabel {{
     color: {INK};
@@ -223,6 +225,21 @@ QLabel#WindowTitle {{
     font-size: 18px;
     font-weight: 700;
     color: {INK};
+}}
+QLabel#UpdateNotesTitle {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {INK};
+}}
+QTextBrowser#UpdateNotesBody {{
+    background: {SURFACE};
+    color: {INK};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 14px;
+    selection-background-color: {ACCENT};
+    selection-color: {ON_ACCENT};
 }}
 QLabel#SectionTitle {{
     font-size: 15px;

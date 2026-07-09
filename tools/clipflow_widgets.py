@@ -25,11 +25,25 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 try:
-    from tools.clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
+    from tools.clipflow_icons import (
+        ICON_COLOR,
+        ICON_DISABLED_COLOR,
+        ICON_HOVER_COLOR,
+        LucideIconButton,
+        LucideIconWidget,
+        lucide_pixmap,
+    )
     from tools.clipflow_theme import THUMBNAIL_WIDTH
     from tools import clipflow_theme as theme
 except ImportError:
-    from clipflow_icons import ICON_COLOR, ICON_DISABLED_COLOR, ICON_HOVER_COLOR, LucideIconWidget, lucide_pixmap
+    from clipflow_icons import (
+        ICON_COLOR,
+        ICON_DISABLED_COLOR,
+        ICON_HOVER_COLOR,
+        LucideIconButton,
+        LucideIconWidget,
+        lucide_pixmap,
+    )
     from clipflow_theme import THUMBNAIL_WIDTH
     import clipflow_theme as theme
 
@@ -1118,33 +1132,60 @@ class UpdateAvailableBanner(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("UpdateToast")
-        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
         self._update_info = {}
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 8, 8)
-        layout.setSpacing(8)
+        self.setFixedWidth(300)
+
+        root = QVBoxLayout(self)
+        # Even padding so header X and action buttons share the same right edge.
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(12)
+
+        # Top: message + dismiss, vertically centered together.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
         self.message_label = QLabel("새 버전이 있습니다")
         self.message_label.setObjectName("UpdateToastMessage")
-        self.message_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.message_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.dismiss_button = LucideIconButton(
+            "x",
+            size=28,
+            icon_size=16,
+            parent=self,
+            icon_color=theme.MUTED,
+            hover_background=theme.SURFACE_SOFT,
+            pointer_cursor=True,
+        )
+        self.dismiss_button.setObjectName("UpdateToastDismiss")
+        self.dismiss_button.setToolTip("닫기")
+        header.addWidget(self.message_label, 1, Qt.AlignVCenter)
+        header.addWidget(self.dismiss_button, 0, Qt.AlignVCenter)
+        root.addLayout(header)
+
+        # Bottom: equal-width action buttons, full content width (no left dead space).
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
         self.details_button = OutlinedButton("상세")
         self.details_button.setObjectName("SecondaryButton")
         self.details_button.setCursor(Qt.PointingHandCursor)
         self.details_button.setVisible(False)
+        self.details_button.setFixedHeight(34)
+        self.details_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.update_button = OutlinedButton("업데이트")
         self.update_button.setObjectName("PrimaryPopupButton")
         self.update_button.setCursor(Qt.PointingHandCursor)
-        self.dismiss_button = QPushButton("×")
-        self.dismiss_button.setObjectName("UpdateToastDismiss")
-        self.dismiss_button.setFixedSize(24, 24)
-        self.dismiss_button.setCursor(Qt.PointingHandCursor)
-        self.dismiss_button.setFlat(True)
+        self.update_button.setFixedHeight(34)
+        self.update_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.details_button.clicked.connect(self.details_requested.emit)
         self.update_button.clicked.connect(self.update_requested.emit)
         self.dismiss_button.clicked.connect(self._dismiss)
-        layout.addWidget(self.message_label, 0)
-        layout.addWidget(self.details_button, 0)
-        layout.addWidget(self.update_button, 0)
-        layout.addWidget(self.dismiss_button, 0, Qt.AlignVCenter)
+        actions.addWidget(self.details_button, 1)
+        actions.addWidget(self.update_button, 1)
+        root.addLayout(actions)
 
     def set_update_info(self, info=None):
         info = info if isinstance(info, dict) else {}
@@ -1157,6 +1198,7 @@ class UpdateAvailableBanner(QFrame):
         notes = str(info.get("release_notes_url") or "").strip()
         # Show details whenever we have a version or notes URL (dialog can fall back to Pages URL).
         self.details_button.setVisible(bool(version or notes))
+        self.updateGeometry()
         self.adjustSize()
 
     def update_info(self):
@@ -1172,25 +1214,28 @@ class UpdateNotesDialog(QDialog):
 
     def __init__(self, parent=None, version="", notes_url=""):
         super().__init__(parent)
-        version = str(version or "").strip()
+        self._version = str(version or "").strip()
         self._notes_url = str(notes_url or "").strip()
-        self.setWindowTitle(f"ClipFlow {version} 변경 사항" if version else "업데이트 상세")
+        self.setWindowTitle(f"ClipFlow {self._version} 변경 사항" if self._version else "업데이트 상세")
         self.setModal(True)
-        self.setMinimumSize(480, 420)
-        self.resize(520, 480)
+        self.setMinimumSize(500, 440)
+        self.resize(540, 500)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
 
-        title = QLabel(f"ClipFlow {version}" if version else "업데이트")
-        title.setObjectName("WindowTitle")
+        # Single title (markdown H1 is stripped from body content).
+        title = QLabel(f"ClipFlow {self._version}" if self._version else "업데이트")
+        title.setObjectName("UpdateNotesTitle")
         layout.addWidget(title)
 
         self.body = QTextBrowser(self)
+        self.body.setObjectName("UpdateNotesBody")
         self.body.setOpenExternalLinks(False)
         self.body.setOpenLinks(False)
-        self.body.setPlaceholderText("변경 사항을 불러오는 중…")
+        self._apply_notes_document_style()
+        self.body.setPlainText("변경 사항을 불러오는 중…")
         layout.addWidget(self.body, 1)
 
         buttons = QHBoxLayout()
@@ -1220,6 +1265,69 @@ class UpdateNotesDialog(QDialog):
         self.update_requested.emit()
         self.accept()
 
+    def _notes_font_family(self):
+        try:
+            family = theme.preferred_font_family()
+        except Exception:
+            family = ""
+        if family:
+            return family
+        # Same fallback stack as the rest of ClipFlow.
+        return "Noto Sans KR"
+
+    def _notes_document_css(self):
+        family = self._notes_font_family().replace("'", "\\'")
+        return f"""
+            body {{
+                font-family: '{family}', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Helvetica Neue', 'Segoe UI', sans-serif;
+                font-size: 14px;
+                color: #171717;
+                line-height: 1.55;
+            }}
+            h1 {{ font-size: 22px; font-weight: 700; margin: 0 0 10px 0; line-height: 1.25; }}
+            h2 {{ font-size: 16px; font-weight: 700; margin: 18px 0 8px 0; line-height: 1.3; }}
+            h3 {{ font-size: 14px; font-weight: 700; margin: 14px 0 6px 0; line-height: 1.35; }}
+            p {{ margin: 0 0 8px 0; }}
+            ul {{ margin: 0 0 10px 18px; padding: 0; }}
+            li {{ margin: 0 0 6px 0; }}
+            strong {{ font-weight: 700; }}
+        """
+
+    def _apply_notes_document_style(self):
+        family = self._notes_font_family()
+        font = QFont(family, 10)
+        self.setFont(font)
+        self.body.setFont(font)
+        self.body.document().setDefaultFont(font)
+        self.body.document().setDefaultStyleSheet(self._notes_document_css())
+
+    def _strip_leading_version_heading(self, text):
+        """Remove the first markdown H1 so the dialog title is not duplicated."""
+        lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if not lines:
+            return ""
+        first = lines[0].strip()
+        if re.match(r"^#\s+ClipFlow\b", first, flags=re.IGNORECASE):
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+        elif self._version and re.match(rf"^#\s+ClipFlow\s+{re.escape(self._version)}\s*$", first, flags=re.IGNORECASE):
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    def _set_notes_text(self, text):
+        prepared = self._strip_leading_version_heading(text)
+        if not prepared:
+            self.body.setPlainText("변경 사항이 비어 있습니다.")
+            return
+        self._apply_notes_document_style()
+        if hasattr(self.body, "setMarkdown"):
+            self.body.setMarkdown(prepared)
+        else:
+            self.body.setPlainText(prepared)
+
     def _load_notes(self, url):
         self.body.setPlainText("변경 사항을 불러오는 중…")
         request = QNetworkRequest(QUrl(url))
@@ -1241,11 +1349,7 @@ class UpdateNotesDialog(QDialog):
             if not text:
                 self.body.setPlainText("변경 사항이 비어 있습니다.")
                 return
-            # Prefer markdown rendering when available (Qt 5.14+ / PySide6).
-            if hasattr(self.body, "setMarkdown"):
-                self.body.setMarkdown(text)
-            else:
-                self.body.setPlainText(text)
+            self._set_notes_text(text)
         finally:
             reply.deleteLater()
 
