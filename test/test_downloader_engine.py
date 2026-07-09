@@ -3408,6 +3408,84 @@ for line in sys.stdin:
             engine.chzzk_probe_direct_speed_profile = original_direct_profile
             engine.chzzk_hls_route_profile = original_hls_profile
 
+    def test_chzzk_choose_download_route_prefers_hls_when_many_segments_are_comparable(self):
+        direct = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/vod.m3u8",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
+
+        try:
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 15 * 1024 * 1024,
+                "mid_bps": 35 * 1024 * 1024,
+                "tail_bps": 34 * 1024 * 1024,
+                "min_bps": 15 * 1024 * 1024,
+                "mid_offset": 860_000_000,
+                "tail_offset": 1_460_000_000,
+                "throttle_ratio": 1.0,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 420,
+                "probe_bps": 10 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": False,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=1_720_579_144, duration=1679)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
+
+    def test_chzzk_choose_download_route_prefers_segmented_hls_metadata_for_long_vod(self):
+        direct = {
+            "url": "https://cdn.example.test/glive/14046477/pd/video.mp4",
+            "source": "https://chzzk.naver.com/video/14046477",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/glive_2026_07_05_2092/hls/index.m3u8",
+            "source": "https://chzzk.naver.com/video/14046477",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
+
+        try:
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 15 * 1024 * 1024,
+                "mid_bps": 35 * 1024 * 1024,
+                "tail_bps": 34 * 1024 * 1024,
+                "min_bps": 15 * 1024 * 1024,
+                "mid_offset": 860_000_000,
+                "tail_offset": 1_460_000_000,
+                "throttle_ratio": 1.0,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 420,
+                "probe_bps": 4 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": False,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=1_720_579_144, duration=1679)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
+
     def test_download_chzzk_starts_hls_when_probe_selects_hls(self):
         events = []
         hls_urls = []
@@ -3480,6 +3558,175 @@ for line in sys.stdin:
             engine.download_hls_parallel = original_hls
             engine.download_direct_media = original_direct
             engine.resolve_direct_media_total = original_total
+
+    def test_chzzk_probe_direct_speed_ignores_non_partial_responses_without_body_read(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self):
+                self.read_count = 0
+                self.abort_called = False
+
+            def read(self, size=-1):
+                del size
+                self.read_count += 1
+                return b"x" * 1024
+
+            def abort(self):
+                self.abort_called = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                return False
+
+        response = FakeResponse()
+        original_open = engine.parallel_http_urlopen
+
+        try:
+            engine.parallel_http_urlopen = lambda *args, **kwargs: response
+            self.assertEqual(
+                engine.chzzk_probe_direct_speed("https://cdn.example.test/vod.mp4", {}, probe_bytes=1024),
+                0.0,
+            )
+            self.assertEqual(response.read_count, 0)
+            self.assertTrue(response.abort_called)
+        finally:
+            engine.parallel_http_urlopen = original_open
+
+    def test_chzzk_probe_direct_speed_profile_samples_start_middle_and_tail(self):
+        calls = []
+        original_probe = engine.chzzk_probe_direct_speed
+
+        def fake_probe(url, headers, probe_bytes=None, offset=0):
+            del url, headers, probe_bytes
+            calls.append(offset)
+            return {
+                0: 40 * 1024 * 1024,
+                500_000_000: 35 * 1024 * 1024,
+                850_000_000: 10 * 1024 * 1024,
+            }[offset]
+
+        try:
+            engine.chzzk_probe_direct_speed = fake_probe
+            profile = engine.chzzk_probe_direct_speed_profile("https://cdn.example.test/vod.mp4", {}, 1_000_000_000)
+        finally:
+            engine.chzzk_probe_direct_speed = original_probe
+
+        self.assertEqual(calls, [0, 500_000_000, 850_000_000])
+        self.assertEqual(profile["tail_bps"], 10 * 1024 * 1024)
+        self.assertEqual(profile["min_bps"], 10 * 1024 * 1024)
+        self.assertTrue(profile["throttle_detected"])
+
+    def test_chzzk_pick_hls_probe_segments_samples_start_middle_and_tail(self):
+        segment_urls = [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)]
+        picked = engine.chzzk_pick_hls_probe_segments(segment_urls, max_count=4)
+        self.assertEqual(
+            picked,
+            [
+                "https://cdn.example.test/seg-0.ts",
+                "https://cdn.example.test/seg-5.ts",
+                "https://cdn.example.test/seg-8.ts",
+                "https://cdn.example.test/seg-9.ts",
+            ],
+        )
+
+    def test_chzzk_hls_route_profile_reuses_playlist_segments_for_probe(self):
+        captured = {}
+        original_resolve = engine.resolve_hls_media_playlist
+        original_parse = engine.parse_hls_media_playlist
+        original_probe = engine.chzzk_probe_hls_speed
+
+        try:
+            engine.resolve_hls_media_playlist = lambda url, headers: (url, "#EXTM3U")
+            engine.parse_hls_media_playlist = lambda text, url: {
+                "segment_urls": [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)]
+            }
+
+            def fake_probe(url, headers, segment_count=None, segment_urls=None):
+                del url, headers, segment_count
+                captured["segment_urls"] = list(segment_urls or [])
+                return 12 * 1024 * 1024
+
+            engine.chzzk_probe_hls_speed = fake_probe
+            profile = engine.chzzk_hls_route_profile("https://cdn.example.test/vod.m3u8", {})
+        finally:
+            engine.resolve_hls_media_playlist = original_resolve
+            engine.parse_hls_media_playlist = original_parse
+            engine.chzzk_probe_hls_speed = original_probe
+
+        self.assertEqual(profile["segment_count"], 10)
+        self.assertEqual(captured["segment_urls"], [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)])
+
+    def test_download_chzzk_direct_route_uses_slow_fallback_wrapper(self):
+        calls = []
+        original_choose = engine.chzzk_choose_download_route
+        original_pair = engine.chzzk_paired_route_candidates
+        original_wrapper = getattr(engine, "chzzk_download_direct_with_hls_fallback", None)
+        original_direct = engine.download_direct_media
+        original_total = engine.resolve_direct_media_total
+
+        candidate = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/14056968",
+            "format_id": "chzzk-1080",
+            "title": "VOD",
+            "output_ext": "mp4",
+            "ext": "mp4",
+            "height": 1080,
+        }
+        hls_candidate = {
+            **candidate,
+            "url": "https://cdn.example.test/vod.m3u8",
+            "is_manifest": True,
+        }
+
+        def fake_pair(cand, page_url, cookie_source, on_event=None):
+            del page_url, cookie_source, on_event
+            return cand, hls_candidate
+
+        def fake_choose(direct_candidate, hls_cand, total=0, duration=0, on_event=None):
+            del hls_cand, total, duration, on_event
+            return "direct", direct_candidate
+
+        def fake_wrapper(direct_url, direct_candidate, output_dir, page_url, cookie_source, hls_candidate=None, on_event=None):
+            del direct_candidate, output_dir, page_url, cookie_source, on_event
+            calls.append((direct_url, hls_candidate["url"] if hls_candidate else None))
+            return {"ok": True, "target_url": direct_url}
+
+        def fake_direct(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("CHZZK direct route should use the slow-fallback wrapper")
+
+        def fake_total(url, headers, cand):
+            del url, headers, cand
+            return 80 * 1024 * 1024 * 1024
+
+        try:
+            engine.chzzk_paired_route_candidates = fake_pair
+            engine.chzzk_choose_download_route = fake_choose
+            engine.chzzk_download_direct_with_hls_fallback = fake_wrapper
+            engine.download_direct_media = fake_direct
+            engine.resolve_direct_media_total = fake_total
+            with tempfile.TemporaryDirectory() as temp:
+                engine.download_chzzk_candidate(
+                    "https://chzzk.naver.com/video/14056968",
+                    candidate,
+                    temp,
+                )
+        finally:
+            engine.chzzk_choose_download_route = original_choose
+            engine.chzzk_paired_route_candidates = original_pair
+            if original_wrapper is None:
+                delattr(engine, "chzzk_download_direct_with_hls_fallback")
+            else:
+                engine.chzzk_download_direct_with_hls_fallback = original_wrapper
+            engine.download_direct_media = original_direct
+            engine.resolve_direct_media_total = original_total
+
+        self.assertEqual(calls, [("https://cdn.example.test/vod.mp4", "https://cdn.example.test/vod.m3u8")])
 
     def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):
         calls = []

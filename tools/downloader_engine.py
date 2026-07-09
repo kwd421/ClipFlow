@@ -90,6 +90,15 @@ CHZZK_ROUTE_PROBE_TIMEOUT = _env_int("CLIPFLOW_CHZZK_PROBE_TIMEOUT_SEC", 12, 3, 
 CHZZK_ROUTE_LARGE_VOD_BYTES = 10 * 1024 * 1024 * 1024
 CHZZK_ROUTE_LONG_VOD_SECONDS = 3600
 CHZZK_DIRECT_RANGE_THROTTLE_RATIO = 0.65
+CHZZK_HLS_COMPARABLE_DIRECT_RATIO = 0.60
+CHZZK_HLS_SEGMENTED_VOD_BYTES = 1024 * 1024 * 1024
+CHZZK_HLS_SEGMENTED_VOD_SECONDS = 20 * 60
+CHZZK_HLS_SEGMENTED_VOD_SEGMENTS = 300
+CHZZK_DIRECT_SLOW_FALLBACK_SECONDS = float(_env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_SEC", 25, 5, 120))
+CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES = 64 * 1024 * 1024
+CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC = (
+    _env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_MBPS", 6, 1, 50) * 1024 * 1024
+)
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -5346,9 +5355,12 @@ def chzzk_probe_direct_speed(url, headers, probe_bytes=None, offset=0):
     started = time.monotonic()
     try:
         with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
-            if safe_int(getattr(response, "status", 206)) not in {200, 206}:
+            if safe_int(getattr(response, "status", 0)) != 206:
+                abort_response = getattr(response, "abort", None)
+                if callable(abort_response):
+                    abort_response()
                 return 0.0
-            data = response.read()
+            data = response.read(probe_bytes + 1)[:probe_bytes]
     except (OSError, urllib.error.URLError, RuntimeError, ValueError):
         return 0.0
     elapsed = time.monotonic() - started
@@ -5357,24 +5369,73 @@ def chzzk_probe_direct_speed(url, headers, probe_bytes=None, offset=0):
     return len(data) / elapsed
 
 
-def chzzk_probe_hls_speed(url, headers, segment_count=None):
+def chzzk_pick_hls_probe_segments(segment_urls, max_count=None):
+    segment_urls = [str(segment_url or "") for segment_url in (segment_urls or []) if str(segment_url or "")]
+    if not segment_urls:
+        return []
+    max_count = max(1, safe_int(max_count or CHZZK_ROUTE_PROBE_HLS_SEGMENTS))
+    if len(segment_urls) <= max_count:
+        return segment_urls
+    if max_count == 1:
+        return [segment_urls[0]]
+    if max_count == 2:
+        return [segment_urls[0], segment_urls[-1]]
+    indexes = [
+        0,
+        len(segment_urls) // 2,
+        min(len(segment_urls) - 1, max(0, int(len(segment_urls) * 0.85))),
+        len(segment_urls) - 1,
+    ]
+    picked = []
+    seen = set()
+    for index in indexes:
+        url = segment_urls[index]
+        if url in seen:
+            continue
+        picked.append(url)
+        seen.add(url)
+        if len(picked) >= max_count:
+            return picked
+    for url in segment_urls:
+        if url in seen:
+            continue
+        picked.append(url)
+        seen.add(url)
+        if len(picked) >= max_count:
+            break
+    return picked
+
+
+def chzzk_probe_hls_speed(url, headers, segment_count=None, segment_urls=None):
     segment_count = max(1, safe_int(segment_count or CHZZK_ROUTE_PROBE_HLS_SEGMENTS))
     try:
-        playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
-        playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
-        segment_urls = list(playlist_meta.get("segment_urls") or [])[:segment_count]
-        if not segment_urls:
+        if segment_urls is None:
+            playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+            playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+            segment_urls = list(playlist_meta.get("segment_urls") or [])
+        sample_urls = chzzk_pick_hls_probe_segments(segment_urls, max_count=segment_count)
+        if not sample_urls:
             return 0.0
         started = time.monotonic()
         downloaded = 0
-        for segment_url in segment_urls:
+        downloaded_lock = threading.Lock()
+
+        def download_segment(segment_url):
+            nonlocal downloaded
             request = urllib.request.Request(segment_url, headers=dict(headers or {}))
             with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
+                segment_bytes = 0
                 while True:
                     chunk = response.read(HLS_SEGMENT_READ_CHUNK)
                     if not chunk:
                         break
-                    downloaded += len(chunk)
+                    segment_bytes += len(chunk)
+                with downloaded_lock:
+                    downloaded += segment_bytes
+
+        workers = max(1, min(4, HLS_PARALLEL_WORKERS, len(sample_urls)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(download_segment, sample_urls))
         elapsed = time.monotonic() - started
         if downloaded <= 0 or elapsed <= 0:
             return 0.0
@@ -5394,20 +5455,29 @@ def chzzk_probe_direct_speed_profile(url, headers, total):
     total = max(1, safe_int(total))
     probe_bytes = CHZZK_ROUTE_PROBE_BYTES
     mid_offset = min(max(probe_bytes, total // 2), max(0, total - probe_bytes))
+    tail_offset = min(max(probe_bytes, int(total * 0.85)), max(0, total - probe_bytes))
     start_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=0)
     mid_bps = 0.0
+    tail_bps = 0.0
     if total > probe_bytes * 2:
         mid_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=mid_offset)
-    throttle_ratio = (mid_bps / start_bps) if start_bps > 0 and mid_bps > 0 else 0.0
+        if tail_offset not in {0, mid_offset}:
+            tail_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=tail_offset)
+    positive_samples = [sample for sample in (start_bps, mid_bps, tail_bps) if sample > 0]
+    min_bps = min(positive_samples) if positive_samples else 0.0
+    throttle_ratio = (min_bps / start_bps) if start_bps > 0 and min_bps > 0 else 0.0
     throttle_detected = bool(
         start_bps > 0
-        and mid_bps > 0
+        and min_bps > 0
         and throttle_ratio < CHZZK_DIRECT_RANGE_THROTTLE_RATIO
     )
     return {
         "start_bps": start_bps,
         "mid_bps": mid_bps,
+        "tail_bps": tail_bps,
         "mid_offset": mid_offset,
+        "tail_offset": tail_offset,
+        "min_bps": min_bps,
         "throttle_ratio": throttle_ratio,
         "throttle_detected": throttle_detected,
     }
@@ -5427,10 +5497,21 @@ def chzzk_hls_route_profile(url, headers):
         profile["segment_count"] = len(segment_urls)
         profile["fmp4"] = bool(playlist_meta.get("init_map_url"))
         profile["encrypted"] = hls_playlist_parallel_encryption(playlist_text) == "aes-128"
-        profile["probe_bps"] = chzzk_probe_hls_speed(url, headers)
+        profile["probe_bps"] = chzzk_probe_hls_speed(url, headers, segment_urls=segment_urls)
     except (OSError, urllib.error.URLError, RuntimeError, ValueError):
         pass
     return profile
+
+
+def chzzk_direct_profile_effective_bps(direct_profile):
+    positive_samples = [
+        float(direct_profile.get(key) or 0)
+        for key in ("min_bps", "tail_bps", "mid_bps", "start_bps")
+        if float(direct_profile.get(key) or 0) > 0
+    ]
+    if not positive_samples:
+        return 0.0
+    return min(positive_samples)
 
 
 def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, total, duration):
@@ -5446,14 +5527,15 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
         reasons.append("direct-range-stable")
 
     start_bps = float(direct_profile.get("start_bps") or 0)
+    direct_effective_bps = chzzk_direct_profile_effective_bps(direct_profile) or start_bps
     hls_bps = float(hls_profile.get("probe_bps") or 0)
-    if hls_bps > 0 and start_bps > 0:
-        if hls_bps > start_bps * 1.15:
+    if hls_bps > 0 and direct_effective_bps > 0:
+        if hls_bps > direct_effective_bps * 1.15:
             hls_score += 3.0
             reasons.append(f"hls-probe-faster({display_size(hls_bps)}/s)")
-        elif start_bps > hls_bps * 1.15:
+        elif direct_effective_bps > hls_bps * 1.15:
             direct_score += 3.0
-            reasons.append(f"direct-probe-faster({display_size(start_bps)}/s)")
+            reasons.append(f"direct-probe-faster({display_size(direct_effective_bps)}/s)")
 
     total = safe_int(total)
     duration = safe_int(duration)
@@ -5462,9 +5544,25 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
         reasons.append("large-long-vod")
 
     segment_count = safe_int(hls_profile.get("segment_count"))
-    if segment_count >= 300:
+    if segment_count >= CHZZK_HLS_SEGMENTED_VOD_SEGMENTS:
         hls_score += 1.0
         reasons.append(f"hls-many-segments({segment_count})")
+    if (
+        total >= CHZZK_HLS_SEGMENTED_VOD_BYTES
+        and duration >= CHZZK_HLS_SEGMENTED_VOD_SECONDS
+        and segment_count >= CHZZK_HLS_SEGMENTED_VOD_SEGMENTS
+        and not hls_profile.get("encrypted")
+    ):
+        hls_score += 5.0
+        reasons.append("hls-segmented-long-vod")
+    if (
+        segment_count >= CHZZK_HLS_SEGMENTED_VOD_SEGMENTS
+        and hls_bps > 0
+        and direct_effective_bps > 0
+        and hls_bps >= direct_effective_bps * CHZZK_HLS_COMPARABLE_DIRECT_RATIO
+    ):
+        hls_score += 5.0
+        reasons.append(f"hls-comparable-probe({display_size(hls_bps)}/s)")
 
     workers = direct_media_worker_count(direct_candidate)
     part_size = direct_media_part_size_for_candidate(total, direct_candidate, workers)
@@ -5472,10 +5570,6 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
     if range_count <= workers * 2 and direct_profile.get("throttle_detected"):
         hls_score += 1.0
         reasons.append(f"direct-few-ranges({range_count})")
-
-    if hls_profile.get("encrypted"):
-        hls_score += 0.5
-        reasons.append("hls-encrypted")
 
     return direct_score, hls_score, reasons
 
@@ -5613,7 +5707,7 @@ def chzzk_choose_download_route(direct_candidate, hls_candidate, total=0, durati
         route = "direct"
         chosen = direct_candidate
     else:
-        start_bps = float(direct_profile.get("start_bps") or 0)
+        start_bps = chzzk_direct_profile_effective_bps(direct_profile) or float(direct_profile.get("start_bps") or 0)
         hls_bps = float(hls_profile.get("probe_bps") or 0)
         if hls_bps > start_bps:
             route = "hls"
@@ -5631,6 +5725,86 @@ def chzzk_choose_download_route(direct_candidate, hls_candidate, total=0, durati
         ),
     )
     return route, chosen
+
+
+def emit_chzzk_hls_route_log(on_event):
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+            f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+        ),
+    )
+
+
+def chzzk_direct_slow_fallback_enabled(candidate, total):
+    candidate = dict(candidate or {})
+    source = candidate.get("source") or candidate.get("webpage_url") or candidate.get("source_url") or ""
+    if not candidate_looks_chzzk(candidate, source):
+        return False
+    if clip_range_from_candidate(candidate):
+        return False
+    return safe_int(total) >= CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES
+
+
+def chzzk_direct_speed_is_slow(downloaded, elapsed, total):
+    total = safe_int(total)
+    downloaded = safe_int(downloaded)
+    try:
+        elapsed = float(elapsed or 0)
+    except (TypeError, ValueError):
+        elapsed = 0.0
+    if total < CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES:
+        return False
+    if elapsed < CHZZK_DIRECT_SLOW_FALLBACK_SECONDS:
+        return False
+    if downloaded <= 0:
+        return True
+    return downloaded / elapsed < CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC
+
+
+def chzzk_direct_slow_check(total):
+    def slow_check(downloaded, elapsed):
+        if chzzk_direct_speed_is_slow(downloaded, elapsed, total):
+            raise ChzzkDirectSlowFallback("CHZZK direct download is slow enough to try HLS")
+
+    return slow_check
+
+
+def chzzk_download_direct_with_hls_fallback(
+    direct_url,
+    direct_candidate,
+    output_dir,
+    page_url,
+    cookie_source,
+    hls_candidate=None,
+    on_event=None,
+):
+    direct_candidate = dict(direct_candidate or {})
+    direct_url = str(direct_url or direct_candidate.get("url") or "").strip()
+    headers = direct_media_request_headers(direct_candidate)
+    total = resolve_direct_media_total(direct_url, headers, direct_candidate)
+    slow_check = None
+    if chzzk_direct_slow_fallback_enabled(direct_candidate, total):
+        slow_check = chzzk_direct_slow_check(total)
+    try:
+        return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event, slow_check=slow_check)
+    except ChzzkDirectSlowFallback:
+        hls_candidate = dict(hls_candidate or {})
+        if not str(hls_candidate.get("url") or "").strip():
+            hls_candidate = chzzk_alternative_hls_candidate(direct_candidate, page_url, cookie_source, on_event=on_event) or {}
+        hls_candidate = candidate_with_request_cookies(hls_candidate, cookie_source)
+        hls_url = str(hls_candidate.get("url") or "").strip()
+        if not hls_url:
+            raise RuntimeError("CHZZK direct download was slow, but HLS fallback URL could not be found.")
+        emit_event(
+            on_event,
+            "log",
+            message="CHZZK direct download is slow; switching to HLS",
+        )
+        emit_chzzk_hls_route_log(on_event)
+        return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
 
 
 def refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=None):
@@ -5693,14 +5867,7 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
     if clip_range_from_candidate(candidate):
         if is_chzzk_direct_mp4_candidate(candidate, page_url):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
-        emit_event(
-            on_event,
-            "log",
-            message=(
-                f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-                f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-            ),
-        )
+        emit_chzzk_hls_route_log(on_event)
         return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
 
     headers = direct_media_request_headers(candidate)
@@ -5728,42 +5895,44 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
             )
             if route == "hls":
                 hls_url = str(chosen.get("url") or "").strip() or target_url
-                emit_event(
-                    on_event,
-                    "log",
-                    message=(
-                        f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-                        f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-                    ),
-                )
+                emit_chzzk_hls_route_log(on_event)
                 return download_hls_parallel(hls_url, chosen, output_dir, on_event=on_event)
             direct_url = str(chosen.get("url") or "").strip() or target_url
-            return download_direct_media(direct_url, chosen, output_dir, on_event=on_event)
+            return chzzk_download_direct_with_hls_fallback(
+                direct_url,
+                chosen,
+                output_dir,
+                page_url,
+                cookie_source,
+                hls_candidate=hls_candidate,
+                on_event=on_event,
+            )
         if direct_candidate:
             direct_url = str(direct_candidate.get("url") or "").strip() or target_url
-            return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event)
+            return chzzk_download_direct_with_hls_fallback(
+                direct_url,
+                direct_candidate,
+                output_dir,
+                page_url,
+                cookie_source,
+                hls_candidate=hls_candidate,
+                on_event=on_event,
+            )
         if hls_candidate:
             hls_url = str(hls_candidate.get("url") or "").strip() or target_url
-            emit_event(
-                on_event,
-                "log",
-                message=(
-                    f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-                    f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-                ),
-            )
+            emit_chzzk_hls_route_log(on_event)
             return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
 
     if is_chzzk_direct_mp4_candidate(candidate, page_url):
-        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
-    emit_event(
-        on_event,
-        "log",
-        message=(
-            f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-            f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-        ),
-    )
+        return chzzk_download_direct_with_hls_fallback(
+            target_url,
+            candidate,
+            output_dir,
+            page_url,
+            cookie_source,
+            on_event=on_event,
+        )
+    emit_chzzk_hls_route_log(on_event)
     return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
 
 
@@ -6193,7 +6362,11 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
         if abort_event.is_set():
             raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
         if slow_check:
-            slow_check(current, now - started_at)
+            try:
+                slow_check(current, now - started_at)
+            except ChzzkDirectSlowFallback:
+                abort_event.set()
+                raise
         with progress_lock:
             if now - last_progress["value"] >= 0.25 or current >= total:
                 emit_direct_download_progress(
@@ -6397,8 +6570,10 @@ def download_direct_media(url, candidate, output_dir, on_event=None, slow_check=
 
 
 class _PersistentHttpResponse:
-    def __init__(self, response):
+    def __init__(self, response, connection_key=None):
         self._response = response
+        self._connection_key = connection_key
+        self._drain_on_close = True
         self.status = response.status
         self.headers = {key: value for key, value in response.getheaders()}
 
@@ -6415,7 +6590,22 @@ class _PersistentHttpResponse:
             return self._response.read()
         return self._response.read(size)
 
+    def abort(self):
+        self._drain_on_close = False
+        if self._connection_key is not None:
+            _reset_parallel_http_connection(self._connection_key)
+        try:
+            self._response.close()
+        except Exception:
+            pass
+
     def close(self):
+        if not self._drain_on_close:
+            try:
+                self._response.close()
+            except Exception:
+                pass
+            return
         try:
             while self._response.read(64 * 1024):
                 pass
@@ -6489,7 +6679,7 @@ def parallel_http_urlopen(request, timeout=30):
                     response.getheaders(),
                     body,
                 )
-            return _PersistentHttpResponse(response)
+            return _PersistentHttpResponse(response, connection_key=connection_key)
         except Exception as exc:
             last_exc = exc
             _reset_parallel_http_connection(connection_key)
