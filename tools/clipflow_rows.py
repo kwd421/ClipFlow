@@ -316,14 +316,19 @@ class DownloadRowWidget(QFrame):
 
         title_line = QHBoxLayout()
         title_line.setContentsMargins(0, 0, 0, 0)
-        title_line.setSpacing(4)
+        title_line.setSpacing(6)
+        title_line.setAlignment(Qt.AlignVCenter)
         self.playlist_toggle_button = LucideIconButton("chevron-down", size=22, icon_size=14, pointer_cursor=False)
         self.playlist_toggle_button.setToolTip("펼치기/접기")
         self.playlist_toggle_button.clicked.connect(self._toggle_playlist)
         title_line.addWidget(self.playlist_toggle_button, 0, Qt.AlignVCenter)
         self.playlist_pill = QLabel("재생목록")
         self.playlist_pill.setObjectName("PlaylistPill")
+        self.playlist_pill.setAlignment(Qt.AlignCenter)
+        self.playlist_pill.setFixedHeight(18)
+        self.playlist_pill.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.playlist_pill.hide()
+        # Optical nudge: small badge text sits a hair high next to 12px title glyphs.
         title_line.addWidget(self.playlist_pill, 0, Qt.AlignVCenter)
         self.title_label = QLabel()
         self.title_label.setObjectName("RowTitle")
@@ -334,7 +339,7 @@ class DownloadRowWidget(QFrame):
         self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.title_label.setTextInteractionFlags(Qt.NoTextInteraction)
         theme.apply_tracking(self.title_label, 0.1)
-        title_line.addWidget(self.title_label, 1)
+        title_line.addWidget(self.title_label, 1, Qt.AlignVCenter)
         self.title_action_spacer = QWidget()
         self.title_action_spacer.setFixedWidth(ACTION_STRIP_WIDTH + ROW_INSET)
         self.title_action_spacer.hide()
@@ -565,9 +570,11 @@ class DownloadRowWidget(QFrame):
 
     def refresh(self):
         candidate = self.owner.selected_candidate_for_row_ref(self.row) or self.row["candidate"]
-        self._title_source_text = row_display_title(candidate)
+        if self.row.get("kind") == "playlist":
+            self._title_source_text = self._playlist_title_text(candidate)
+        else:
+            self._title_source_text = row_display_title(candidate)
         self._refresh_title_display()
-        self.title_label.setToolTip("")
         self._refresh_title_alignment()
         self._info_source_text = row_info_text(candidate)
         self._refresh_info_display()
@@ -586,28 +593,38 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_actions(self):
         status = self.row.get("status")
-        active = status in ACTIVE_STATUSES
-        pauseable = status in {DOWNLOAD_STATUS, WAITING_STATUS}
-        paused = status == PAUSED_STATUS
+        is_playlist = self.row.get("kind") == "playlist"
+        analyzing = status == ANALYZING_STATUS or bool(self.row.get("analysis_loading"))
+        paused = status == PAUSED_STATUS or bool(
+            self.row.get("_playlist_analysis_resume") and self.row.get("_playlist_auto_download_paused")
+        )
+        # In-progress work blocks delete/remove — same rule for playlist and single.
+        # Paused rows are not "busy" even if analysis_loading is still stamped.
+        busy = (not paused) and (status in ACTIVE_STATUSES or analyzing)
+        # Playlist rows can pause while still analyzing (stops analysis + auto-download).
+        pauseable = status in {DOWNLOAD_STATUS, WAITING_STATUS} or (is_playlist and analyzing and not paused)
         completed = self.row.get("status") == COMPLETED_STATUS
         has_deletable_output = self.owner.row_has_deletable_output(self.row)
         has_output = has_deletable_output
-        remove_paused = paused and not has_deletable_output
+        # Single: X when idle, or paused without files.
+        # Playlist: same, but X stays available while paused (keep-completed vs wipe).
+        remove_paused = paused and not has_deletable_output and not is_playlist
+        remove_visible = (not busy and not paused) or remove_paused or (is_playlist and paused and not busy)
         # Finder + file delete only make sense once a file exists (completed).
         # Paused analysis rows without files should expose list removal instead.
         self.pause_download_button.setVisible(pauseable)
         self.resume_download_button.setVisible(paused)
-        self.play_file_button.setVisible(completed and has_output and self.row.get("kind") != "playlist")
+        self.play_file_button.setVisible(completed and has_output and not is_playlist)
         self.open_folder_button.setVisible(completed)
         self.delete_file_button.setVisible(completed or (paused and has_deletable_output))
         self.more_button.setVisible(completed)
-        self.remove_button.setVisible((not active and not paused) or remove_paused)
+        self.remove_button.setVisible(remove_visible)
         self.pause_download_button.setEnabled(pauseable)
         self.resume_download_button.setEnabled(paused)
-        self.play_file_button.setEnabled(completed and has_output and not active)
-        self.open_folder_button.setEnabled(completed and not active)
-        self.remove_button.setEnabled(not pauseable and ((not active and not paused) or remove_paused))
-        self.delete_file_button.setEnabled((completed or paused) and has_deletable_output and not active)
+        self.play_file_button.setEnabled(completed and has_output and not busy)
+        self.open_folder_button.setEnabled(completed and not busy)
+        self.remove_button.setEnabled(remove_visible)
+        self.delete_file_button.setEnabled((completed or paused) and has_deletable_output and not busy)
         self.more_button.setEnabled(completed)
 
     def _playlist_detail_text(self):
@@ -621,6 +638,33 @@ class DownloadRowWidget(QFrame):
             lines.append(f"... +{len(entries) - 20}")
         return "\n".join(lines)
 
+    def _playlist_title_text(self, candidate=None):
+        candidate = candidate if isinstance(candidate, dict) else (self.row.get("candidate") or {})
+        try:
+            from tools.clipflow_playlist import clean_playlist_title, _looks_like_url_title
+        except ImportError:
+            from clipflow_playlist import clean_playlist_title, _looks_like_url_title
+
+        source = (
+            self.row.get("source_url")
+            or self.row.get("analysis_source_url")
+            or candidate.get("webpage_url")
+            or candidate.get("source")
+            or ""
+        )
+        # Prefer explicit playlist name fields before generic title/url placeholders.
+        for key in ("playlist_title", "fulltitle", "display_title", "title"):
+            value = str(candidate.get(key) or "").strip()
+            if not value or _looks_like_url_title(value):
+                continue
+            if value.casefold() in {"재생목록", "playlist", "media", "video"}:
+                continue
+            return clean_playlist_title(value, source)
+        row_title = str(self.row.get("playlist_title") or self.row.get("title") or "").strip()
+        if row_title and not _looks_like_url_title(row_title):
+            return clean_playlist_title(row_title, source)
+        return clean_playlist_title("", source)
+
     def _refresh_playlist_detail(self):
         is_playlist = self.row.get("kind") == "playlist"
         self.playlist_toggle_button.hide()
@@ -628,6 +672,8 @@ class DownloadRowWidget(QFrame):
             candidate = self.row.get("candidate") or {}
             count = engine.safe_int(candidate.get("item_count") or candidate.get("playlist_count"))
             self.playlist_pill.setText(f"재생목록 · {count}개" if count else "재생목록")
+            self.playlist_pill.setFixedHeight(18)
+            self.playlist_pill.setAlignment(Qt.AlignCenter)
         self.playlist_pill.setVisible(is_playlist)
         self.playlist_detail_label.hide()
         self.playlist_detail_label.setText("")
@@ -655,16 +701,19 @@ class DownloadRowWidget(QFrame):
         force_actions = bool(getattr(self, "_actions_menu_open", False))
         visual_hovered = bool(hovered or force_actions)
         self.setProperty("hovered", "true" if visual_hovered else "false")
-        active = self.row.get("status") in ACTIVE_STATUSES
+        is_playlist = self.row.get("kind") == "playlist"
         analyzing = self.row.get("status") == ANALYZING_STATUS or (
             bool(self.row.get("analysis_loading"))
             and self.row.get("status") not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}
         )
-        show_actions = visual_hovered and not analyzing
+        # Playlist keeps pause/X available during analysis; single-video analysis hides actions.
+        show_actions = visual_hovered and (is_playlist or not analyzing)
         self.actions_widget.setVisible(show_actions)
         action_width = ACTION_STRIP_WIDTH
+        # Always reserve action width for playlist so the title isn't clipped under the overlay.
+        reserve_actions = show_actions or is_playlist
         self.title_action_spacer.setFixedWidth(action_width + ROW_INSET)
-        self.title_action_spacer.setVisible(show_actions)
+        self.title_action_spacer.setVisible(reserve_actions)
         self.title_label.setContentsMargins(0, 0, 0, 0)
         self.item_widget.layout().activate()
         self._refresh_title_display()
@@ -677,8 +726,19 @@ class DownloadRowWidget(QFrame):
 
     def _refresh_title_display(self):
         source = str(getattr(self, "_title_source_text", "") or "")
+        if self.row.get("kind") == "playlist":
+            source = self._playlist_title_text()
+            self._title_source_text = source
+            # Keep candidate in sync so later refreshes don't fall back to a URL.
+            candidate = self.row.get("candidate")
+            if isinstance(candidate, dict) and source:
+                candidate["title"] = source
+                candidate["display_title"] = source
+                candidate["playlist_title"] = source
+                self.row["playlist_title"] = source
         width = max(1, self.title_label.width())
         self.title_label.setText(format_title_label_text(source, self.title_label.font(), width))
+        self.title_label.setToolTip(source if source else "")
 
     def _refresh_info_display(self):
         self.info_label.setText(str(getattr(self, "_info_source_text", "") or ""))

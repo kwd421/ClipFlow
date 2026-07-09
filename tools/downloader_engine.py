@@ -28,6 +28,13 @@ USER_AGENT = (
 ACCEPT_LANGUAGE = "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
 CHZZK_CLIP_RE = re.compile(r"https?://chzzk\.naver\.com/clips/([A-Za-z0-9_-]+)")
 CHZZK_VIDEO_RE = re.compile(r"https?://chzzk\.naver\.com/video/(\d+)")
+SOOP_PLAYER_RE = re.compile(
+    r"https?://(?:[\w-]+\.)?(?:sooplive|afreecatv)\.com/player/(\d+)",
+    re.IGNORECASE,
+)
+SOOP_PART_TITLE_RE = re.compile(r"\s*\(part\s+\d+\)\s*$", re.IGNORECASE)
+CIME_VOD_RE = re.compile(r"https?://(?:www\.)?ci\.me/@([^/]+)/vods/(\d+)", re.IGNORECASE)
+CIME_CLIP_RE = re.compile(r"https?://(?:www\.)?ci\.me/clips/(\d+)", re.IGNORECASE)
 GENERIC_TITLE_RE = re.compile(r"^(?:video(?:\s+\d+)?|post by .+)$", re.IGNORECASE)
 TRAILING_DOMAIN_TITLE_RE = re.compile(
     r"\s+(?:-|–|—|\|)\s+(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\s*$",
@@ -958,24 +965,116 @@ def candidate_with_clip_range_metadata(candidate):
     return prepared
 
 
-def filename_stem_for_candidate(candidate):
-    title = clean_video_title(candidate.get("display_title") or candidate.get("title") or "video")
-    title = title_with_clip_range_suffix(title, (candidate or {}).get("clip_range"))
+_WINDOWS_RESERVED_NAMES = re.compile(
+    r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$",
+    re.IGNORECASE,
+)
+
+
+def safe_filesystem_name(value, limit=120):
+    """Make a Windows-safe single path component (no separators, no reserved names)."""
+    text = compact_text(value, limit=max(8, int(limit or 120) + 20))
     try:
         from yt_dlp.utils import sanitize_filename
 
-        title = sanitize_filename(title, restricted=False, is_id=False)
+        text = sanitize_filename(text, restricted=False, is_id=False)
     except Exception:
-        title = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", title).strip()
-    title = compact_text(title.strip(" ."), limit=160)
-    return title or "video"
+        pass
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(text or ""))
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    # Windows rejects trailing dots/spaces even after sanitize_filename.
+    text = re.sub(r"[. ]+$", "", text)
+    if not text or _WINDOWS_RESERVED_NAMES.match(text):
+        text = f"_{text}" if text else "video"
+    if len(text) > limit:
+        text = text[:limit].rstrip(" .") or "video"
+    return text
+
+
+def windows_long_path(path):
+    """Expand 8.3 short path segments (FLEURD~1) to long form.
+
+    Short-path roots + non-ASCII folder names often raise WinError 3 on mkdir.
+    """
+    path = Path(str(path or "")).expanduser()
+    if os.name != "nt":
+        return path
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        GetLongPathNameW = ctypes.windll.kernel32.GetLongPathNameW
+        GetLongPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        GetLongPathNameW.restype = wintypes.DWORD
+    except Exception:
+        return path
+
+    try:
+        abs_path = Path(os.path.abspath(str(path)))
+    except Exception:
+        abs_path = path
+
+    parts = abs_path.parts
+    if not parts:
+        return abs_path
+
+    # Drive root like ('C:\\',) or UNC
+    current = Path(parts[0])
+    if len(parts[0]) == 2 and parts[0][1] == ":":
+        current = Path(parts[0] + os.sep)
+        index = 1
+    else:
+        index = 1
+
+    buf = ctypes.create_unicode_buffer(32768)
+    for offset, part in enumerate(parts[index:]):
+        candidate = current / part
+        if candidate.exists():
+            length = GetLongPathNameW(str(candidate), buf, 32768)
+            current = Path(buf.value) if length else candidate
+        else:
+            return current.joinpath(*parts[index + offset :])
+    return current
+
+
+def ensure_output_directory(path):
+    """Create output directory using a Windows-safe long path."""
+    target = windows_long_path(path)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Retry after normalizing existing parents only.
+        target = windows_long_path(target)
+        target.mkdir(parents=True, exist_ok=True)
+    try:
+        return windows_long_path(target)
+    except Exception:
+        return target
+
+
+def path_for_yt_dlp(path):
+    """yt-dlp/ffmpeg are happier with forward slashes on Windows."""
+    text = str(path or "")
+    if os.name == "nt":
+        return text.replace("\\", "/")
+    return text
+
+
+def filename_stem_for_candidate(candidate):
+    title = clean_video_title(candidate.get("display_title") or candidate.get("title") or "video")
+    title = title_with_clip_range_suffix(title, (candidate or {}).get("clip_range"))
+    # Keep stems shorter on Windows so playlist_dir + file stays under MAX_PATH.
+    return safe_filesystem_name(title, limit=120)
 
 
 def output_dir_for_candidate(candidate, output_dir):
-    output_path = Path(output_dir).expanduser()
+    output_path = windows_long_path(output_dir)
     if str((candidate or {}).get("media_type") or "").lower() != "playlist":
         return output_path
-    folder_name = filename_stem_for_candidate(candidate)
+    folder_name = safe_filesystem_name(
+        candidate.get("display_title") or candidate.get("title") or "Playlist",
+        limit=80,
+    )
     if output_path.name == folder_name:
         return output_path
     return output_path / folder_name
@@ -1044,11 +1143,15 @@ def partial_output_paths_for_target(output_path):
         part_path.with_suffix(part_path.suffix + ".media"),
         output_path.with_name(output_path.stem + ".trim.part" + output_path.suffix),
     ]
-    if part_path.name:
+    parent = part_path.parent
+    if part_path.name and parent.exists():
         prefix = part_path.name + "."
-        for sibling in part_path.parent.iterdir():
-            if sibling.is_file() and sibling.name.startswith(prefix):
-                paths.append(sibling)
+        try:
+            for sibling in parent.iterdir():
+                if sibling.is_file() and sibling.name.startswith(prefix):
+                    paths.append(sibling)
+        except OSError:
+            pass
     unique = []
     seen = set()
     for path in paths:
@@ -2399,6 +2502,914 @@ def analyze_chzzk_video(url, on_event=None, cookie_source="없음"):
     }
 
 
+def is_soop_page_url(url):
+    text = str(url or "")
+    if SOOP_PLAYER_RE.search(text):
+        return True
+    parsed = urllib.parse.urlparse(text)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if not (host.endswith("sooplive.com") or host.endswith("afreecatv.com")):
+        return False
+    return "/player/" in parsed.path.lower()
+
+
+def soop_player_ids_from_url(url):
+    """Return SOOP player/catch IDs from a player URL.
+
+    Catch collection URLs look like:
+    /player/190744841/catch?szSearchTnoList=190744841-188966553-...
+    """
+    text = str(url or "").strip()
+    parsed = urllib.parse.urlparse(text)
+    match = re.search(r"/player/(\d+)", parsed.path, flags=re.IGNORECASE)
+    primary = match.group(1) if match else ""
+    query = urllib.parse.parse_qs(parsed.query)
+    list_values = []
+    for key, values in query.items():
+        if key.lower() != "szsearchtnolist":
+            continue
+        for raw in values:
+            list_values.extend(part for part in re.split(r"[-,\s]+", str(raw or "")) if str(part).isdigit())
+    ordered = []
+    seen = set()
+    for item in list_values or ([primary] if primary else []):
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def soop_player_url(player_id):
+    return f"https://vod.sooplive.com/player/{player_id}"
+
+
+def is_cime_page_url(url):
+    text = str(url or "")
+    return bool(CIME_VOD_RE.search(text) or CIME_CLIP_RE.search(text))
+
+
+def find_cime_vod_id(url):
+    match = CIME_VOD_RE.search(str(url or ""))
+    return match.group(2) if match else ""
+
+
+def find_cime_creator(url):
+    match = CIME_VOD_RE.search(str(url or ""))
+    return match.group(1) if match else ""
+
+
+def find_cime_clip_id(url):
+    match = CIME_CLIP_RE.search(str(url or ""))
+    return match.group(1) if match else ""
+
+
+def soop_clean_title(title):
+    return SOOP_PART_TITLE_RE.sub("", clean_video_title(title) or "").strip()
+
+
+def soop_formats_by_height(formats):
+    by_height = {}
+    for fmt in formats or []:
+        height = safe_int(fmt.get("height"))
+        if height <= 0:
+            continue
+        url = str(fmt.get("url") or "").strip()
+        if not url:
+            continue
+        vcodec = str(fmt.get("vcodec") or "none").lower()
+        if vcodec == "none" and not is_hls_manifest_format(fmt):
+            continue
+        previous = by_height.get(height)
+        if previous is None or safe_int(fmt.get("tbr")) >= safe_int(previous.get("tbr")):
+            by_height[height] = fmt
+    return by_height
+
+
+def multipart_work_ranges(parts, clip_range=None):
+    """Map a global clip range onto multi-part VOD segments.
+
+    Returns a list of dicts with keys: index, url, part_duration, clip_range (local or None).
+    """
+    prepared = []
+    for index, part in enumerate(parts or []):
+        if not isinstance(part, dict):
+            continue
+        url = str(part.get("url") or "").strip()
+        if not url:
+            continue
+        prepared.append(
+            {
+                "index": index,
+                "url": url,
+                "part_duration": float(safe_int(part.get("duration")) or 0),
+                "format_id": str(part.get("format_id") or ""),
+                "height": safe_int(part.get("height")),
+            }
+        )
+    if not prepared:
+        return []
+
+    total = sum(item["part_duration"] for item in prepared)
+    if not isinstance(clip_range, dict):
+        return [
+            {
+                **item,
+                "clip_range": None,
+            }
+            for item in prepared
+        ]
+
+    start = float(clip_range.get("start") or 0)
+    end = clip_range.get("end")
+    end = float(end) if end is not None else float(total or 0)
+    if total and end > total:
+        end = float(total)
+    if end <= start:
+        return []
+
+    works = []
+    offset = 0.0
+    for item in prepared:
+        part_duration = float(item["part_duration"] or 0)
+        part_start = offset
+        part_end = offset + part_duration
+        offset = part_end
+        if part_duration <= 0:
+            continue
+        if end <= part_start or start >= part_end:
+            continue
+        local_start = max(0.0, start - part_start)
+        local_end = min(part_duration, end - part_start)
+        if local_end <= local_start:
+            continue
+        full_part = local_start <= 0.05 and local_end >= max(0.0, part_duration - 0.05)
+        works.append(
+            {
+                **item,
+                "clip_range": None if full_part else {"start": local_start, "end": local_end},
+            }
+        )
+    return works
+
+
+def parse_hls_master_variants(master_url, headers=None):
+    playlist_url = str(master_url or "")
+    playlist_text = fetch_hls_playlist_text(playlist_url, headers or {})
+    if "#EXT-X-STREAM-INF" not in playlist_text:
+        return [
+            {
+                "url": playlist_url,
+                "width": 0,
+                "height": 0,
+                "bandwidth": 0,
+                "fps": 0,
+            }
+        ], playlist_text
+
+    variants = []
+    lines = playlist_text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        resolution = re.search(r"RESOLUTION=(\d+)x(\d+)", line)
+        bandwidth = re.search(r"BANDWIDTH=(\d+)", line)
+        frame_rate = re.search(r"FRAME-RATE=([\d.]+)", line)
+        stream_url = ""
+        for next_line in lines[index + 1 :]:
+            next_line = next_line.strip()
+            if not next_line or next_line.startswith("#"):
+                continue
+            stream_url = next_line
+            break
+        if not stream_url:
+            continue
+        fps = 0.0
+        if frame_rate:
+            try:
+                fps = float(frame_rate.group(1))
+            except ValueError:
+                fps = 0.0
+        variants.append(
+            {
+                "url": urllib.parse.urljoin(playlist_url, stream_url),
+                "width": safe_int(resolution.group(1)) if resolution else 0,
+                "height": safe_int(resolution.group(2)) if resolution else 0,
+                "bandwidth": safe_int(bandwidth.group(1)) if bandwidth else 0,
+                "fps": fps,
+            }
+        )
+
+    best_by_height = {}
+    for variant in variants:
+        height = safe_int(variant.get("height"))
+        previous = best_by_height.get(height)
+        if previous is None or safe_int(variant.get("bandwidth")) >= safe_int(previous.get("bandwidth")):
+            best_by_height[height] = variant
+    ordered = sorted(best_by_height.values(), key=lambda item: safe_int(item.get("height")), reverse=True)
+    return ordered, playlist_text
+
+
+def _cime_unescape_json_string(raw):
+    text = str(raw or "")
+    try:
+        return json.loads(f'"{text}"')
+    except Exception:
+        return html_lib.unescape(text.replace("\\/", "/"))
+
+
+def parse_cime_vod_payload(html, vod_id):
+    vod_id = str(vod_id or "").strip()
+    if not vod_id:
+        return None
+    pattern = re.compile(
+        r'\{"id"\s*:\s*"'
+        + re.escape(vod_id)
+        + r'"\s*,\s*"title"\s*:\s*"(?P<title>(?:\\.|[^"\\])*)"(?P<body>.*?)"playbackUrl"\s*:\s*"(?P<url>[^"]+)"',
+        re.DOTALL,
+    )
+    match = pattern.search(str(html or ""))
+    if not match:
+        pattern = re.compile(
+            r'"id"\s*:\s*"'
+            + re.escape(vod_id)
+            + r'".{0,1200}?"playbackUrl"\s*:\s*"(?P<url>[^"]+)".{0,400}?"title"\s*:\s*"(?P<title>(?:\\.|[^"\\])*)"',
+            re.DOTALL,
+        )
+        match = pattern.search(str(html or ""))
+    if not match:
+        return None
+    title = _cime_unescape_json_string(match.group("title"))
+    return {
+        "id": vod_id,
+        "title": clean_video_title(title) or f"CI.ME VOD {vod_id}",
+        "playbackUrl": match.group("url"),
+    }
+
+
+def parse_cime_clip_payload(html, clip_id):
+    clip_id = str(clip_id or "").strip()
+    if not clip_id:
+        return None
+    # Prefer the target clip object; page HTML also embeds related clips with masters.
+    pattern = re.compile(
+        r'\{"id"\s*:\s*"'
+        + re.escape(clip_id)
+        + r'"\s*,\s*"title"\s*:\s*"(?P<title>(?:\\.|[^"\\])*)"(?P<body>.*?)"playback"\s*:\s*\{(?P<playback>[^}]*)\}(?P<tail>.{0,900})',
+        re.DOTALL,
+    )
+    match = pattern.search(str(html or ""))
+    if not match:
+        return None
+    playback_blob = match.group("playback")
+    tail = match.group("tail") or ""
+    mp4 = ""
+    hls = ""
+    url_match = re.search(r'"url"\s*:\s*"([^"]+)"', playback_blob)
+    file_match = re.search(r'"file"\s*:\s*"([^"]+)"', playback_blob)
+    if url_match:
+        mp4 = url_match.group(1)
+    if file_match:
+        hls = file_match.group(1)
+    duration_ms = 0
+    # Outer clip duration is after the playback object; ignore playback.duration:0.
+    for duration_match in re.finditer(r'"duration"\s*:\s*(\d+)', tail):
+        value = safe_int(duration_match.group(1))
+        if value > duration_ms:
+            duration_ms = value
+    duration = int(round(duration_ms / 1000.0)) if duration_ms >= 1000 else duration_ms
+    channel = ""
+    channel_match = re.search(r'"channel"\s*:\s*\{[^}]*?"name"\s*:\s*"((?:\\.|[^"\\])*)"', tail, re.DOTALL)
+    if channel_match:
+        channel = clean_video_title(_cime_unescape_json_string(channel_match.group(1)))
+    image = ""
+    image_match = re.search(r'"imageUrl"\s*:\s*"([^"]+)"', tail)
+    if image_match:
+        image = image_match.group(1)
+    title = clean_video_title(_cime_unescape_json_string(match.group("title"))) or f"CI.ME clip {clip_id}"
+    return {
+        "id": clip_id,
+        "title": title,
+        "channel": channel,
+        "duration": duration,
+        "mp4_url": mp4,
+        "hls_url": hls,
+        "imageUrl": image,
+    }
+
+
+def candidate_looks_soop(candidate, page_url=""):
+    candidate = candidate or {}
+    if str(candidate.get("format_id") or "").startswith("soop-"):
+        return True
+    if candidate.get("multipart_parts"):
+        return True
+    return is_soop_page_url(page_url or candidate.get("source") or "")
+
+
+def candidate_looks_cime(candidate, page_url=""):
+    candidate = candidate or {}
+    if str(candidate.get("format_id") or "").startswith("cime-"):
+        return True
+    return is_cime_page_url(page_url or candidate.get("source") or "")
+
+
+def analyze_soop_catch_playlist(
+    player_ids,
+    source_url,
+    cookie_source="없음",
+    ydl_factory=None,
+    on_event=None,
+    proxy_url=None,
+):
+    """Analyze a SOOP catch collection as independent catch clips (playlist UI)."""
+    player_ids = [str(item) for item in (player_ids or []) if str(item).isdigit()]
+    if len(player_ids) <= 1:
+        return None
+    parent_id = f"soop-catch-{player_ids[0]}"
+    playlist_title = f"SOOP 캐치 ({len(player_ids)})"
+    emit_event(
+        on_event,
+        "playlist_parent",
+        parent_id=parent_id,
+        title=playlist_title,
+        count=len(player_ids),
+        source_url=source_url,
+        url=source_url,
+    )
+    candidates = []
+    warnings = []
+    for index, player_id in enumerate(player_ids, start=1):
+        entry_url = soop_player_url(player_id)
+        emit_event(
+            on_event,
+            "playlist_entry_loading",
+            parent_id=parent_id,
+            index=index,
+            title=f"캐치 {player_id}",
+            source_url=entry_url,
+            url=entry_url,
+        )
+        try:
+            child = analyze_soop(
+                entry_url,
+                on_event=on_event,
+                cookie_source=cookie_source,
+                ydl_factory=ydl_factory,
+                proxy_url=proxy_url,
+                _force_single=True,
+            )
+            child_candidates = child.get("candidates") or []
+            candidates.extend(child_candidates)
+            entry_title = child.get("title") or f"캐치 {player_id}"
+            emit_event(
+                on_event,
+                "playlist_entry",
+                parent_id=parent_id,
+                index=index,
+                title=entry_title,
+                analysis=child,
+                candidates=child_candidates,
+                candidate=child_candidates[0] if child_candidates else {},
+                source_url=entry_url,
+                url=entry_url,
+            )
+        except Exception as exc:
+            message = strip_ansi(str(exc))
+            warnings.append(f"{player_id}: {message}")
+            emit_event(
+                on_event,
+                "playlist_failed_entry",
+                parent_id=parent_id,
+                index=index,
+                title=f"캐치 {player_id}",
+                source_url=entry_url,
+                url=entry_url,
+                message=message,
+            )
+    emit_event(on_event, "playlist_complete", parent_id=parent_id, count=len(player_ids), source_url=source_url, url=source_url)
+    if not candidates and warnings:
+        raise RuntimeError(warnings[0])
+    if not candidates:
+        raise RuntimeError("SOOP 캐치 목록에서 재생 가능한 항목을 찾지 못했습니다.")
+    return {
+        "url": source_url,
+        "webpage_url": source_url,
+        "title": playlist_title,
+        "is_playlist": True,
+        "playlist_title": playlist_title,
+        "playlist_count": len(player_ids),
+        "candidates": sort_candidates(enrich_missing_sizes(candidates)),
+        "warnings": warnings,
+    }
+
+
+def analyze_soop(
+    url,
+    on_event=None,
+    cookie_source="없음",
+    ydl_factory=None,
+    proxy_url=None,
+    _force_single=False,
+):
+    if not is_soop_page_url(url):
+        return None
+
+    player_ids = soop_player_ids_from_url(url)
+    if not _force_single and len(player_ids) > 1:
+        emit_event(on_event, "status", message=f"SOOP 캐치 목록 분석 중 ({len(player_ids)})")
+        if ydl_factory is None:
+            ydl_factory = youtube_dl_factory()
+        return analyze_soop_catch_playlist(
+            player_ids,
+            str(url).strip(),
+            cookie_source=cookie_source,
+            ydl_factory=ydl_factory,
+            on_event=on_event,
+            proxy_url=proxy_url,
+        )
+
+    # yt-dlp only accepts plain /player/<id> (no /catch path or catch query).
+    player_id = player_ids[0] if player_ids else ""
+    analysis_url = soop_player_url(player_id) if player_id else str(url).strip()
+    emit_event(on_event, "status", message="SOOP VOD 분석 중")
+    if ydl_factory is None:
+        ydl_factory = youtube_dl_factory()
+
+    def extract_with(source):
+        options = build_ydl_options(
+            cookie_source=source,
+            on_event=on_event,
+            quiet=True,
+            proxy_url=proxy_url,
+            allow_playlist=True,
+        )
+        options.update({"simulate": True, "skip_download": True, "check_formats": False})
+        with ydl_factory(options) as ydl:
+            return ydl.extract_info(analysis_url, download=False)
+
+    try:
+        info = extract_with(cookie_source)
+    except Exception as exc:
+        if cookie_spec(cookie_source) and browser_cookie_error(exc):
+            emit_event(on_event, "log", message="SOOP 쿠키 읽기 실패, 쿠키 없이 재시도")
+            info = extract_with("없음")
+        else:
+            raise
+
+    entries = [entry for entry in iter_video_infos(info) if isinstance(entry, dict)]
+    if not entries:
+        raise RuntimeError("SOOP VOD에서 재생 가능한 파트를 찾지 못했습니다.")
+
+    base_title = soop_clean_title(info.get("title") or entries[0].get("title") or "SOOP VOD") or "SOOP VOD"
+    uploader = clean_video_title(info.get("uploader") or entries[0].get("uploader") or "")
+    display_title = f"{uploader} - {base_title}" if uploader else base_title
+    source_url = analysis_url
+    thumbnail = resolve_analysis_thumbnail(source_url, info) or thumbnail_from_info(info) or thumbnail_from_info(entries[0])
+
+    parts_by_height = {}
+    for entry in entries:
+        duration = safe_int(entry.get("duration"))
+        by_height = soop_formats_by_height(entry.get("formats") or [])
+        if not by_height and entry.get("url"):
+            height = safe_int(entry.get("height")) or 0
+            by_height = {
+                height: {
+                    "url": entry.get("url"),
+                    "format_id": str(entry.get("format_id") or "best"),
+                    "height": height,
+                    "tbr": safe_int(entry.get("tbr")),
+                }
+            }
+        for height, fmt in by_height.items():
+            parts_by_height.setdefault(height, []).append(
+                {
+                    "url": str(fmt.get("url") or ""),
+                    "duration": duration,
+                    "format_id": str(fmt.get("format_id") or f"hls-{height}"),
+                    "height": height,
+                    "tbr": safe_int(fmt.get("tbr")),
+                }
+            )
+
+    if not parts_by_height:
+        raise RuntimeError("SOOP VOD에서 다운로드 가능한 화질을 찾지 못했습니다.")
+
+    total_duration = sum(safe_int(entry.get("duration")) for entry in entries)
+    candidates = []
+    for height in sorted(parts_by_height.keys(), reverse=True):
+        parts = [part for part in parts_by_height[height] if part.get("url")]
+        if not parts:
+            continue
+        # Prefer complete multi-part ladders; still accept partial if only one quality set exists.
+        if len(entries) > 1 and len(parts) != len(entries):
+            continue
+        first = parts[0]
+        tbr = safe_int(first.get("tbr"))
+        size = int(tbr * 1000 * total_duration / 8) if tbr and total_duration else 0
+        part_note = f" · {len(parts)} parts" if len(parts) > 1 else ""
+        candidates.append(
+            {
+                "id": f"soop-{height or len(candidates) + 1}",
+                "format_id": f"soop-{height or len(candidates) + 1}",
+                "format_selector": "best",
+                "url": first["url"],
+                "title": display_title,
+                "display_title": display_title,
+                "thumbnail": thumbnail,
+                "duration": total_duration,
+                "ext": "mp4",
+                "output_ext": "mp4",
+                "resolution": f"{height}p" if height else "unknown",
+                "height": height,
+                "fps": 0,
+                "tbr": tbr,
+                "vcodec": "unknown",
+                "acodec": "unknown",
+                "filesize": 0,
+                "filesize_approx": size,
+                "sort_bytes": size,
+                "size_source": "bitrate" if size else "unknown",
+                "source": source_url,
+                "is_manifest": True,
+                "protocol": "m3u8_native",
+                "media_type": "video",
+                "note": f"SOOP HLS{part_note}",
+                "multipart_parts": parts,
+            }
+        )
+
+    if not candidates:
+        raise RuntimeError("SOOP VOD에서 다운로드 가능한 화질을 찾지 못했습니다.")
+
+    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    return {
+        "url": url,
+        "webpage_url": source_url,
+        "title": display_title,
+        "candidates": candidates,
+        "warnings": [],
+        "is_playlist": False,
+        "playlist_count": len(entries),
+    }
+
+
+def _cime_candidates_from_hls(master_url, source_url, title, thumbnail, duration, headers, note="CI.ME HLS"):
+    variants, _master_text = parse_hls_master_variants(master_url, headers=headers)
+    if not variants:
+        return []
+    if not duration:
+        probe_url = variants[-1].get("url") or master_url
+        try:
+            _resolved, media_text = resolve_hls_media_playlist(probe_url, headers)
+            duration = duration_from_hls_playlist_text(media_text)
+        except Exception:
+            duration = 0
+    candidates = []
+    for index, variant in enumerate(variants, start=1):
+        height = safe_int(variant.get("height"))
+        bandwidth = safe_int(variant.get("bandwidth"))
+        size = int(bandwidth * duration / 8) if bandwidth and duration else 0
+        fps = variant.get("fps") or 0
+        try:
+            fps_value = int(round(float(fps))) if fps else 0
+        except (TypeError, ValueError):
+            fps_value = 0
+        width = safe_int(variant.get("width"))
+        candidates.append(
+            {
+                "id": f"cime-{height or index}",
+                "format_id": f"cime-{height or index}",
+                "format_selector": "best",
+                "url": variant.get("url") or master_url,
+                "title": title,
+                "display_title": title,
+                "thumbnail": thumbnail,
+                "duration": duration,
+                "ext": "mp4",
+                "output_ext": "mp4",
+                "resolution": f"{width}x{height}" if width and height else (f"{height}p" if height else "unknown"),
+                "height": height,
+                "fps": fps_value,
+                "tbr": max(1, bandwidth // 1000) if bandwidth else 0,
+                "vcodec": "unknown",
+                "acodec": "unknown",
+                "filesize": 0,
+                "filesize_approx": size,
+                "sort_bytes": size,
+                "size_source": "bitrate" if size else "unknown",
+                "source": source_url,
+                "is_manifest": True,
+                "protocol": "m3u8",
+                "media_type": "video",
+                "note": note,
+            }
+        )
+    return candidates
+
+
+def analyze_cime_clip(url, on_event=None, cookie_source="없음"):
+    clip_id = find_cime_clip_id(url)
+    if not clip_id:
+        return None
+    emit_event(on_event, "status", message=f"CI.ME 클립 분석 중: {clip_id}")
+    source_url = f"https://ci.me/clips/{clip_id}"
+    html = fetch_dom_html_with_urllib(source_url, timeout=25)
+    if not html:
+        raise RuntimeError("CI.ME 클립 페이지 HTML을 가져오지 못했습니다.")
+    payload = parse_cime_clip_payload(html, clip_id)
+    if not payload:
+        raise RuntimeError("CI.ME 클립 정보를 찾지 못했습니다.")
+    title = payload.get("title") or f"CI.ME clip {clip_id}"
+    channel = payload.get("channel") or ""
+    if channel and not title.lower().startswith(str(channel).lower()):
+        title = f"{channel} - {title}"
+    thumbnail = payload.get("imageUrl") or ""
+    duration = safe_int(payload.get("duration"))
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": ACCEPT_LANGUAGE,
+        "Referer": source_url,
+        "Origin": "https://ci.me",
+    }
+    candidates = []
+    mp4_url = str(payload.get("mp4_url") or "").strip()
+    if mp4_url:
+        size = 0
+        try:
+            size = http_content_length(mp4_url, headers=headers) or 0
+        except Exception:
+            size = 0
+        candidates.append(
+            {
+                "id": "cime-mp4",
+                "format_id": "cime-mp4",
+                "format_selector": "best",
+                "url": mp4_url,
+                "title": title,
+                "display_title": title,
+                "thumbnail": thumbnail,
+                "duration": duration,
+                "ext": "mp4",
+                "output_ext": "mp4",
+                "resolution": "unknown",
+                "height": 1080,
+                "fps": 0,
+                "tbr": 0,
+                "vcodec": "unknown",
+                "acodec": "unknown",
+                "filesize": size,
+                "filesize_approx": 0 if size else size,
+                "sort_bytes": size or 1,
+                "size_source": "http" if size else "unknown",
+                "source": source_url,
+                "is_manifest": False,
+                "protocol": "https",
+                "media_type": "video",
+                "note": "CI.ME clip MP4",
+            }
+        )
+    # Prefer the rendered clip MP4. The page also embeds source-VOD HLS masters
+    # for related clips; using those produces the multi-entry / wrong-download bug.
+    hls_url = str(payload.get("hls_url") or "").strip()
+    if hls_url and not candidates:
+        candidates.extend(
+            _cime_candidates_from_hls(
+                hls_url,
+                source_url,
+                title,
+                thumbnail,
+                duration,
+                headers,
+                note="CI.ME clip HLS",
+            )
+        )
+    if not candidates:
+        raise RuntimeError("CI.ME 클립 재생 URL을 찾지 못했습니다.")
+    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    return {
+        "url": url,
+        "webpage_url": source_url,
+        "title": title,
+        "candidates": candidates,
+        "warnings": [],
+        "is_playlist": False,
+    }
+
+
+def analyze_cime(url, on_event=None, cookie_source="없음"):
+    if not is_cime_page_url(url):
+        return None
+
+    clip = analyze_cime_clip(url, on_event=on_event, cookie_source=cookie_source)
+    if clip:
+        return clip
+
+    vod_id = find_cime_vod_id(url)
+    creator = find_cime_creator(url)
+    emit_event(on_event, "status", message=f"CI.ME VOD 분석 중: {vod_id}")
+    source_url = f"https://ci.me/@{creator}/vods/{vod_id}" if creator and vod_id else str(url).strip()
+
+    html = fetch_dom_html_with_urllib(source_url, timeout=25)
+    if not html:
+        raise RuntimeError("CI.ME 페이지 HTML을 가져오지 못했습니다.")
+
+    payload = parse_cime_vod_payload(html, vod_id)
+    if not payload or not payload.get("playbackUrl"):
+        raise RuntimeError("CI.ME VOD playbackUrl을 찾지 못했습니다.")
+
+    title = payload.get("title") or f"CI.ME VOD {vod_id}"
+    if creator:
+        title = f"{creator} - {title}" if not title.lower().startswith(str(creator).lower()) else title
+    thumbnail = ""
+    og_image = re.search(
+        r'property=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
+        html,
+        flags=re.IGNORECASE,
+    ) or re.search(
+        r'content=["\']([^"\']+)["\']\s+property=["\']og:image["\']',
+        html,
+        flags=re.IGNORECASE,
+    )
+    if og_image:
+        thumbnail = og_image.group(1)
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": ACCEPT_LANGUAGE,
+        "Referer": source_url,
+        "Origin": "https://ci.me",
+    }
+    master_url = payload["playbackUrl"]
+    candidates = _cime_candidates_from_hls(master_url, source_url, title, thumbnail, 0, headers, note="CI.ME HLS")
+    if not candidates:
+        raise RuntimeError("CI.ME HLS master에서 화질을 찾지 못했습니다.")
+
+    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    return {
+        "url": url,
+        "webpage_url": source_url,
+        "title": title,
+        "candidates": candidates,
+        "warnings": [],
+        "is_playlist": False,
+    }
+
+
+def _multipart_progress_wrapper(on_event, part_index, part_count):
+    if not on_event or part_count <= 1:
+        return on_event
+
+    def wrapped(event):
+        event = dict(event or {})
+        event_type = event.get("type")
+        if event_type == "progress":
+            percent = event.get("percent")
+            try:
+                local = float(percent)
+            except (TypeError, ValueError):
+                local = None
+            if local is not None:
+                overall = ((part_index + (local / 100.0)) / part_count) * 100.0
+                event["percent"] = max(0.0, min(99.5, overall))
+                if event.get("message"):
+                    event["message"] = f"파트 {part_index + 1}/{part_count} · {event['message']}"
+        elif event_type == "status" and event.get("message"):
+            event["message"] = f"파트 {part_index + 1}/{part_count}: {event['message']}"
+        return on_event(event)
+
+    return wrapped
+
+
+def download_multipart_hls_candidate(candidate, output_dir, on_event=None, platform_label="VOD"):
+    candidate = dict(candidate or {})
+    parts = candidate.get("multipart_parts") or []
+    if not parts:
+        media_url = str(candidate.get("url") or "")
+        if not media_url:
+            raise RuntimeError(f"{platform_label} media URL is missing.")
+        return download_hls_parallel(media_url, candidate, output_dir, on_event=on_event)
+
+    clip_range = clip_range_from_candidate(candidate)
+    works = multipart_work_ranges(parts, clip_range)
+    if not works:
+        raise RuntimeError(f"{platform_label} 구간이 어떤 파트와도 겹치지 않습니다.")
+
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError(f"{platform_label} output path could not be determined.")
+    if completed_output_exists(output_path, candidate):
+        emit_event(on_event, "status", message=f"File already exists: {output_path.name}")
+        emit_event(on_event, "file", path=str(output_path))
+        emit_event(on_event, "done", path=str(output_path))
+        return {
+            "ok": True,
+            "skipped_existing": True,
+            "output_dir": str(Path(output_dir).expanduser()),
+            "output_path": str(output_path),
+            "target_url": candidate.get("source") or candidate.get("url"),
+        }
+
+    ffmpeg_exe = ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for multi-part downloads")
+
+    emit_event(
+        on_event,
+        "status",
+        message=f"{platform_label} {'구간 ' if clip_range else ''}다운로드 · {len(works)}개 파트",
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    part_paths = []
+    with tempfile.TemporaryDirectory(prefix="clipflow-multipart-") as temp_dir:
+        temp_root = Path(temp_dir)
+        for index, work in enumerate(works):
+            part_title = f"part-{index + 1:02d}"
+            part_candidate = {
+                "title": part_title,
+                "display_title": part_title,
+                "output_ext": "mp4",
+                "ext": "mp4",
+                "url": work["url"],
+                "source": candidate.get("source") or "",
+                "duration": safe_int(work.get("part_duration")),
+                "is_manifest": True,
+                "format_id": f"multipart-{index}",
+                "height": safe_int(work.get("height") or candidate.get("height")),
+                "media_type": "video",
+            }
+            if work.get("clip_range"):
+                part_candidate["clip_range"] = work["clip_range"]
+                part_candidate["source_duration"] = work.get("part_duration")
+                part_candidate = candidate_with_clip_range_metadata(part_candidate)
+            wrapped = _multipart_progress_wrapper(on_event, index, len(works))
+            result = download_hls_parallel(
+                work["url"],
+                part_candidate,
+                temp_root,
+                on_event=wrapped,
+                ffmpeg_exe=ffmpeg_exe,
+            )
+            part_path = Path(result.get("output_path") or "")
+            if not part_path.is_file() or part_path.stat().st_size <= 0:
+                raise RuntimeError(f"{platform_label} part {index + 1} download failed.")
+            part_paths.append(part_path)
+
+        part_output = output_path.with_name(output_path.name + ".part")
+        try:
+            if len(part_paths) == 1:
+                shutil.copyfile(part_paths[0], part_output)
+            else:
+                emit_event(on_event, "status", message=f"{platform_label} 파트 합치는 중")
+                remux_ts_concat_to_mp4(part_paths, part_output, ffmpeg_exe, output_format="mp4")
+            if not part_output.is_file() or part_output.stat().st_size <= 0:
+                raise RuntimeError(f"{platform_label} multi-part merge produced an empty file.")
+            part_output.replace(output_path)
+        except Exception:
+            try:
+                part_output.unlink()
+            except OSError:
+                pass
+            raise
+
+    emit_event(on_event, "progress", percent=100, message="100%")
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return {
+        "ok": True,
+        "output_dir": str(Path(output_dir).expanduser()),
+        "output_path": str(output_path),
+        "target_url": candidate.get("source") or candidate.get("url"),
+    }
+
+
+def download_soop_candidate(page_url, candidate, output_dir, cookie_source="없음", on_event=None):
+    if not candidate_looks_soop(candidate, page_url):
+        return None
+    candidate = dict(candidate or {})
+    if candidate.get("source") is None and page_url:
+        candidate["source"] = page_url
+    return download_multipart_hls_candidate(candidate, output_dir, on_event=on_event, platform_label="SOOP")
+
+
+def download_cime_candidate(page_url, candidate, output_dir, cookie_source="없음", on_event=None):
+    if not candidate_looks_cime(candidate, page_url):
+        return None
+    candidate = dict(candidate or {})
+    if not candidate.get("source") and page_url:
+        candidate["source"] = page_url
+    media_url = str(candidate.get("url") or "")
+    if not media_url:
+        raise RuntimeError("CI.ME media URL is missing.")
+    lower = media_url.lower()
+    is_hls = bool(candidate.get("is_manifest")) or ".m3u8" in lower
+    if is_hls:
+        return download_hls_parallel(media_url, candidate, output_dir, on_event=on_event)
+    if clip_range_from_candidate(candidate):
+        return download_direct_media_segment(media_url, candidate, output_dir, on_event=on_event)
+    return download_direct_media(media_url, candidate, output_dir, on_event=on_event)
+
+
 def iter_video_infos(info):
     if not isinstance(info, dict):
         return
@@ -2836,21 +3847,31 @@ def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_u
 
 def build_download_options(candidate, output_dir, cookie_source="없음", on_event=None, proxy_url=None):
     output_dir = output_dir_for_candidate(candidate, output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir = ensure_output_directory(output_dir)
+    except OSError as exc:
+        raise RuntimeError(f"다운로드 폴더를 만들 수 없습니다: {output_dir} ({exc})") from exc
 
     is_playlist = str((candidate or {}).get("media_type") or "").lower() == "playlist"
     options = build_ydl_options(cookie_source=cookie_source, on_event=on_event, quiet=True, proxy_url=proxy_url, allow_playlist=is_playlist)
     output_ext = normalized_output_ext(candidate.get("output_ext")) or "mp4"
-    output_name = "%(playlist_index)s - %(title).200B.%(ext)s" if is_playlist else f"{escape_yt_dlp_template_literal(filename_stem_for_candidate(candidate))}.%(ext)s"
+    # Keep template names short; Windows MAX_PATH is easy to hit under playlist folders.
+    output_name = (
+        "%(playlist_index)s - %(title).80B.%(ext)s"
+        if is_playlist
+        else f"{escape_yt_dlp_template_literal(filename_stem_for_candidate(candidate))}.%(ext)s"
+    )
     headers = options.setdefault("http_headers", {})
     if candidate.get("referer"):
         headers["Referer"] = candidate["referer"]
     if candidate.get("origin"):
         headers["Origin"] = candidate["origin"]
+    # Forward slashes avoid yt-dlp/ffmpeg seeing doubled backslashes on Windows.
+    outtmpl = path_for_yt_dlp(output_dir / output_name)
     options.update(
         {
             "format": candidate.get("format_selector") or "bestvideo*+bestaudio/best",
-            "outtmpl": str(output_dir / output_name),
+            "outtmpl": outtmpl,
             "windowsfilenames": True,
             "overwrites": True,
             "continuedl": True,
@@ -3958,6 +4979,8 @@ def analyze_playlist_progressively(
     output_ext=None,
     browser_dom_fetcher=None,
     _force_single=False,
+    skip_urls=None,
+    resume_from_index=1,
 ):
     options = build_ydl_options(
         cookie_source=cookie_source,
@@ -3981,12 +5004,17 @@ def analyze_playlist_progressively(
     parent_id = info.get("id") or playlist_identity_key(url) or "playlist"
     emit_event(on_event, "playlist_parent", parent_id=parent_id, title=playlist_title, count=count, source_url=source_url, url=source_url)
 
+    skip = {str(item or "").strip() for item in (skip_urls or []) if str(item or "").strip()}
+    start_at = max(1, safe_int(resume_from_index) or 1)
     candidates = []
     download_infos = {}
     warnings = []
     for index, entry in enumerate(entries, start=1):
         entry_title = clean_video_title(entry.get("title") or "") or f"Video {index}"
         entry_url = playlist_entry_url(entry, playlist_url=url)
+        # Resume support: already-analyzed entries stay in the UI; skip re-work.
+        if index < start_at or (entry_url and entry_url in skip):
+            continue
         emit_event(
             on_event,
             "playlist_entry_loading",
@@ -4055,6 +5083,8 @@ def analyze_url(
     output_ext=None,
     browser_dom_fetcher=None,
     _force_single=False,
+    skip_urls=None,
+    resume_from_index=1,
 ):
     if not str(url or "").strip():
         raise ValueError("URL is required.")
@@ -4069,6 +5099,21 @@ def analyze_url(
         if chzzk:
             return chzzk
         raise RuntimeError("CHZZK URL 분석에 실패했습니다. Firefox 로그인 쿠키를 선택하고 다시 시도하세요.")
+
+    if is_cime_page_url(url):
+        return analyze_cime(url, on_event=on_event, cookie_source=cookie_source)
+
+    if is_soop_page_url(url):
+        if ydl_factory is None:
+            ydl_factory = youtube_dl_factory()
+        return analyze_soop(
+            url,
+            on_event=on_event,
+            cookie_source=cookie_source,
+            ydl_factory=ydl_factory,
+            proxy_url=proxy_url,
+            _force_single=_force_single,
+        )
 
     if ydl_factory is None:
         ydl_factory = youtube_dl_factory()
@@ -4085,6 +5130,8 @@ def analyze_url(
             proxy_url=proxy_url,
             output_ext=output_ext,
             browser_dom_fetcher=browser_dom_fetcher,
+            skip_urls=skip_urls,
+            resume_from_index=resume_from_index,
         )
         if progressive:
             return progressive
@@ -6612,13 +7659,17 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
 
 
 def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
+    try:
+        output_dir = ensure_output_directory(output_dir_for_candidate(candidate, output_dir))
+    except OSError as exc:
+        raise RuntimeError(f"다운로드 폴더를 만들 수 없습니다: {output_dir} ({exc})") from exc
     existing_output_path = existing_output_path_for_candidate(candidate, output_dir)
     if existing_output_path:
         emit_event(on_event, "status", message=f"File already exists: {existing_output_path.name}")
         return {
             "ok": True,
             "skipped_existing": True,
-            "output_dir": str(Path(output_dir).expanduser()),
+            "output_dir": str(output_dir),
             "output_path": str(existing_output_path),
             "target_url": candidate.get("source") or page_url or candidate.get("url"),
         }
@@ -6636,6 +7687,26 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     )
     if chzzk_result is not None:
         return chzzk_result
+
+    cime_result = download_cime_candidate(
+        page_url,
+        candidate,
+        output_dir,
+        cookie_source=cookie_source,
+        on_event=on_event,
+    )
+    if cime_result is not None:
+        return cime_result
+
+    soop_result = download_soop_candidate(
+        page_url,
+        candidate,
+        output_dir,
+        cookie_source=cookie_source,
+        on_event=on_event,
+    )
+    if soop_result is not None:
+        return soop_result
 
     target_url = candidate.get("source") or page_url or candidate.get("url")
     if str((candidate or {}).get("format_id") or "").startswith("browser-"):
@@ -6780,12 +7851,21 @@ def persistent_download_worker_command():
     return [sys.executable, "-u", "-m", "tools.clipflow_download_process", "--persistent"]
 
 
-def _analysis_worker_request(url, cookie_source="없음", output_ext=None, proxy_url=None):
+def _analysis_worker_request(
+    url,
+    cookie_source="없음",
+    output_ext=None,
+    proxy_url=None,
+    skip_urls=None,
+    resume_from_index=1,
+):
     return {
         "url": url,
         "cookie_source": cookie_source,
         "output_ext": output_ext,
         "proxy_url": proxy_url,
+        "skip_urls": list(skip_urls or []),
+        "resume_from_index": max(1, safe_int(resume_from_index) or 1),
     }
 
 
@@ -7292,12 +8372,16 @@ def analyze_url_in_subprocess(
     on_event=None,
     proxy_url=None,
     process_command=None,
+    skip_urls=None,
+    resume_from_index=1,
 ):
     request = _analysis_worker_request(
         url,
         cookie_source=cookie_source,
         output_ext=output_ext,
         proxy_url=proxy_url,
+        skip_urls=skip_urls,
+        resume_from_index=resume_from_index,
     )
     if process_command is not None:
         return _analyze_url_in_one_shot_worker(request, on_event=on_event, process_command=process_command)

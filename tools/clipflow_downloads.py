@@ -602,15 +602,32 @@ class DownloadMixin:
         if not row or row not in self.rows:
             return
         if row.get("kind") == "playlist":
-            row["_playlist_auto_download_paused"] = True
-            self._analysis_auto_download = False
+            was_analyzing = bool(
+                row.get("analysis_loading")
+                or (self.analysis_thread and self.analysis_thread.isRunning() and self._playlist_event_parent_id == row.get("id"))
+            )
+            auto_download = bool(self._analysis_auto_download)
             for child in self._playlist_children_for_parent(row):
                 if child.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS} or child in self.queued_download_rows:
                     self.pause_download_for_row(child)
+            if was_analyzing and hasattr(self, "_pause_playlist_analysis"):
+                self._pause_playlist_analysis(row, auto_download=auto_download)
+            else:
+                row["_playlist_auto_download_paused"] = True
+                self._analysis_auto_download = False
             self._set_row_paused(row)
+            if row.get("analysis_loading") or row.get("_playlist_analysis_resume"):
+                row["status"] = PAUSED_STATUS
+                row["status_detail"] = "분석 일시정지"
+                row["progress_text"] = "분석 일시정지"
+                widget = row.get("widget")
+                if widget:
+                    widget.set_status(PAUSED_STATUS, "분석 일시정지")
+                    widget._refresh_actions()
             self._refresh_playlist_parent_status(row)
             self._refresh_parent_for_child(row)
             self._refresh_footer()
+            self._render_rows()
             return
         if row in self.queued_download_rows:
             self.queued_download_rows = [queued for queued in self.queued_download_rows if queued is not row]
@@ -705,12 +722,30 @@ class DownloadMixin:
         if not row or row not in self.rows:
             return
         if row.get("kind") == "playlist":
-            row.pop("_playlist_auto_download_paused", None)
-            if row.get("analysis_loading"):
-                self._analysis_auto_download = True
+            needs_analysis_resume = bool(row.get("_playlist_analysis_resume") or row.get("analysis_loading"))
             for child in self._playlist_children_for_parent(row):
                 if child.get("status") == PAUSED_STATUS:
                     self.resume_download_for_row(child)
+            if needs_analysis_resume and hasattr(self, "_resume_playlist_analysis"):
+                if self._resume_playlist_analysis(row):
+                    # Also download any already-ready children if auto-download was on.
+                    resume = row.get("_playlist_analysis_resume") or {}
+                    if resume.get("auto_download") or self._analysis_auto_download:
+                        for child in self._playlist_children_for_parent(row):
+                            if child.get("child_loading") or child.get("status") in {
+                                COMPLETED_STATUS,
+                                DOWNLOAD_STATUS,
+                                WAITING_STATUS,
+                                ERROR_STATUS,
+                                PAUSED_STATUS,
+                            }:
+                                continue
+                            self.start_download_for_row(child)
+                    self._refresh_playlist_parent_status(row)
+                    self._render_rows()
+                    return
+            row.pop("_playlist_auto_download_paused", None)
+            row.pop("_playlist_analysis_resume", None)
             self._start_playlist_children_downloads(row)
             self._refresh_playlist_parent_status(row)
             return
@@ -845,11 +880,16 @@ class DownloadMixin:
         return owner
 
     def _output_dir_for_row(self, row, candidate):
+        base = self.folder_input.text()
+        try:
+            base = str(engine.windows_long_path(base))
+        except Exception:
+            base = str(base or "")
         if row and row.get("is_playlist_child"):
             parent = self._parent_playlist_for_child(row)
             if parent:
-                return engine.output_dir_for_candidate(parent.get("candidate") or {}, self.folder_input.text())
-        return engine.output_dir_for_candidate(candidate, self.folder_input.text())
+                return engine.output_dir_for_candidate(parent.get("candidate") or {}, base)
+        return engine.output_dir_for_candidate(candidate, base)
 
     def _existing_playlist_child_output(self, row, candidate, output_dir):
         output_dir = Path(output_dir).expanduser()

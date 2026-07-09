@@ -102,11 +102,30 @@ class OutlinedButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         enabled = self.isEnabled()
-        selected = self.objectName() == "PrimaryPopupButton" or str(self.property("selected") or "").lower() == "true"
+        name = self.objectName() or ""
+        selected = name == "PrimaryPopupButton" or str(self.property("selected") or "").lower() == "true"
+        danger = name == "DangerButton"
         active = self.isDown() or self.underMouse()
-        bg = theme.GRAPHITE if enabled and selected else theme.SURFACE_SOFT if enabled and active else theme.SURFACE
-        border = theme.GRAPHITE if enabled else theme.BORDER_STRONG
-        text = theme.ON_ACCENT if enabled and selected else theme.INK if enabled else theme.MUTED_SOFT
+        if enabled and danger:
+            bg = theme.DANGER_PRESSED if self.isDown() else theme.DANGER_HOVER if active else theme.DANGER
+            border = bg
+            text = theme.ON_ACCENT
+        elif enabled and selected:
+            bg = theme.GRAPHITE
+            border = theme.GRAPHITE
+            text = theme.ON_ACCENT
+        elif enabled and active:
+            bg = theme.SURFACE_SOFT
+            border = theme.GRAPHITE
+            text = theme.INK
+        elif enabled:
+            bg = theme.SURFACE
+            border = theme.GRAPHITE
+            text = theme.INK
+        else:
+            bg = theme.SURFACE
+            border = theme.BORDER_STRONG
+            text = theme.MUTED_SOFT
         inset = max(1.0, self.border_width / 2)
         rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
         painter.setPen(QPen(QColor(border), self.border_width))
@@ -118,6 +137,148 @@ class OutlinedButton(QPushButton):
         painter.setFont(font)
         painter.setPen(QColor(text))
         painter.drawText(QRectF(self.rect()), Qt.AlignCenter, self.text())
+
+
+class AppDialog(QDialog):
+    """Shared modal shell for ClipFlow popups.
+
+    Layout: optional title + detail + body widgets + footer actions.
+    Call ``finalize()`` after adding body/footer widgets and actions.
+    ``result_choice`` is set when an accept-style action is clicked.
+    """
+
+    MARGIN = (18, 16, 18, 14)
+    SPACING = 12
+    FOOTER_SPACING = 10
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        window_title="",
+        title_text="",
+        detail_text="",
+        minimum_width=420,
+        minimum_height=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(str(window_title or ""))
+        self.setModal(True)
+        if minimum_width:
+            self.setMinimumWidth(int(minimum_width))
+        if minimum_height:
+            self.setMinimumHeight(int(minimum_height))
+        self.result_choice = None
+        self._buttons = {}
+        self._footer_leading = []
+        self._footer_actions = []
+        self._finalized = False
+
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(*self.MARGIN)
+        self._root.setSpacing(self.SPACING)
+
+        self.title_label = QLabel(str(title_text or ""))
+        self.title_label.setObjectName("SectionTitle")
+        self.title_label.setWordWrap(True)
+        if not str(title_text or "").strip():
+            self.title_label.hide()
+        self._root.addWidget(self.title_label)
+
+        self.detail_label = QLabel(str(detail_text or ""))
+        self.detail_label.setObjectName("MetaText")
+        self.detail_label.setWordWrap(True)
+        if not str(detail_text or "").strip():
+            self.detail_label.hide()
+        self._root.addWidget(self.detail_label)
+
+        self.body_layout = QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(10)
+        self._root.addLayout(self.body_layout, 1)
+
+        self.footer = QHBoxLayout()
+        self.footer.setContentsMargins(0, 0, 0, 0)
+        self.footer.setSpacing(self.FOOTER_SPACING)
+        self.footer.setAlignment(Qt.AlignVCenter)
+        self._root.addLayout(self.footer)
+
+    def set_title_text(self, text, object_name="SectionTitle"):
+        self.title_label.setText(str(text or ""))
+        self.title_label.setObjectName(object_name or "SectionTitle")
+        self.title_label.setVisible(bool(str(text or "").strip()))
+
+    def set_detail_text(self, text):
+        self.detail_label.setText(str(text or ""))
+        self.detail_label.setVisible(bool(str(text or "").strip()))
+
+    def add_body(self, widget, stretch=0):
+        self.body_layout.addWidget(widget, stretch)
+        return widget
+
+    def add_footer_leading(self, widget):
+        """Widgets placed before the footer stretch (e.g. permanent-delete checkbox)."""
+        self._footer_leading.append(widget)
+        return widget
+
+    def add_action(
+        self,
+        key,
+        text,
+        style="SecondaryButton",
+        *,
+        default=False,
+        reject=False,
+        choice=None,
+        min_width=None,
+        fixed_size=None,
+        on_click=None,
+    ):
+        button = OutlinedButton(str(text or ""))
+        button.setObjectName(style or "SecondaryButton")
+        button.setCursor(Qt.PointingHandCursor)
+        if fixed_size:
+            button.setFixedSize(int(fixed_size[0]), int(fixed_size[1]))
+        else:
+            button.setMinimumHeight(34)
+            if min_width:
+                button.setMinimumWidth(int(min_width))
+        if default:
+            button.setDefault(True)
+            button.setAutoDefault(True)
+        if reject:
+            button.clicked.connect(self.reject)
+        elif callable(on_click):
+            button.clicked.connect(on_click)
+        else:
+            value = key if choice is None else choice
+            button.clicked.connect(lambda *_args, v=value: self.finish(v))
+        self._buttons[str(key)] = button
+        self._footer_actions.append(button)
+        return button
+
+    def button(self, key):
+        return self._buttons.get(str(key))
+
+    def finish(self, choice):
+        self.result_choice = choice
+        self.accept()
+
+    def finalize(self):
+        if self._finalized:
+            return self
+        for widget in self._footer_leading:
+            self.footer.addWidget(widget, 0, Qt.AlignVCenter)
+        self.footer.addStretch(1)
+        for button in self._footer_actions:
+            self.footer.addWidget(button, 0, Qt.AlignVCenter)
+        self._finalized = True
+        return self
+
+    def exec(self):
+        if not self._finalized:
+            self.finalize()
+        return super().exec()
 
 
 class Spinner(QWidget):
@@ -166,38 +327,115 @@ class Spinner(QWidget):
 
 
 class CleanCheckBox(QCheckBox):
-    """A self-painted checkbox: rounded square, accent fill with a white check
-    when checked. Replaces the platform indicator for a clean, consistent look."""
+    """Self-painted checkbox: solid outline, filled box + path check when on.
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    Drawn with integer geometry and a vector check mark so edges stay crisp on
+    HiDPI (scaled SVG checkmarks looked jagged). Supports optional label text.
+    """
+
+    _BOX = 18
+    _GAP = 8
+    _LABELED_BOX = 18
+    _LABELED_GAP = 9
+    # Near-black outline/fill — reads clearly on white rows and dialogs.
+    _STROKE = "#111111"
+    _FILL = "#111111"
+
+    def __init__(self, text="", parent=None):
+        # Accept either CleanCheckBox(parent) or CleanCheckBox("label", parent).
+        if not isinstance(text, str):
+            parent = text
+            text = ""
+        super().__init__(text, parent)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(20, 20)
+        # Hide the native indicator; we draw our own box + check.
+        self.setStyleSheet(
+            "QCheckBox { spacing: 0px; background: transparent; color: transparent; }"
+            "QCheckBox::indicator { width: 0px; height: 0px; border: none; }"
+        )
+        if self.text():
+            font = QFont(self.font())
+            font.setWeight(QFont.DemiBold)
+            font.setPointSize(max(12, font.pointSize() or 12))
+            self.setFont(font)
+            # Match dialog action buttons (No/Yes = 34px) for clean vertical alignment.
+            self.setFixedHeight(34)
+            self.setContentsMargins(0, 0, 0, 0)
+        else:
+            self.setFixedSize(20, 20)
 
     def sizeHint(self):
-        return QSize(20, 20)
+        if not self.text():
+            return QSize(20, 20)
+        metrics = self.fontMetrics()
+        text_w = metrics.horizontalAdvance(self.text())
+        return QSize(self._LABELED_BOX + self._LABELED_GAP + text_w + 4, 34)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def hitButton(self, pos):
         return self.rect().contains(pos)
 
+    @staticmethod
+    def _draw_check_mark(painter, box_rect):
+        """Crisp vector check — avoids scaled SVG pixmap shimmer."""
+        pen = QPen(QColor("#FFFFFF"))
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        x = box_rect.x()
+        y = box_rect.y()
+        w = box_rect.width()
+        h = box_rect.height()
+        path = QPainterPath()
+        path.moveTo(x + w * 0.22, y + h * 0.52)
+        path.lineTo(x + w * 0.42, y + h * 0.70)
+        path.lineTo(x + w * 0.78, y + h * 0.30)
+        painter.drawPath(path)
+
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        size = 18
-        x = (self.width() - size) // 2
-        y = (self.height() - size) // 2
-        rect = QRectF(x, y, size, size)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        labeled = bool(self.text())
+        size = self._LABELED_BOX if labeled else self._BOX
+        gap = self._LABELED_GAP if labeled else self._GAP
+        # Integer pixel box — half-pixel strokes were the main jagged source.
+        x = 0 if labeled else max(0, (self.width() - size) // 2)
+        y = max(0, (self.height() - size) // 2)
+        if labeled:
+            y = min(self.height() - size, y + 1)
+        # Inset by half the 2px stroke so the outer edge lands on whole pixels.
+        stroke = 2.0
+        inset = stroke / 2.0
+        rect = QRectF(x + inset, y + inset, size - stroke, size - stroke)
+        radius = 4.0
         if self.isChecked():
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(theme.GRAPHITE))
-            painter.drawRoundedRect(rect, 5, 5)
-            painter.drawPixmap(x + 2, y + 2, 14, 14, lucide_pixmap("check", 14, "#FFFFFF"))
+            painter.setBrush(QColor(self._FILL))
+            painter.drawRoundedRect(QRectF(x, y, size, size), radius + 1, radius + 1)
+            self._draw_check_mark(painter, QRectF(x, y, size, size))
         else:
-            border = theme.GRAPHITE
-            painter.setPen(QPen(QColor(border), 1.4))
-            painter.setBrush(QColor(theme.SURFACE))
-            painter.drawRoundedRect(rect, 5, 5)
+            pen = QPen(QColor(self._STROKE))
+            pen.setWidthF(stroke)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawRoundedRect(rect, radius, radius)
+        if labeled:
+            painter.setPen(QColor(theme.INK))
+            painter.setFont(self.font())
+            text_rect = QRect(
+                x + size + gap,
+                0,
+                max(0, self.width() - (x + size + gap)),
+                self.height(),
+            )
+            painter.drawText(text_rect, int(Qt.AlignVCenter | Qt.AlignLeft), self.text())
 
     def enterEvent(self, event):
         self.update()
@@ -1209,26 +1447,22 @@ class UpdateAvailableBanner(QFrame):
         self.dismissed.emit()
 
 
-class UpdateNotesDialog(QDialog):
+class UpdateNotesDialog(AppDialog):
     update_requested = Signal()
 
     def __init__(self, parent=None, version="", notes_url=""):
-        super().__init__(parent)
         self._version = str(version or "").strip()
         self._notes_url = str(notes_url or "").strip()
-        self.setWindowTitle(f"ClipFlow {self._version} 변경 사항" if self._version else "업데이트 상세")
-        self.setModal(True)
-        self.setMinimumSize(500, 440)
+        super().__init__(
+            parent,
+            window_title=f"ClipFlow {self._version} 변경 사항" if self._version else "업데이트 상세",
+            title_text=f"ClipFlow {self._version}" if self._version else "업데이트",
+            detail_text="",
+            minimum_width=500,
+            minimum_height=440,
+        )
         self.resize(540, 500)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-
-        # Single title (markdown H1 is stripped from body content).
-        title = QLabel(f"ClipFlow {self._version}" if self._version else "업데이트")
-        title.setObjectName("UpdateNotesTitle")
-        layout.addWidget(title)
+        self.set_title_text(f"ClipFlow {self._version}" if self._version else "업데이트", object_name="UpdateNotesTitle")
 
         self.body = QTextBrowser(self)
         self.body.setObjectName("UpdateNotesBody")
@@ -1236,23 +1470,17 @@ class UpdateNotesDialog(QDialog):
         self.body.setOpenLinks(False)
         self._apply_notes_document_style()
         self.body.setPlainText("변경 사항을 불러오는 중…")
-        layout.addWidget(self.body, 1)
-
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.setSpacing(8)
-        buttons.addStretch(1)
-        close_button = OutlinedButton("닫기")
-        close_button.setObjectName("SecondaryButton")
-        close_button.setCursor(Qt.PointingHandCursor)
-        close_button.clicked.connect(self.reject)
-        update_button = OutlinedButton("업데이트")
-        update_button.setObjectName("PrimaryPopupButton")
-        update_button.setCursor(Qt.PointingHandCursor)
-        update_button.clicked.connect(self._request_update)
-        buttons.addWidget(close_button)
-        buttons.addWidget(update_button)
-        layout.addLayout(buttons)
+        self.add_body(self.body, stretch=1)
+        self.add_action("close", "닫기", "SecondaryButton", reject=True, min_width=72)
+        self.add_action(
+            "update",
+            "업데이트",
+            "PrimaryPopupButton",
+            default=True,
+            min_width=96,
+            on_click=self._request_update,
+        )
+        self.finalize()
 
         self._network = QNetworkAccessManager(self)
         self._reply = None
@@ -1263,7 +1491,7 @@ class UpdateNotesDialog(QDialog):
 
     def _request_update(self):
         self.update_requested.emit()
-        self.accept()
+        self.finish("update")
 
     def _notes_font_family(self):
         try:

@@ -44,6 +44,8 @@ def run_request(request, analyze_func=engine.analyze_url):
         output_ext=request.get("output_ext") or None,
         proxy_url=request.get("proxy_url") or None,
         on_event=emit_event,
+        skip_urls=request.get("skip_urls") or [],
+        resume_from_index=request.get("resume_from_index") or 1,
     )
     _write_payload({"type": "finished", "result": result})
     return result

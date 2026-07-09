@@ -33,11 +33,53 @@ except ImportError:
     )
 
 
+def _looks_like_url_title(value):
+    """True when a title field is really a link / host path, not a name."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lower = text.casefold()
+    if lower.startswith(("http://", "https://", "www.")):
+        return True
+    # Bare host/path leftovers (no scheme) still read as a link in the row.
+    if "://" in text:
+        return True
+    if any(token in lower for token in ("youtube.com/", "youtu.be/", "sooplive.co.kr/", "afreecatv.com/", "chzzk.naver.com/", "ci.me/")):
+        return True
+    if lower.startswith("www.") or "/playlist?" in lower or "list=" in lower:
+        return True
+    return False
+
+
+def clean_playlist_title(title, source_url=""):
+    """Prefer a human playlist name over a raw URL placeholder."""
+    text = engine.clean_video_title(title) or ""
+    if text and not _looks_like_url_title(text):
+        # Generic placeholders stay generic; real names pass through.
+        if text.strip().casefold() not in {"playlist", "media", "video", "재생목록"}:
+            return text
+    # Fall back to a short label rather than a long truncated URL.
+    list_id = ""
+    try:
+        list_id = engine.youtube_playlist_id(source_url) or ""
+    except Exception:
+        list_id = ""
+    if list_id:
+        return f"재생목록 {list_id[:16]}"
+    return "재생목록"
+
+
 class PlaylistMixin:
     def _handle_playlist_analysis_event(self, event):
         event_type = event.get("type")
         parent = self._ensure_playlist_event_parent(event)
         if not parent:
+            return
+        if event_type == "playlist_parent":
+            # Title/count already applied in _ensure_playlist_event_parent.
+            self._refresh_playlist_parent_metadata(parent)
+            self._refresh_playlist_parent_status(parent)
+            self._render_rows()
             return
         if event_type == "playlist_entry_loading":
             if parent.get("_playlist_auto_download_paused"):
@@ -66,6 +108,7 @@ class PlaylistMixin:
                 if not (row.get("parent_playlist_id") == parent.get("id") and row.get("child_loading"))
             ]
             parent["analysis_loading"] = False
+            parent.pop("_playlist_analysis_resume", None)
             self._analysis_auto_download = False
             self._refresh_playlist_parent_metadata(parent)
             self._refresh_playlist_parent_status(parent)
@@ -75,21 +118,33 @@ class PlaylistMixin:
         self._render_rows()
 
     def _ensure_playlist_event_parent(self, event):
+        # Late events after cancel/full-delete must not recreate a playlist row.
+        if getattr(self, "_analysis_discard_result", False):
+            return None
         source_url = event.get("source_url") or event.get("url") or self.url_input.text().strip()
         parent = self._find_row_by_id(self._playlist_event_parent_id)
         if not parent:
             parent = next((row for row in self.rows if row.get("kind") == "playlist" and row.get("analysis_loading")), None)
         if not parent:
+            # Only attach to an existing analysis session — never invent a parent
+            # for orphan events after the user removed the playlist.
+            if not self._playlist_event_parent_id:
+                return None
+            if not (getattr(self, "analysis_thread", None) and self.analysis_thread.isRunning()):
+                return None
             parent = self._playlist_parent_loading_row(source_url)
             self.rows = [parent] + [row for row in self.rows if not self._is_analysis_loading_row(row)]
         self._playlist_event_parent_id = parent.get("id") or ""
         if event.get("type") == "playlist_parent":
-            title = event.get("title") or source_url
+            raw_title = event.get("title") or event.get("playlist_title") or ""
+            title = clean_playlist_title(raw_title, source_url)
             count = engine.safe_int(event.get("count"))
             parent["candidate"].update(
                 {
                     "title": title,
                     "display_title": title,
+                    "playlist_title": title,
+                    "fulltitle": title,
                     "item_count": count,
                     "playlist_count": count,
                     "source": source_url,
@@ -97,9 +152,14 @@ class PlaylistMixin:
                     "webpage_url": source_url,
                 }
             )
+            parent["qualities"] = [parent["candidate"]]
             parent["analysis_source_url"] = source_url
             parent["source_url"] = source_url
             parent["input_url"] = event.get("input_url") or source_url
+            parent["playlist_title"] = title
+            widget = parent.get("widget")
+            if widget:
+                widget.refresh()
         parent.setdefault("expanded", True)
         return parent
 
@@ -462,19 +522,29 @@ class PlaylistMixin:
         first_candidate = (grouped_rows[0].get("candidate") if grouped_rows else {}) or {}
         candidates = [row.get("candidate") or {} for row in grouped_rows]
         size_source = self._playlist_size_source(candidates)
-        title = (
+        # Prefer real playlist name; never fall back to a child video title that
+        # is actually a URL, and never surface the page URL as the row title.
+        raw_title = (
             analysis.get("playlist_title")
             or analysis.get("title")
-            or first_candidate.get("display_title")
-            or first_candidate.get("title")
-            or "Playlist"
+            or first_candidate.get("playlist_title")
+            or ""
         )
+        if _looks_like_url_title(raw_title) or not str(raw_title or "").strip():
+            raw_title = (
+                first_candidate.get("display_title")
+                or first_candidate.get("title")
+                or ""
+            )
+        title = clean_playlist_title(raw_title, source_url)
         return {
             "id": "playlist",
             "media_type": "playlist",
             "format_selector": "bestvideo*+bestaudio/best",
             "title": title,
             "display_title": title,
+            "playlist_title": title,
+            "fulltitle": title,
             "thumbnail": first_candidate.get("thumbnail") or "",
             "duration": sum(engine.safe_int(candidate.get("duration")) for candidate in candidates),
             "sort_bytes": sum(engine.safe_int(candidate.get("sort_bytes")) for candidate in candidates),
@@ -508,8 +578,24 @@ class PlaylistMixin:
             thumbnail = next(((child.get("candidate") or {}).get("thumbnail") for child in children if (child.get("candidate") or {}).get("thumbnail")), "")
             if thumbnail:
                 candidate["thumbnail"] = thumbnail
+        # Never leave a raw link as the playlist row title.
+        source = parent.get("source_url") or parent.get("analysis_source_url") or ""
+        current_title = (
+            candidate.get("playlist_title")
+            or candidate.get("display_title")
+            or candidate.get("title")
+            or parent.get("playlist_title")
+            or ""
+        )
+        fixed = clean_playlist_title(current_title, source)
+        candidate["title"] = fixed
+        candidate["display_title"] = fixed
+        candidate["playlist_title"] = fixed
+        parent["playlist_title"] = fixed
         candidate["item_count"] = count
         candidate["playlist_count"] = count
+        parent["candidate"] = candidate
+        parent["qualities"] = [candidate]
         parent["playlist_entries"] = [
             {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
             for child in children
@@ -633,11 +719,14 @@ class PlaylistMixin:
         created_order = self._next_row_sequence()
         parent_id = f"playlist-loading-{created_order}"
         candidate = self._placeholder_candidate(url)
+        label = clean_playlist_title("", url)
         candidate.update(
             {
                 "id": parent_id,
                 "media_type": "playlist",
                 "format_selector": "bestvideo*+bestaudio/best",
+                "title": label,
+                "display_title": label,
                 "item_count": 0,
                 "playlist_count": 0,
                 "source": url,
@@ -655,10 +744,10 @@ class PlaylistMixin:
             "analysis_source_url": url,
             "source_url": url,
             "input_url": url,
-            "status": READY_STATUS,
+            "status": ANALYZING_STATUS,
             "status_detail": "",
             "progress": 0,
-            "progress_text": "",
+            "progress_text": ANALYZING_STATUS,
             "output_path": "",
             "messages": [],
             "created_order": created_order,
@@ -729,8 +818,10 @@ class PlaylistMixin:
                 return expected.parent
         return None
 
-    def _delete_playlist_output_files(self, row, playlist_dir):
+    def _delete_playlist_output_files(self, row, playlist_dir, permanent=None):
         playlist_dir = Path(playlist_dir).expanduser()
+        if permanent is None:
+            permanent = self._permanent_delete_enabled() if hasattr(self, "_permanent_delete_enabled") else False
         paths = []
         for child in self._playlist_children_for_parent(row):
             child_paths = self._download_output_paths_for_row(child) if hasattr(self, "_download_output_paths_for_row") else []
@@ -746,11 +837,21 @@ class PlaylistMixin:
                 except ValueError:
                     continue
                 paths.append(path)
+        delete_path = getattr(self, "_delete_filesystem_path", None)
         for path in dict.fromkeys(paths):
-            path.unlink()
+            if delete_path is not None:
+                try:
+                    delete_path(path, permanent=permanent)
+                except OSError:
+                    pass
+            else:
+                path.unlink()
         save_folder = Path(self.folder_input.text()).expanduser().resolve()
         if playlist_dir.exists() and playlist_dir.resolve() != save_folder:
             try:
-                playlist_dir.rmdir()
+                if delete_path is not None:
+                    delete_path(playlist_dir, permanent=permanent)
+                else:
+                    playlist_dir.rmdir()
             except OSError:
                 pass

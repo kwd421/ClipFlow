@@ -4236,6 +4236,50 @@ for line in sys.stdin:
             "/usr/bin/chromium",
         )
 
+    def test_soop_and_cime_url_detection(self):
+        self.assertTrue(engine.is_soop_page_url("https://vod.sooplive.com/player/199699223"))
+        self.assertTrue(engine.is_soop_page_url("https://vod.afreecatv.com/player/123"))
+        self.assertFalse(engine.is_soop_page_url("https://chzzk.naver.com/video/1"))
+        self.assertTrue(engine.is_cime_page_url("https://ci.me/@hebi/vods/41769"))
+        self.assertEqual(engine.find_cime_vod_id("https://ci.me/@hebi/vods/41769"), "41769")
+        self.assertEqual(engine.find_cime_creator("https://ci.me/@hebi/vods/41769"), "hebi")
+        self.assertFalse(engine.looks_like_playlist_url("https://vod.sooplive.com/player/199699223"))
+
+    def test_multipart_work_ranges_maps_clip_across_parts(self):
+        parts = [
+            {"url": "u1", "duration": 18000},
+            {"url": "u2", "duration": 18004},
+            {"url": "u3", "duration": 5351},
+        ]
+        full = engine.multipart_work_ranges(parts, None)
+        self.assertEqual(len(full), 3)
+        single = engine.multipart_work_ranges(parts, {"start": 10, "end": 20})
+        self.assertEqual(len(single), 1)
+        self.assertEqual(single[0]["index"], 0)
+        self.assertAlmostEqual(single[0]["clip_range"]["start"], 10)
+        self.assertAlmostEqual(single[0]["clip_range"]["end"], 20)
+        span = engine.multipart_work_ranges(parts, {"start": 17995, "end": 18010})
+        self.assertEqual([item["index"] for item in span], [0, 1])
+        self.assertAlmostEqual(span[0]["clip_range"]["start"], 17995)
+        self.assertAlmostEqual(span[0]["clip_range"]["end"], 18000)
+        self.assertAlmostEqual(span[1]["clip_range"]["start"], 0)
+        self.assertAlmostEqual(span[1]["clip_range"]["end"], 10)
+
+    def test_parse_cime_vod_payload_extracts_playback_url(self):
+        html = (
+            '{"bodyData":{"vod":{"id":"41769","title":"hello \\"world\\"","isAdult":false,'
+            '"playbackUrl":"https://streaming.cf.ci.me/ivs/v1/x/media/hls/master.m3u8"}}}'
+        )
+        payload = engine.parse_cime_vod_payload(html, "41769")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["id"], "41769")
+        self.assertIn("hello", payload["title"])
+        self.assertTrue(payload["playbackUrl"].endswith("master.m3u8"))
+
+    def test_soop_clean_title_strips_part_suffix(self):
+        self.assertEqual(engine.soop_clean_title("방송 제목 (part 1)"), "방송 제목")
+        self.assertEqual(engine.soop_clean_title("방송 제목 (part 12)"), "방송 제목")
+
 
 if __name__ == "__main__":
     unittest.main()

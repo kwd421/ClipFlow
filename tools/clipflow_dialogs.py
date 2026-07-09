@@ -1,12 +1,12 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QGridLayout, QLabel
 
 try:
     from tools import candidate_presenter as presenter
-    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, OutlinedButton
+    from tools.clipflow_widgets import AppDialog, CleanCheckBox, CleanComboBox, CleanSwitch, OutlinedButton
 except ImportError:
     import candidate_presenter as presenter
-    from clipflow_widgets import CleanComboBox, CleanSwitch, OutlinedButton
+    from clipflow_widgets import AppDialog, CleanCheckBox, CleanComboBox, CleanSwitch, OutlinedButton
 
 
 def _combo_text(combo):
@@ -21,17 +21,15 @@ PREFERENCE_TOOLTIPS = {
 }
 
 
-class PreferencesDialog(QDialog):
+class PreferencesDialog(AppDialog):
     def __init__(self, preferences, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("품질 설정")
-        self.setModal(True)
-        self.setMinimumWidth(360)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-
+        super().__init__(
+            parent,
+            window_title="품질 설정",
+            title_text="",
+            detail_text="",
+            minimum_width=360,
+        )
         form = QGridLayout()
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(12)
@@ -79,20 +77,15 @@ class PreferencesDialog(QDialog):
         form.addWidget(hdr_label, 3, 0)
         form.addWidget(self.hdr_switch, 3, 1, Qt.AlignCenter)
 
-        layout.addLayout(form)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.cancel_button = OutlinedButton("취소")
-        self.cancel_button.setObjectName("SecondaryButton")
-        self.ok_button = OutlinedButton("확인")
-        self.ok_button.setObjectName("PrimaryPopupButton")
-        self.ok_button.setDefault(True)
-        self.ok_button.setAutoDefault(True)
-        self.cancel_button.clicked.connect(self.reject)
-        self.ok_button.clicked.connect(self.accept)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.ok_button)
-        layout.addLayout(buttons)
+        from PySide6.QtWidgets import QWidget
+
+        form_host = QWidget(self)
+        form_host.setLayout(form)
+        self.add_body(form_host)
+        self.add_action("cancel", "취소", "SecondaryButton", reject=True, min_width=72)
+        self.ok_button = self.add_action("ok", "확인", "PrimaryPopupButton", default=True, choice="ok", min_width=72)
+        self.cancel_button = self.button("cancel")
+        self.finalize()
         self.refresh_controls()
 
     def refresh_controls(self):
@@ -111,37 +104,139 @@ class PreferencesDialog(QDialog):
         )
 
 
-class DeleteConfirmDialog(QDialog):
-    def __init__(self, output_path, parent=None, title_text=None, detail_text=None, window_title=None):
-        super().__init__(parent)
-        self.setWindowTitle(window_title or "파일 삭제")
-        self.setModal(True)
-        self.setMinimumWidth(420)
+class DeleteConfirmDialog(AppDialog):
+    """File delete / playlist remove confirmations on the shared AppDialog shell."""
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
+    def __init__(
+        self,
+        output_path,
+        parent=None,
+        title_text=None,
+        detail_text=None,
+        window_title=None,
+        permanent_delete=False,
+        on_permanent_delete_changed=None,
+        cancel_text="No",
+        ok_text="Yes",
+        ok_style="PrimaryPopupButton",
+        alt_button_text=None,
+        alt_style="PrimaryPopupButton",
+        show_permanent_delete=True,
+        compact_action_buttons=True,
+    ):
+        super().__init__(
+            parent,
+            window_title=window_title or "파일 삭제",
+            title_text=title_text or "파일을 삭제하시겠습니까?",
+            detail_text=detail_text if detail_text is not None else str(output_path),
+            minimum_width=420,
+        )
+        self._on_permanent_delete_changed = on_permanent_delete_changed
 
-        title = QLabel(title_text or "파일을 삭제하시겠습니까?")
-        title.setObjectName("SectionTitle")
-        detail = QLabel(detail_text if detail_text is not None else str(output_path))
-        detail.setObjectName("MetaText")
-        detail.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(detail)
+        self.permanent_delete_check = CleanCheckBox("영구 삭제")
+        self.permanent_delete_check.setToolTip("사용 시 휴지통을 거치지 않고 즉시 삭제합니다. 설정은 저장됩니다.")
+        self.permanent_delete_check.setChecked(bool(permanent_delete))
+        self.permanent_delete_check.toggled.connect(self._permanent_delete_toggled)
+        if show_permanent_delete:
+            self.add_footer_leading(self.permanent_delete_check)
+        else:
+            self.permanent_delete_check.hide()
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.cancel_button = OutlinedButton("No")
-        self.cancel_button.setObjectName("SecondaryButton")
-        self.cancel_button.setFixedSize(64, 34)
-        self.ok_button = OutlinedButton("Yes")
-        self.ok_button.setObjectName("PrimaryPopupButton")
-        self.ok_button.setFixedSize(64, 34)
-        self.ok_button.setDefault(True)
-        self.ok_button.setAutoDefault(True)
-        self.cancel_button.clicked.connect(self.reject)
-        self.ok_button.clicked.connect(self.accept)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.ok_button)
-        layout.addLayout(buttons)
+        compact = bool(compact_action_buttons and not alt_button_text)
+        self.cancel_button = self.add_action(
+            "cancel",
+            cancel_text or "No",
+            "SecondaryButton",
+            reject=True,
+            fixed_size=(64, 34) if compact else None,
+            min_width=None if compact else 72,
+        )
+        self.alt_button = None
+        if alt_button_text:
+            self.alt_button = self.add_action(
+                "alt",
+                alt_button_text,
+                alt_style or "PrimaryPopupButton",
+                choice="alt",
+                min_width=110,
+            )
+        self.ok_button = self.add_action(
+            "ok",
+            ok_text or "Yes",
+            ok_style or "PrimaryPopupButton",
+            default=True,
+            choice="ok",
+            fixed_size=(64, 34) if compact else None,
+            min_width=None if compact else 96,
+        )
+        self.finalize()
+
+    def permanent_delete_enabled(self):
+        return bool(self.permanent_delete_check.isChecked())
+
+    def _permanent_delete_toggled(self, checked):
+        callback = self._on_permanent_delete_changed
+        if callback is not None:
+            callback(bool(checked))
+
+    @classmethod
+    def for_playlist_remove(
+        cls,
+        completed_count=0,
+        incomplete_count=0,
+        analyzing=False,
+        parent=None,
+    ):
+        detail_parts = [f"완료 {int(completed_count or 0)}개"]
+        if incomplete_count:
+            detail_parts.append(f"미완료 {int(incomplete_count or 0)}개")
+        if analyzing:
+            detail_parts.append("분석 진행 중")
+        detail = (
+            " · ".join(detail_parts)
+            + "\n목록에서만 제거합니다. 저장된 파일은 삭제되지 않습니다."
+            + "\n완료 항목만 남기거나 재생목록 카드 전체를 목록에서 제거할 수 있습니다."
+        )
+        return cls(
+            "",
+            parent=parent,
+            title_text="재생목록을 목록에서 제거하시겠습니까?",
+            detail_text=detail,
+            window_title="목록에서 삭제",
+            cancel_text="취소",
+            ok_text="전체 제거",
+            ok_style="DangerButton",
+            alt_button_text="완료만 남기기",
+            alt_style="PrimaryPopupButton",
+            show_permanent_delete=False,
+            compact_action_buttons=False,
+        )
+
+    @classmethod
+    def for_bulk_selection(cls, count, delete_files=True, permanent_delete=False, on_permanent_delete_changed=None, parent=None):
+        if delete_files:
+            title = f"선택한 {count}개 항목의 파일을 삭제하시겠습니까?"
+            detail = "다운로드된 파일이 삭제되며 목록에서도 제거됩니다."
+            ok_style = "DangerButton"
+            ok_text = "삭제"
+            show_perm = True
+        else:
+            title = f"선택한 {count}개 항목을 목록에서 삭제하시겠습니까?"
+            detail = "파일은 유지되고 목록에서만 제거됩니다."
+            ok_style = "PrimaryPopupButton"
+            ok_text = "삭제"
+            show_perm = False
+        return cls(
+            "",
+            parent=parent,
+            title_text=title,
+            detail_text=detail,
+            window_title="파일 삭제" if delete_files else "목록에서 삭제",
+            cancel_text="취소",
+            ok_text=ok_text,
+            ok_style=ok_style,
+            permanent_delete=permanent_delete,
+            on_permanent_delete_changed=on_permanent_delete_changed,
+            show_permanent_delete=show_perm,
+            compact_action_buttons=False,
+        )

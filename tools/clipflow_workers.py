@@ -6,12 +6,14 @@ class AnalyzeWorker(QObject):
     finished = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, url, cookie_source, output_ext, analyze_func):
+    def __init__(self, url, cookie_source, output_ext, analyze_func, skip_urls=None, resume_from_index=1):
         super().__init__()
         self.url = url
         self.cookie_source = cookie_source
         self.output_ext = output_ext
         self.analyze_func = analyze_func
+        self.skip_urls = list(skip_urls or [])
+        self.resume_from_index = max(1, int(resume_from_index or 1))
 
     @Slot()
     def run(self):
@@ -21,6 +23,8 @@ class AnalyzeWorker(QObject):
                 cookie_source=self.cookie_source,
                 output_ext=self.output_ext,
                 on_event=self.event.emit,
+                skip_urls=self.skip_urls,
+                resume_from_index=self.resume_from_index,
             )
             self.finished.emit(analysis)
         except Exception as exc:

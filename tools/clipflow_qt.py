@@ -4,7 +4,7 @@ import time
 from collections import OrderedDict, deque
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot, qInstallMessageHandler
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QInputMethodEvent, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QInputMethodEvent, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -30,7 +30,7 @@ try:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
+    from tools.clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
     from tools.clipflow_rows import build_quality_options
     from tools.clipflow_workers import AnalyzeWorker
     from tools.clipflow_dialogs import DeleteConfirmDialog
@@ -49,7 +49,7 @@ except ImportError:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from clipflow_widgets import CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
+    from clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
     from clipflow_rows import build_quality_options
     from clipflow_workers import AnalyzeWorker
     from clipflow_dialogs import DeleteConfirmDialog
@@ -110,22 +110,43 @@ def install_qt_warning_filter():
 
 
 def checkbox_outline_pixmap(size, color, checked=False):
-    pixmap = QPixmap(size, size)
+    """Crisp select-mode checkbox icon (toolbar). Uses vector stroke, not scaled SVG."""
+    # Render at 2x then downscale for smoother HiDPI edges.
+    scale = 2
+    pixel = int(size * scale)
+    pixmap = QPixmap(pixel, pixel)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setRenderHint(QPainter.SmoothPixmapTransform)
-    pen = QPen(QColor(color))
-    pen.setWidthF(1.4)
-    painter.setPen(pen)
-    painter.setBrush(Qt.NoBrush)
-    inset = pen.widthF() / 2 + 0.5
-    painter.drawRoundedRect(QRectF(inset, inset, size - inset * 2, size - inset * 2), 3, 3)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    stroke = 2.0 * scale
+    pen = QPen(QColor(color or "#111111"))
+    pen.setWidthF(stroke)
+    pen.setJoinStyle(Qt.RoundJoin)
+    pen.setCapStyle(Qt.RoundCap)
+    inset = stroke / 2.0
+    box = QRectF(inset, inset, pixel - stroke, pixel - stroke)
+    radius = 4.0 * scale
     if checked:
-        check_size = max(10, size - 5)
-        offset = (size - check_size) // 2
-        painter.drawPixmap(offset, offset, check_size, check_size, lucide_pixmap("check", check_size, color))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color or "#111111"))
+        painter.drawRoundedRect(QRectF(0, 0, pixel, pixel), radius + scale, radius + scale)
+        check_pen = QPen(QColor("#FFFFFF"))
+        check_pen.setWidthF(2.0 * scale)
+        check_pen.setCapStyle(Qt.RoundCap)
+        check_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(check_pen)
+        painter.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        path.moveTo(pixel * 0.22, pixel * 0.52)
+        path.lineTo(pixel * 0.42, pixel * 0.70)
+        path.lineTo(pixel * 0.78, pixel * 0.30)
+        painter.drawPath(path)
+    else:
+        painter.setPen(pen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRoundedRect(box, radius, radius)
     painter.end()
+    pixmap.setDevicePixelRatio(scale)
     return pixmap
 DOWNLOAD_INFO_CACHE_LIMIT = 20
 DOWNLOAD_INFO_CACHE_TTL_SECONDS = 600.0
@@ -157,13 +178,23 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 app.installEventFilter(manager)
                 app._clipflow_tooltip_manager = manager
         if analyze_func is engine.analyze_url:
-            def analyze_with_subprocess_boundary(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+            def analyze_with_subprocess_boundary(
+                url,
+                cookie_source=None,
+                output_ext=None,
+                on_event=None,
+                proxy_url=None,
+                skip_urls=None,
+                resume_from_index=1,
+            ):
                 return engine.analyze_url_in_subprocess(
                     url,
                     cookie_source=cookie_source,
                     output_ext=output_ext,
                     on_event=on_event,
                     proxy_url=proxy_url,
+                    skip_urls=skip_urls,
+                    resume_from_index=resume_from_index,
                 )
 
             analyze_with_subprocess_boundary._clipflow_uses_analysis_worker_pool = True
@@ -636,10 +667,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         empty_layout.setAlignment(Qt.AlignCenter)
         empty_layout.setSpacing(10)
         empty_glyph = LucideIconWidget("play", size=42, color=theme.BORDER_STRONG)
-        empty_title = QLabel("아직 담긴 영상이 없어요")
+        empty_title = QLabel("목록이 비어 있습니다")
         empty_title.setObjectName("SectionTitle")
         empty_title.setAlignment(Qt.AlignCenter)
-        empty_sub = QLabel("위에 URL을 붙여넣으면 분석해서 카드로 보여줄게요")
+        empty_sub = QLabel("URL을 입력하면 분석 결과가 표시됩니다")
         empty_sub.setObjectName("MetaText")
         empty_sub.setAlignment(Qt.AlignCenter)
         apply_tracking(empty_sub, 0.2)
@@ -1135,11 +1166,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return self._clip_range_from_texts(start_text, end_text)
 
     def _show_clip_range_dialog(self, initial=None):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("구간 추출")
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
+        dialog = AppDialog(self, window_title="구간 추출", title_text="", detail_text="", minimum_width=380)
         start = TimecodeInput("시작시간")
         end = TimecodeInput("종료시간")
         initial = initial or {}
@@ -1149,23 +1176,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if initial.get("end") is not None:
             end_seconds = int(float(initial.get("end") or 0))
             end.set_time_parts(end_seconds // 3600, (end_seconds % 3600) // 60, end_seconds % 60)
-        fields = QHBoxLayout()
-        fields.addWidget(self._time_field_box(start))
-        fields.addWidget(self._time_field_box(end))
-        layout.addLayout(fields)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = OutlinedButton("취소")
-        cancel.setObjectName("SecondaryButton")
-        apply_button = OutlinedButton("추출")
-        apply_button.setObjectName("PrimaryPopupButton")
-        apply_button.setDefault(True)
-        apply_button.setAutoDefault(True)
-        buttons.addWidget(cancel)
-        buttons.addWidget(apply_button)
-        layout.addLayout(buttons)
-        cancel.clicked.connect(dialog.reject)
-        apply_button.clicked.connect(dialog.accept)
+        fields = QWidget()
+        fields_layout = QHBoxLayout(fields)
+        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout.setSpacing(10)
+        fields_layout.addWidget(self._time_field_box(start))
+        fields_layout.addWidget(self._time_field_box(end))
+        dialog.add_body(fields)
+        dialog.add_action("cancel", "취소", "SecondaryButton", reject=True, min_width=72)
+        dialog.add_action("ok", "추출", "PrimaryPopupButton", default=True, choice="ok", min_width=72)
+        dialog.finalize()
         if dialog.exec() != QDialog.Accepted:
             return None
         return engine.normalize_clip_range(self._time_input_text(start), self._time_input_text(end))
@@ -1232,12 +1252,137 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._analysis_auto_download = False
         self._analysis_url = ""
         self._playlist_event_parent_id = ""
-        thread = self.analysis_thread
-        worker = self.analysis_worker
-        self.analysis_thread = None
-        self.analysis_worker = None
-        self._detach_running_thread(thread, worker)
+        self._stop_analysis_worker()
         self.primary_button.set_loading(False)
+
+    def _stop_analysis_worker(self):
+        """Stop analysis without destroying a still-running QThread (crash source).
+
+        Kill the analysis subprocess so the worker unblocks, disconnect UI event
+        handlers, and let the thread finish via failed/finished → quit. Refs are
+        cleared in ``_analysis_thread_finished``.
+        """
+        self._analysis_discard_result = True
+        worker = self.analysis_worker
+        if worker is not None:
+            for signal_name, slot in (
+                ("event", self._handle_analysis_event),
+                ("finished", self._analysis_finished),
+                ("failed", self._analysis_failed),
+            ):
+                signal = getattr(worker, signal_name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    try:
+                        signal.disconnect()
+                    except Exception:
+                        pass
+            # Keep worker.finished/failed → thread.quit connections from start.
+        try:
+            engine.analysis_process_pool().close_all()
+        except Exception:
+            pass
+
+    def _playlist_analyzed_skip_urls(self, parent):
+        skip = []
+        for child in self._playlist_children_for_parent(parent):
+            if child.get("child_loading"):
+                continue
+            url = str(
+                child.get("source_url")
+                or child.get("input_url")
+                or (child.get("candidate") or {}).get("webpage_url")
+                or (child.get("candidate") or {}).get("source")
+                or ""
+            ).strip()
+            if url:
+                skip.append(url)
+        return list(dict.fromkeys(skip))
+
+    def _pause_playlist_analysis(self, parent, auto_download=False):
+        """Stop analysis mid-playlist while keeping already-ready children."""
+        if not parent or parent.get("kind") != "playlist":
+            return
+        source_url = self._playlist_source_url(parent) or self._analysis_url or ""
+        skip_urls = self._playlist_analyzed_skip_urls(parent)
+        parent["_playlist_analysis_resume"] = {
+            "url": source_url,
+            "skip_urls": skip_urls,
+            "auto_download": bool(auto_download or self._analysis_auto_download),
+        }
+        parent["_playlist_auto_download_paused"] = True
+        parent["analysis_loading"] = True
+        self._analysis_auto_download = False
+        # Keep parent id so progressive events still map if any late events arrive.
+        self._playlist_event_parent_id = parent.get("id") or self._playlist_event_parent_id
+        self._stop_analysis_worker()
+        # Drop only in-flight loading placeholders.
+        parent_id = parent.get("id")
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row.get("parent_playlist_id") == parent_id and row.get("child_loading"))
+        ]
+        self.primary_button.set_loading(False)
+
+    def _resume_playlist_analysis(self, parent):
+        """Continue playlist analysis from entries not yet analyzed."""
+        if not parent or parent.get("kind") != "playlist":
+            return False
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            # Previous pause is still winding down; retry shortly.
+            QTimer.singleShot(300, lambda p=parent: self._resume_playlist_analysis(p))
+            return True
+        resume = parent.get("_playlist_analysis_resume") or {}
+        url = str(resume.get("url") or self._playlist_source_url(parent) or "").strip()
+        if not url:
+            return False
+        skip_urls = list(self._playlist_analyzed_skip_urls(parent) or resume.get("skip_urls") or [])
+        auto_download = bool(resume.get("auto_download"))
+        parent.pop("_playlist_auto_download_paused", None)
+        parent["analysis_loading"] = True
+        parent["status"] = ANALYZING_STATUS
+        parent["status_detail"] = ""
+        parent["progress_text"] = ANALYZING_STATUS
+        # Refresh resume snapshot for a later pause.
+        parent["_playlist_analysis_resume"] = {
+            "url": url,
+            "skip_urls": skip_urls,
+            "auto_download": auto_download,
+        }
+        self._analysis_discard_result = False
+        self._analysis_auto_download = auto_download
+        self._analysis_url = url
+        self._playlist_event_parent_id = parent.get("id") or ""
+        self._cookie_permission_prompt_shown = False
+        self._set_status(ANALYZING_STATUS)
+        widget = parent.get("widget")
+        if widget:
+            widget.set_status(ANALYZING_STATUS)
+            widget._refresh_actions()
+        self.analysis_thread = QThread(self)
+        self.analysis_worker = AnalyzeWorker(
+            url,
+            cookie_source_from_display(self.cookie_combo.currentText()),
+            engine.ALL_OUTPUT_EXT,
+            self.analyze_func,
+            skip_urls=skip_urls,
+            resume_from_index=1,
+        )
+        self.analysis_worker.moveToThread(self.analysis_thread)
+        self.analysis_thread.started.connect(self.analysis_worker.run)
+        self.analysis_worker.event.connect(self._handle_analysis_event)
+        self.analysis_worker.finished.connect(self._analysis_finished)
+        self.analysis_worker.failed.connect(self._analysis_failed)
+        self.analysis_worker.finished.connect(self.analysis_thread.quit)
+        self.analysis_worker.failed.connect(self.analysis_thread.quit)
+        self.analysis_thread.finished.connect(self.analysis_worker.deleteLater)
+        self.analysis_thread.finished.connect(self._analysis_thread_finished)
+        self.analysis_thread.start()
+        return True
 
     def _start_analysis(self, auto_download=False):
         if self.analysis_thread and self.analysis_thread.isRunning():
@@ -1315,46 +1460,20 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return None
 
     def _show_playlist_choice_dialog(self, url):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("다운로드 방식 선택")
-        dialog.setModal(True)
-        dialog.setMinimumWidth(380)
-        choice = {"value": None}
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-        title = QLabel("이 링크는 영상과 재생목록을 함께 가리켜요")
-        title.setObjectName("SectionTitle")
-        title.setWordWrap(True)
-        detail = QLabel(str(url))
-        detail.setObjectName("MetaText")
-        detail.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(detail)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = OutlinedButton("취소")
-        cancel.setObjectName("SecondaryButton")
-        single = OutlinedButton("단일 영상")
-        single.setObjectName("PrimaryPopupButton")
-        playlist = OutlinedButton("재생목록")
-        single.setDefault(True)
-        single.setAutoDefault(True)
-
-        def choose(value):
-            choice["value"] = value
-            dialog.accept()
-
-        cancel.clicked.connect(dialog.reject)
-        single.clicked.connect(lambda: choose("single"))
-        playlist.clicked.connect(lambda: choose("playlist"))
-        buttons.addWidget(cancel)
-        buttons.addWidget(single)
-        buttons.addWidget(playlist)
-        layout.addLayout(buttons)
+        dialog = AppDialog(
+            self,
+            window_title="다운로드 대상 선택",
+            title_text="이 URL은 단일 영상과 재생목록을 모두 포함합니다.",
+            detail_text="다운로드할 대상을 선택하세요.",
+            minimum_width=380,
+        )
+        dialog.add_action("cancel", "취소", "SecondaryButton", reject=True, min_width=72)
+        dialog.add_action("single", "단일 영상", "PrimaryPopupButton", default=True, choice="single", min_width=96)
+        dialog.add_action("playlist", "재생목록", "SecondaryButton", choice="playlist", min_width=96)
+        dialog.finalize()
         if dialog.exec() != QDialog.Accepted:
             return None
-        return choice["value"]
+        return dialog.result_choice
 
     def _analysis_loading_rows(self, url):
         if engine.looks_like_playlist_url(url):
@@ -1486,40 +1605,27 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._show_macos_cookie_permission_dialog()
 
     def _show_macos_cookie_permission_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("쿠키 접근 권한 필요")
-        dialog.setModal(True)
-        dialog.setMinimumWidth(440)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
-        title = QLabel("로그인이 필요한 항목이에요")
-        title.setObjectName("SectionTitle")
-        title.setWordWrap(True)
-        detail = QLabel(
-            "비공개·로그인 전용 영상이나 재생목록은 브라우저의 로그인 쿠키가 필요해요.\n"
-            "macOS에서는 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 있어야 합니다.\n\n"
-            + engine.macos_full_disk_access_hint(APP_NAME)
+        dialog = AppDialog(
+            self,
+            window_title="쿠키 접근 권한 필요",
+            title_text="로그인이 필요한 항목입니다.",
+            detail_text=(
+                "비공개 또는 로그인 전용 콘텐츠는 브라우저 로그인 쿠키가 필요합니다.\n"
+                "macOS에서 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 필요합니다.\n\n"
+                + engine.macos_full_disk_access_hint(APP_NAME)
+            ),
+            minimum_width=440,
         )
-        detail.setObjectName("MetaText")
-        detail.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(detail)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        later = OutlinedButton("나중에")
-        later.setObjectName("SecondaryButton")
-        later.setCursor(Qt.PointingHandCursor)
-        open_button = OutlinedButton("전체 디스크 접근 열기")
-        open_button.setObjectName("PrimaryPopupButton")
-        open_button.setCursor(Qt.PointingHandCursor)
-        open_button.setDefault(True)
-        open_button.setAutoDefault(True)
-        later.clicked.connect(dialog.reject)
-        open_button.clicked.connect(lambda: (self._open_full_disk_access_settings(), dialog.accept()))
-        buttons.addWidget(later)
-        buttons.addWidget(open_button)
-        layout.addLayout(buttons)
+        dialog.add_action("later", "나중에", "SecondaryButton", reject=True, min_width=72)
+        dialog.add_action(
+            "open",
+            "전체 디스크 접근 열기",
+            "PrimaryPopupButton",
+            default=True,
+            min_width=140,
+            on_click=lambda: (self._open_full_disk_access_settings(), dialog.finish("open")),
+        )
+        dialog.finalize()
         dialog.exec()
 
     def _open_full_disk_access_settings(self):
@@ -1540,8 +1646,21 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis_thread = None
         self.analysis_worker = None
         self._analysis_url = ""
+        # Keep paused playlist parents (resume state) and their ready children.
+        # Only strip ephemeral loading placeholders that no longer belong.
         if any(self._is_analysis_loading_row(row) for row in self.rows):
-            self.rows = [row for row in self.rows if not self._is_analysis_loading_row(row)]
+            keep = []
+            for row in self.rows:
+                if row.get("kind") == "playlist" and row.get("_playlist_analysis_resume"):
+                    keep.append(row)
+                    continue
+                if row.get("is_playlist_child") and not row.get("child_loading"):
+                    keep.append(row)
+                    continue
+                if self._is_analysis_loading_row(row):
+                    continue
+                keep.append(row)
+            self.rows = keep
             if self.selected_row_index >= len(self.rows):
                 self.selected_row_index = len(self.rows) - 1
             self._render_rows()
@@ -1953,9 +2072,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             token in lower
             for token in ("could not find", "cookies database", "decrypt", "permission", "operation not permitted")
         ):
-            return "브라우저 쿠키를 읽을 수 없어요. 설정 → 전체 디스크 접근에서 ClipFlow 허용"
+            return "브라우저 쿠키를 읽을 수 없습니다. 시스템 설정 → 전체 디스크 접근에서 ClipFlow를 허용하세요."
         if engine.classify_error(message) == "로그인/권한 필요":
-            return "로그인이 필요한 항목이에요. 상단 쿠키에서 Chrome 등 로그인한 브라우저를 선택하세요."
+            return "로그인이 필요한 항목입니다. 상단 쿠키에서 로그인한 브라우저를 선택하세요."
         return message
 
     def _first_visible_analyzed_row_index_for_url(self, url):

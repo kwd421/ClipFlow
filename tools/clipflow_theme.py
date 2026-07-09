@@ -263,10 +263,13 @@ QLabel#SortLabel {{
 QLabel#PlaylistPill {{
     background: {ACCENT_TINT};
     color: {ACCENT};
-    border-radius: 8px;
-    padding: 2px 8px;
+    border-radius: 9px;
+    padding: 1px 8px 0px 8px;
     font-size: 11px;
     font-weight: 700;
+    min-height: 18px;
+    max-height: 18px;
+    margin-top: 2px;
 }}
 QLabel#FieldIcon {{
     color: {GRAPHITE};
@@ -643,6 +646,7 @@ SORT_KEY_SETTING = "sort_key"
 SORT_DESC_SETTING = "sort_desc"
 WINDOW_SIZE_SETTING = "window_size"
 DOWNLOAD_CONCURRENCY_SETTING = "download_concurrency"
+PERMANENT_DELETE_SETTING = "permanent_delete"
 
 PREFERENCE_DEFAULTS = {
     "quality": "자동",
