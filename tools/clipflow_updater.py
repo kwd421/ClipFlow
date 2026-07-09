@@ -481,6 +481,15 @@ def _bind_winsparkle_api(library):
     library.win_sparkle_check_update_without_ui.restype = None
 
 
+# Set when WinSparkle asks the host to exit so close handlers can finish fast.
+_UPDATE_SHUTDOWN_REQUESTED = False
+
+
+def update_shutdown_requested():
+    """True while WinSparkle is replacing this process with a newer build."""
+    return bool(_UPDATE_SHUTDOWN_REQUESTED)
+
+
 def _request_app_shutdown():
     try:
         from PySide6.QtWidgets import QApplication
@@ -510,11 +519,15 @@ def _init_winsparkle_library(library):
 
     @_winsparkle_int_callback_type()
     def can_shutdown():
+        # Always allow install; WinSparkle docs: not called from main thread.
         return 1
 
     @_winsparkle_void_callback_type()
     def shutdown_request():
-        _request_app_shutdown()
+        # Must not touch Qt objects from this (non-main) thread.
+        global _UPDATE_SHUTDOWN_REQUESTED
+        _UPDATE_SHUTDOWN_REQUESTED = True
+        _dispatch_to_main_thread(_request_app_shutdown)
 
     callbacks.extend([can_shutdown, shutdown_request])
     library.win_sparkle_set_can_shutdown_callback(can_shutdown)

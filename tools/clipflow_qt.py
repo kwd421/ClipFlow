@@ -255,7 +255,19 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._download_info_cache = OrderedDict()
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
-        self.setWindowTitle(APP_NAME)
+        # Frozen builds show version so update success is obvious (title bar).
+        try:
+            from tools.clipflow_updater import updater_app_version
+        except ImportError:
+            try:
+                from clipflow_updater import updater_app_version
+            except ImportError:
+                updater_app_version = None
+        version = updater_app_version() if callable(updater_app_version) else ""
+        if getattr(sys, "frozen", False) and version and version not in {"0.0.0", ""}:
+            self.setWindowTitle(f"{APP_NAME} {version}")
+        else:
+            self.setWindowTitle(APP_NAME)
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(WINDOW_MINIMUM_SIZE)
         self.resize(self._initial_window_size())
@@ -388,6 +400,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if worker is not None:
                 thread.finished.connect(worker.deleteLater)
             thread.quit()
+            # Update replace must not stall in long waits (old UI freezes, installer waits).
+            try:
+                from tools.clipflow_updater import update_shutdown_requested
+            except ImportError:
+                from clipflow_updater import update_shutdown_requested
+            if update_shutdown_requested():
+                wait_ms = min(int(wait_ms or 0), 200)
             try:
                 thread.wait(wait_ms)
             except TypeError:
@@ -397,7 +416,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 if callable(terminate):
                     terminate()
                     try:
-                        thread.wait(1000)
+                        thread.wait(200 if update_shutdown_requested() else 1000)
                     except TypeError:
                         thread.wait()
         else:
@@ -426,13 +445,19 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.active_downloads = []
         self.queued_download_rows = []
         try:
-            engine.analysis_process_pool().close_all()
-        except Exception:
-            pass
-        try:
-            engine.download_process_pool().close_all()
-        except Exception:
-            pass
+            from tools.clipflow_updater import update_shutdown_requested
+        except ImportError:
+            from clipflow_updater import update_shutdown_requested
+        # During WinSparkle replace, skip pool drains that can hang the old UI.
+        if not update_shutdown_requested():
+            try:
+                engine.analysis_process_pool().close_all()
+            except Exception:
+                pass
+            try:
+                engine.download_process_pool().close_all()
+            except Exception:
+                pass
 
     def _build_ui(self):
         root = QWidget()
