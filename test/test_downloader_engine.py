@@ -1135,6 +1135,41 @@ for line in sys.stdin:
             self.assertEqual(calls[0][0], ["ffmpeg-test", "-y", "-i", str(source), "-vn", str(output)])
             self.assertTrue(any(event.get("type") == "file" and event.get("path") == str(output) for event in events))
 
+    def test_run_ffmpeg_command_stops_process_when_cancelled(self):
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+                self.communicate_calls = 0
+                self.terminated = False
+
+            def communicate(self, timeout=None):
+                self.communicate_calls += 1
+                raise subprocess.TimeoutExpired("ffmpeg-test", timeout)
+
+            def poll(self):
+                return self.returncode
+
+        process = FakeProcess()
+        cancel_checks = iter([False, True])
+
+        def fake_terminate(target):
+            target.terminated = True
+            target.returncode = -1
+
+        with mock.patch.object(engine.subprocess, "Popen", return_value=process), mock.patch.object(
+            engine,
+            "terminate_process_tree",
+            side_effect=fake_terminate,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                engine.run_ffmpeg_command(
+                    ["ffmpeg-test", "-i", "input.mp4", "output.mp3"],
+                    cancel_check=lambda: next(cancel_checks),
+                )
+
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.communicate_calls, 1)
+
     def test_extract_existing_media_segment_uses_local_file_without_downloading(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "Already Downloaded.mp4"

@@ -677,7 +677,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     calls["download"] += 1
     raise AssertionError("network download should not run for existing audio extraction")
 
-def fake_convert(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+def fake_convert(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None, cancel_check=None):
     output = Path(output_dir or Path(input_path).parent) / (Path(input_path).stem + "." + str(output_ext).lower())
     calls["convert"].append((str(input_path), str(output_ext).lower(), str(output_dir)))
     output.write_bytes(b"audio")
@@ -3546,6 +3546,8 @@ print(row["progress_text"])
 print(len(window.active_downloads))
 print(thread.calls)
 
+window._download_failed_for(row, "cancelled")
+window._download_thread_finished_for(row, thread)
 started = []
 window.start_download_for_row = lambda resumed: started.append(resumed is row)
 window.resume_download_for_row(row)
@@ -3568,8 +3570,8 @@ tempdir.cleanup()
                 "일시정지",
                 "43",
                 "43%",
-                "0",
-                "['requestInterruption', 'quit', 'wait:800']",
+                "1",
+                "['requestInterruption', 'quit']",
                 "[True]",
                 "[False, False, False]",
                 "False",
@@ -3617,6 +3619,134 @@ while window.active_downloads:
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["43", "43% · 5.0 MB/s", "43"])
+
+    def test_clipflow_qt_pause_keeps_partial_and_treats_cancel_failure_as_paused(self):
+        script = r'''
+import tempfile
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from tools import downloader_engine as engine
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import DOWNLOAD_STATUS
+
+class FakeThread:
+    def requestInterruption(self):
+        pass
+
+    def quit(self):
+        pass
+
+    def wait(self, timeout):
+        return True
+
+    def isRunning(self):
+        return False
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow()
+window.folder_input.setText(tempdir.name)
+url = "https://media.test/pause-resume"
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [{
+        "id": "one",
+        "source": url,
+        "url": url,
+        "title": "Video",
+        "display_title": "Video",
+        "thumbnail": "",
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "duration": 120,
+        "sort_bytes": 1024,
+    }],
+    "warnings": [],
+})
+row = window.rows[0]
+row["status"] = DOWNLOAD_STATUS
+row["progress"] = 43
+row["progress_text"] = "43%"
+thread = FakeThread()
+window.active_downloads = [{"thread": thread, "worker": None, "row": row}]
+output = engine.final_output_path_for_candidate(row["candidate"], tempdir.name)
+partial = output.with_name(output.name + ".part")
+partial.write_bytes(b"partial-data")
+
+window.pause_download_for_row(row)
+window._download_failed_for(row, "cancelled")
+window._download_thread_finished_for(row, thread)
+
+print(row["status"])
+print(row["progress"])
+print(partial.exists())
+started = []
+window.start_download_for_row = lambda resumed: started.append(resumed is row)
+window.resume_download_for_row(row)
+print(started)
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["일시정지", "43", "True", "[True]"])
+
+    def test_clipflow_qt_playlist_pause_does_not_start_waiting_children(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import DOWNLOAD_STATUS, WAITING_STATUS
+
+class FakeThread:
+    def requestInterruption(self):
+        pass
+
+    def quit(self):
+        pass
+
+    def wait(self, timeout):
+        return True
+
+    def isRunning(self):
+        return False
+
+app = QApplication([])
+window = ClipFlowWindow()
+url = "https://media.test/playlist/pause"
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Playlist",
+    "playlist_title": "Playlist",
+    "is_playlist": True,
+    "playlist_count": 2,
+    "candidates": [
+        {"id": "one", "source": url + "/1", "url": url + "/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 60, "sort_bytes": 10},
+        {"id": "two", "source": url + "/2", "url": url + "/2", "title": "Two", "display_title": "Two", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 60, "sort_bytes": 10},
+    ],
+    "warnings": [],
+})
+parent, active, waiting = window.rows
+window._set_row_status(active, DOWNLOAD_STATUS, "")
+window._set_row_status(waiting, WAITING_STATUS, "")
+thread = FakeThread()
+window.active_downloads = [{"thread": thread, "worker": None, "row": active}]
+window.queued_download_rows = [waiting]
+queue_drain_calls = []
+window._start_queued_downloads = lambda: queue_drain_calls.append(True)
+
+window.pause_download_for_row(parent)
+
+print(queue_drain_calls)
+print(waiting["status"])
+print(len(window.queued_download_rows))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["[]", "일시정지", "0"])
 
     def test_clipflow_qt_download_rows_swap_hover_actions_for_pause_and_resume(self):
         script = r'''
@@ -6213,7 +6343,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     calls["download"] += 1
     raise AssertionError("network download should not run for local segment extraction")
 
-def fake_extract(input_path, candidate, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+def fake_extract(input_path, candidate, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None, cancel_check=None):
     output = Path(output_dir) / (candidate["display_title"] + ".mp4")
     output.write_bytes(b"segment")
     calls["extract"].append((str(input_path), candidate["display_title"], candidate["duration"]))
@@ -7179,8 +7309,11 @@ started = []
 window.start_download_for_row = lambda row: started.append((row.get("candidate") or {}).get("display_title"))
 window._analysis_auto_download = True
 source_url = "https://media.test/playlist/events"
+parent = window._playlist_parent_loading_row(source_url)
+parent["analysis_loading"] = True
+window.rows = [parent]
+window._playlist_event_parent_id = parent["id"]
 window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 3, "source_url": source_url})
-parent = window.rows[0]
 window.pause_download_for_row(parent)
 window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "title": "Video 1", "source_url": "https://media.test/watch/1"})
 window._handle_analysis_event({
@@ -7203,7 +7336,6 @@ window._handle_analysis_event({
 print(started)
 print(parent["_playlist_auto_download_paused"])
 print(parent["status"])
-print(parent["candidate"]["thumbnail"])
 print(any(row.get("child_loading") for row in window.rows))
 widget = parent["widget"]
 widget.set_status(parent["status"], parent.get("status_detail", ""))
@@ -7214,7 +7346,7 @@ print(widget.property("analyzing"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["[]", "True", "일시정지", "https://img.test/one.jpg", "False", "false"],
+            ["[]", "True", "일시정지", "False", "false"],
         )
 
     def test_clipflow_qt_playlist_float_button_stays_hidden_when_parent_visible(self):

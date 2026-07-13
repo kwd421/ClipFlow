@@ -1233,7 +1233,7 @@ def terminate_process_tree(process, timeout=2.0):
                 pass
 
 
-def run_ffmpeg_command(command, timeout=900, error_label="ffmpeg failed"):
+def run_ffmpeg_command(command, timeout=900, error_label="ffmpeg failed", cancel_check=None, poll_interval=0.1):
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1241,7 +1241,23 @@ def run_ffmpeg_command(command, timeout=900, error_label="ffmpeg failed"):
         **_hidden_subprocess_kwargs(),
     )
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if cancel_check is None:
+            stdout, stderr = process.communicate(timeout=timeout)
+        else:
+            deadline = time.monotonic() + max(0.1, float(timeout))
+            interval = max(0.01, float(poll_interval))
+            while True:
+                if cancel_check():
+                    terminate_process_tree(process)
+                    raise RuntimeError(f"{error_label}: cancelled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(interval, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except subprocess.TimeoutExpired as exc:
         terminate_process_tree(process)
         raise RuntimeError(f"{error_label}: timed out after {int(timeout)}s") from exc
@@ -1340,7 +1356,15 @@ def run_ffmpeg_command_with_output_progress(
     return stdout, stderr
 
 
-def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+def convert_existing_media_to_audio(
+    input_path,
+    output_ext,
+    output_dir=None,
+    on_event=None,
+    ffmpeg_exe=None,
+    runner=None,
+    cancel_check=None,
+):
     input_path = Path(input_path).expanduser()
     if not input_path.is_file():
         raise FileNotFoundError(f"Source file not found: {input_path}")
@@ -1366,24 +1390,46 @@ def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_
 
     command = [str(ffmpeg_exe), "-y", "-i", str(input_path), "-vn", str(output_path)]
     emit_event(on_event, "status", message="Extracting audio")
-    completed = (runner or subprocess.run)(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_hidden_subprocess_kwargs(),
-    )
-    if completed.returncode != 0:
-        message = (completed.stderr or completed.stdout or "ffmpeg audio extraction failed").strip()
-        raise RuntimeError(message)
+    try:
+        if runner is not None:
+            completed = runner(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **_hidden_subprocess_kwargs(),
+            )
+            if completed.returncode != 0:
+                message = (completed.stderr or completed.stdout or "ffmpeg audio extraction failed").strip()
+                raise RuntimeError(message)
+        else:
+            run_ffmpeg_command(
+                command,
+                error_label="ffmpeg audio extraction failed",
+                cancel_check=cancel_check,
+            )
+    except Exception:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise
 
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_path))
     return result
 
 
-def extract_existing_media_segment(input_path, candidate, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+def extract_existing_media_segment(
+    input_path,
+    candidate,
+    output_dir=None,
+    on_event=None,
+    ffmpeg_exe=None,
+    runner=None,
+    cancel_check=None,
+):
     input_path = Path(input_path).expanduser()
     if not input_path.is_file():
         raise FileNotFoundError(f"Source file not found: {input_path}")
@@ -1425,21 +1471,31 @@ def extract_existing_media_segment(input_path, candidate, output_dir=None, on_ev
         command += ["-c", "copy"]
     command += ["-movflags", "+faststart", "-f", output_format, str(part_path)]
     emit_event(on_event, "status", message="Extracting selected segment")
-    completed = (runner or subprocess.run)(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_hidden_subprocess_kwargs(),
-    )
-    if completed.returncode != 0:
+    try:
+        if runner is not None:
+            completed = runner(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **_hidden_subprocess_kwargs(),
+            )
+            if completed.returncode != 0:
+                message = (completed.stderr or completed.stdout or "ffmpeg segment extraction failed").strip()
+                raise RuntimeError(message)
+        else:
+            run_ffmpeg_command(
+                command,
+                error_label="ffmpeg segment extraction failed",
+                cancel_check=cancel_check,
+            )
+    except Exception:
         try:
             part_path.unlink()
         except OSError:
             pass
-        message = (completed.stderr or completed.stdout or "ffmpeg segment extraction failed").strip()
-        raise RuntimeError(message)
+        raise
     if not completed_output_exists(part_path, candidate):
         raise RuntimeError("ffmpeg segment extraction produced no output")
     part_path.replace(output_path)

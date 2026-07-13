@@ -132,6 +132,7 @@ class DownloadMixin:
                 ext,
                 output_dir=source_path.parent,
                 on_event=on_event,
+                cancel_check=lambda: QThread.currentThread().isInterruptionRequested(),
             )
 
         return convert_local_audio
@@ -151,6 +152,7 @@ class DownloadMixin:
                 candidate,
                 output_dir=output_dir,
                 on_event=on_event,
+                cancel_check=lambda: QThread.currentThread().isInterruptionRequested(),
             )
 
         return extract_local_segment
@@ -646,34 +648,23 @@ class DownloadMixin:
         if not items:
             return
         row["download_cancel_requested"] = True
-        pending_items = []
         for item in items:
-            if not self._cancel_active_download_item(item):
-                pending_items.append(item)
-        if pending_items:
-            # Keep live threads in active_downloads so _row_is_downloading / finished
-            # handlers still find this row until the worker actually exits.
-            self.active_downloads = [
-                item
-                for item in self.active_downloads
-                if item.get("row") is not row or item in pending_items
-            ]
-            row["_pause_cleanup_pending"] = True
-            row["progress_text"] = row.get("progress_text") or ""
-            self._set_row_status(row, PAUSED_STATUS, "일시정지 정리 중")
-            widget = row.get("widget")
-            if widget:
-                widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
-                widget._refresh_actions()
-            QTimer.singleShot(600, lambda r=row: self._finish_delayed_pause_cleanup(r))
-        else:
-            self.active_downloads = [item for item in self.active_downloads if item.get("row") is not row]
-            self._set_row_paused(row)
+            self._cancel_active_download_item(item)
+        # Keep every cancelled item active until its queued worker/thread signals
+        # have been processed. Clearing the cancel flag early turns a late
+        # failed("cancelled") signal into a real download error.
+        row["_pause_cleanup_pending"] = True
+        row["progress_text"] = row.get("progress_text") or ""
+        self._set_row_status(row, PAUSED_STATUS, "일시정지 정리 중")
+        widget = row.get("widget")
+        if widget:
+            widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
+            widget._refresh_actions()
+        QTimer.singleShot(600, lambda r=row: self._finish_delayed_pause_cleanup(r))
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
         self._refresh_parent_for_child(row)
-        self._start_queued_downloads()
 
     def _finish_delayed_pause_cleanup(self, row):
         if not row or row not in self.rows:
@@ -708,7 +699,7 @@ class DownloadMixin:
         self.resume_download_for_row(row)
 
     def _cancel_active_download_item(self, item):
-        """Request cancel and wait briefly. Returns True if the worker thread has stopped."""
+        """Request cancellation without blocking the UI thread."""
         row = item.get("row")
         row_id = str((row or {}).get("id") or "")
         if row_id:
@@ -723,32 +714,12 @@ class DownloadMixin:
             method = getattr(thread, method_name, None)
             if callable(method):
                 method()
-        wait = getattr(thread, "wait", None)
-        stopped = True
-        if callable(wait):
-            try:
-                stopped = bool(wait(800))
-            except TypeError:
-                stopped = bool(wait())
-        if not stopped:
-            terminate = getattr(thread, "terminate", None)
-            if callable(terminate):
-                terminate()
-            if callable(wait):
-                try:
-                    stopped = bool(wait(1000))
-                except TypeError:
-                    wait()
-                    stopped = not thread.isRunning()
-        if not stopped:
-            try:
-                stopped = not thread.isRunning()
-            except Exception:
-                stopped = False
-        return bool(stopped)
+        try:
+            return not thread.isRunning()
+        except Exception:
+            return False
 
     def _set_row_paused(self, row):
-        self._cleanup_row_partial_files(row)
         row["download_starting"] = False
         row.pop("download_finishing", None)
         row.pop("active_download_candidate", None)
@@ -1176,6 +1147,8 @@ class DownloadMixin:
             item for item in self.active_downloads
             if item.get("thread") is not thread and (row is None or item.get("row") is not row)
         ]
+        if row and (row.get("_pause_cleanup_pending") or row.get("download_cancel_requested")):
+            self._complete_pause_cleanup(row)
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
