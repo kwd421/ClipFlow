@@ -1,4 +1,5 @@
 import http.client
+import io
 import json
 import os
 import re
@@ -47,6 +48,8 @@ ISO_DURATION_RE = re.compile(
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_HTML_BYTES = 5 * 1024 * 1024
 MAX_APPCAST_BYTES = 1 * 1024 * 1024
+BROWSER_NETLOG_MAX_BYTES = 32 * 1024 * 1024
+BROWSER_MEDIA_CAPTURE_GRACE_SECONDS = 2.0
 
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "flv", "ts"}
 AUDIO_OUTPUT_EXTENSIONS = {"mp3", "wav", "aac"}
@@ -63,8 +66,9 @@ PAGE_THUMBNAIL_TIMEOUT = 8
 BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
 BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
+BROWSER_RESOURCE_URL_MAX_AGE = 60.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
-BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
+BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 600
 def _env_int(name, default, minimum=1, maximum=64):
     try:
         return max(minimum, min(maximum, int(os.environ.get(name, default))))
@@ -90,6 +94,14 @@ CHZZK_ROUTE_PROBE_TIMEOUT = _env_int("CLIPFLOW_CHZZK_PROBE_TIMEOUT_SEC", 12, 3, 
 CHZZK_ROUTE_LARGE_VOD_BYTES = 10 * 1024 * 1024 * 1024
 CHZZK_ROUTE_LONG_VOD_SECONDS = 3600
 CHZZK_DIRECT_RANGE_THROTTLE_RATIO = 0.65
+CHZZK_HLS_COMPARABLE_DIRECT_RATIO = 0.60
+CHZZK_HLS_SEGMENTED_VOD_BYTES = 1024 * 1024 * 1024
+CHZZK_HLS_SEGMENTED_VOD_SECONDS = 20 * 60
+CHZZK_HLS_SEGMENTED_VOD_SEGMENTS = 300
+CHZZK_DIRECT_SLOW_FALLBACK_SECONDS = float(_env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_SEC", 25, 5, 120))
+CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES = 64 * 1024 * 1024
+CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC = _env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_MBPS", 6, 1, 50) * 1024 * 1024
+CHZZK_CLIP_AUTO_ROUTE_MIN_SECONDS = 300
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -3543,6 +3555,27 @@ def should_try_browser_dom_fallback(message):
     }
 
 
+def ytdlp_url_uses_only_generic_extractor(url, extractor_classes=None):
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    if Path(urllib.parse.unquote(parsed.path)).suffix.lower().lstrip(".") in VIDEO_EXTENSIONS:
+        return False
+    if extractor_classes is None:
+        try:
+            from yt_dlp.extractor import gen_extractor_classes
+
+            extractor_classes = gen_extractor_classes()
+        except ImportError:
+            return False
+    matched = []
+    for extractor_class in extractor_classes:
+        try:
+            if extractor_class.suitable(url):
+                matched.append(str(getattr(extractor_class, "IE_NAME", "") or extractor_class.__name__).casefold())
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return bool(matched) and all(name == "generic" for name in matched)
+
+
 def is_audio_format(fmt):
     return (
         str(fmt.get("vcodec") or "none").lower() == "none"
@@ -4124,6 +4157,217 @@ def fetch_dom_for_fallback(url, on_event=None, timeout=90):
     dom = dump_dom_with_browser(url, on_event=on_event, timeout=chrome_timeout)
     remember_browser_dom_html(url, dom)
     return dom
+
+
+def _urls_from_json_value(value):
+    urls = []
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if key in {"url", "original_url"} and isinstance(child, str):
+                    urls.append(child)
+                elif isinstance(child, (dict, list)):
+                    pending.append(child)
+        elif isinstance(current, list):
+            pending.extend(current)
+    return urls
+
+
+def browser_resource_urls_from_netlog_text(text):
+    text = str(text or "")
+    urls = []
+    try:
+        urls.extend(_urls_from_json_value(json.loads(text)))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Chrome may be terminated after media appears, leaving the outer NetLog JSON unfinished.
+        for match in re.finditer(r'"(?:url|original_url)"\s*:\s*("(?:\\.|[^"\\])*")', text):
+            try:
+                urls.append(json.loads(match.group(1)))
+            except json.JSONDecodeError:
+                continue
+    deduped = []
+    seen = set()
+    for url in urls:
+        url = str(url or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped
+
+
+def height_from_browser_resource_url(media_url):
+    path = urllib.parse.unquote(urllib.parse.urlsplit(str(media_url or "")).path)
+    common_heights = {144, 240, 270, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320}
+    heights = [safe_int(value) for value in re.findall(r"(?<!\d)(\d{3,4})p(?!\d)", path, flags=re.IGNORECASE)]
+    heights.extend(safe_int(part) for part in path.split("/") if part.isdigit())
+    return max((height for height in heights if height in common_heights), default=0)
+
+
+def browser_resource_media_from_urls(resource_urls):
+    items = []
+    seen = set()
+    for resource_url in resource_urls or []:
+        media_url = html_lib.unescape(str(resource_url or "")).replace("\\/", "/").strip()
+        parsed = urllib.parse.urlsplit(media_url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        path = urllib.parse.unquote(parsed.path).lower()
+        if path.endswith(".m3u8"):
+            media_format = "hls"
+        elif path.endswith(".mpd"):
+            media_format = "dash"
+        elif path.endswith((".mp4", ".m4v", ".mov")):
+            media_format = "mp4"
+        elif path.endswith(".webm"):
+            media_format = "webm"
+        else:
+            continue
+        if media_url in seen:
+            continue
+        seen.add(media_url)
+        height = height_from_browser_resource_url(media_url)
+        items.append(
+            {
+                "videoUrl": media_url,
+                "format": media_format,
+                "quality": height,
+                "height": height,
+                "source": "browser-resource",
+            }
+        )
+    return items
+
+
+def _read_new_netlog_urls(path, offset=0, carry=""):
+    try:
+        size = min(path.stat().st_size, BROWSER_NETLOG_MAX_BYTES)
+        if size <= offset:
+            return [], offset, carry
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read(size - offset)
+    except OSError:
+        return [], offset, carry
+    text = carry + chunk.decode("utf-8", errors="replace")
+    urls = browser_resource_urls_from_netlog_text(text)
+    return urls, size, text[-32768:]
+
+
+def browser_debug_page_title(profile_dir, page_url, timeout=0.5):
+    port_path = Path(profile_dir) / "DevToolsActivePort"
+    try:
+        lines = port_path.read_text(encoding="utf-8").splitlines()
+        port = safe_int(lines[0] if lines else 0)
+        if not port:
+            return ""
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=timeout) as response:
+            targets = json.loads(read_limited(response, 512 * 1024).decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
+        return ""
+    pages = [target for target in targets if isinstance(target, dict) and target.get("type") == "page"]
+    target = next((page for page in pages if page.get("url") == str(page_url or "")), None)
+    target = target or next((page for page in pages if page.get("url") not in {"", "about:blank"}), None)
+    title = clean_video_title((target or {}).get("title"))
+    if title.casefold() in {"about:blank", "new tab"}:
+        return ""
+    return title
+
+
+def capture_browser_page(url, on_event=None, timeout=45):
+    browser = find_browser_executable()
+    if not browser:
+        raise RuntimeError("Chrome/Edge browser was not found for browser fallback.")
+    emit_event(on_event, "status", message="브라우저 미디어 요청 분석 중")
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    with tempfile.TemporaryDirectory(prefix="clipflow-browser-capture-") as temp_dir:
+        netlog_path = Path(temp_dir) / "netlog.json"
+        profile_dir = Path(temp_dir) / "profile"
+        command = [
+            browser,
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--no-first-run",
+            "--disable-extensions",
+            "--disable-sync",
+            "--disable-blink-features=AutomationControlled",
+            "--blink-settings=imagesEnabled=false",
+            "--autoplay-policy=no-user-gesture-required",
+            "--virtual-time-budget=20000",
+            f"--user-data-dir={profile_dir}",
+            "--remote-debugging-port=0",
+            f"--log-net-log={netlog_path}",
+            "--net-log-capture-mode=IncludeSensitive",
+            "--dump-dom",
+            str(url),
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+        started = time.monotonic()
+        media_seen_at = None
+        offset = 0
+        carry = ""
+        resource_urls = []
+        seen_urls = set()
+        timed_out = False
+        page_title = ""
+        while process.poll() is None:
+            page_title = page_title or browser_debug_page_title(profile_dir, url)
+            new_urls, offset, carry = _read_new_netlog_urls(netlog_path, offset, carry)
+            for resource_url in new_urls:
+                if resource_url not in seen_urls:
+                    seen_urls.add(resource_url)
+                    resource_urls.append(resource_url)
+            if browser_resource_media_from_urls(resource_urls):
+                media_seen_at = media_seen_at or time.monotonic()
+                if time.monotonic() - media_seen_at >= BROWSER_MEDIA_CAPTURE_GRACE_SECONDS:
+                    break
+            if time.monotonic() - started >= timeout:
+                timed_out = True
+                break
+            time.sleep(0.25)
+
+        if process.poll() is None:
+            process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+        new_urls, _, _ = _read_new_netlog_urls(netlog_path, offset, carry)
+        for resource_url in new_urls:
+            if resource_url not in seen_urls:
+                seen_urls.add(resource_url)
+                resource_urls.append(resource_url)
+
+    dom = clean_browser_dom(stdout or "")
+    if not dom and page_title:
+        dom = f"<html><head><title>{html_lib.escape(page_title)}</title></head></html>"
+    media_items = browser_resource_media_from_urls(resource_urls)
+    if not dom and not media_items:
+        if timed_out:
+            raise RuntimeError(f"Browser fallback timed out after {timeout} seconds")
+        raise RuntimeError((stderr or "Browser fallback returned no page or media requests.").strip())
+    return {"dom": dom, "resource_urls": [item["videoUrl"] for item in media_items]}
 
 
 def dump_dom_with_browser(url, on_event=None, timeout=90):
@@ -4714,6 +4958,10 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
     )
     if not needs_refresh:
         return candidate
+    captured_at = float(candidate.get("browser_resource_fetched_at") or 0)
+    if candidate.get("browser_resource") and 0 <= time.time() - captured_at <= BROWSER_RESOURCE_URL_MAX_AGE:
+        emit_event(on_event, "status", message="최근 브라우저 미디어 URL 사용")
+        return candidate
     emit_event(on_event, "status", message="브라우저 DOM 미디어 URL 새로고침 중")
     dom = browser_dom_html_cached(page_url, max_age=BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE) or ""
 
@@ -4728,7 +4976,20 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
         )
         if not refreshed or not refreshed.get("url"):
             return False
-        for key in ("url", "height", "is_manifest", "protocol", "ext", "source_ext", "output_ext", "resolution", "duration", "sort_bytes"):
+        for key in (
+            "url",
+            "height",
+            "is_manifest",
+            "protocol",
+            "ext",
+            "source_ext",
+            "output_ext",
+            "resolution",
+            "duration",
+            "sort_bytes",
+            "browser_resource",
+            "browser_resource_fetched_at",
+        ):
             if key in refreshed and refreshed.get(key) not in (None, ""):
                 candidate[key] = refreshed[key]
         if refreshed.get("title") and not candidate.get("title"):
@@ -4737,16 +4998,20 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
             candidate["display_title"] = refreshed["display_title"]
         return True
 
-    if dom_html_looks_usable(dom):
-        analysis = analyze_browser_dom_media(
-            page_url,
-            dom,
-            output_ext=candidate.get("output_ext"),
-            on_event=on_event,
-        )
-        if apply_refreshed_candidate(analysis):
+    if dom_html_looks_usable(dom) and not candidate.get("browser_resource"):
+        try:
+            analysis = analyze_browser_dom_media(
+                page_url,
+                dom,
+                output_ext=candidate.get("output_ext"),
+                on_event=on_event,
+            )
+        except RuntimeError:
+            analysis = None
+        if analysis and apply_refreshed_candidate(analysis):
             emit_event(on_event, "status", message="캐시된 브라우저 DOM 미디어 URL 사용")
             return candidate
+    resource_urls = []
     if not dom_html_looks_usable(dom):
         try:
             dom = fetch_dom_html_with_urllib(page_url, timeout=20)
@@ -4754,13 +5019,17 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
             dom = ""
         if dom_html_looks_usable(dom):
             remember_browser_dom_html(page_url, dom)
-        else:
-            dom = fetch_dom_for_fallback(page_url, on_event=on_event, timeout=45)
+    if candidate.get("browser_resource") or not dom_html_looks_usable(dom):
+        capture = capture_browser_page(page_url, on_event=on_event, timeout=45)
+        dom = capture.get("dom") or dom
+        resource_urls = capture.get("resource_urls") or []
+        remember_browser_dom_html(page_url, dom)
     analysis = analyze_browser_dom_media(
         page_url,
         dom,
         output_ext=candidate.get("output_ext"),
         on_event=on_event,
+        resource_urls=resource_urls,
     )
     if not apply_refreshed_candidate(analysis):
         return candidate
@@ -4861,7 +5130,7 @@ def prepare_browser_dom_candidate(page_url, candidate, on_event=None):
     return candidate
 
 
-def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
+def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None, resource_urls=None):
     requested_ext = normalized_output_ext(output_ext)
     if requested_ext in AUDIO_OUTPUT_EXTENSIONS:
         raise RuntimeError("Browser DOM fallback does not expose audio-only candidates.")
@@ -4881,6 +5150,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         *player_script_media_from_html(dom),
         *generic_video_media_from_html(dom, url),
         *script_map_media_from_html(dom, url),
+        *browser_resource_media_from_urls(resource_urls),
     ]:
         media_url = item.get("videoUrl") or item.get("url")
         if not media_url:
@@ -4946,6 +5216,8 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "media_type": "video",
                 "referer": url,
                 "origin": origin,
+                "browser_resource": source == "browser-resource",
+                "browser_resource_fetched_at": time.time() if source == "browser-resource" else 0,
                 "note": f"browser {format_label} {quality}".strip(),
             }
         )
@@ -5146,6 +5418,7 @@ def analyze_url(
         raise ValueError("URL is required.")
     url = str(url).strip()
     warnings = []
+    uses_default_ydl_factory = ydl_factory is None
 
     if is_chzzk_page_url(url):
         chzzk = analyze_chzzk_clip(url, on_event=on_event, cookie_source=cookie_source)
@@ -5207,11 +5480,53 @@ def analyze_url(
         with ydl_factory(options) as ydl:
             return ydl.extract_info(analysis_url, download=False)
 
-    def try_browser_dom_fallback(reason):
+    browser_dom_attempted = False
+
+    def try_browser_dom_fallback(reason, browser_first=False):
+        nonlocal browser_dom_attempted
+        browser_dom_attempted = True
         try:
-            fetcher = browser_dom_fetcher or fetch_dom_for_fallback
-            dom = fetcher(analysis_url, on_event=on_event)
-            result = analyze_browser_dom_media(analysis_url, dom, output_ext=output_ext, on_event=on_event)
+            if browser_dom_fetcher:
+                dom = browser_dom_fetcher(analysis_url, on_event=on_event)
+                resource_urls = []
+                result = analyze_browser_dom_media(
+                    analysis_url,
+                    dom,
+                    output_ext=output_ext,
+                    on_event=on_event,
+                )
+            else:
+                dom = ""
+                result = None
+                if not browser_first:
+                    emit_event(on_event, "status", message="페이지 HTML 분석 중")
+                    try:
+                        dom = fetch_dom_html_with_urllib(analysis_url, timeout=8)
+                    except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+                        dom = ""
+                    if dom:
+                        try:
+                            result = analyze_browser_dom_media(
+                                analysis_url,
+                                dom,
+                                output_ext=output_ext,
+                                on_event=on_event,
+                            )
+                            remember_browser_dom_html(analysis_url, dom)
+                        except RuntimeError:
+                            result = None
+                if result is None:
+                    capture = capture_browser_page(analysis_url, on_event=on_event, timeout=45)
+                    dom = capture.get("dom") or dom
+                    resource_urls = capture.get("resource_urls") or []
+                    remember_browser_dom_html(analysis_url, dom)
+                    result = analyze_browser_dom_media(
+                        analysis_url,
+                        dom,
+                        output_ext=output_ext,
+                        on_event=on_event,
+                        resource_urls=resource_urls,
+                    )
             warning = "브라우저 DOM fallback 사용: " + str(reason)
             result["warnings"] = [*warnings, warning, *(result.get("warnings") or [])]
             emit_event(on_event, "log", message=warning)
@@ -5221,6 +5536,11 @@ def analyze_url(
             warnings.append(warning)
             emit_event(on_event, "log", message=warning)
             return None
+
+    if uses_default_ydl_factory and ytdlp_url_uses_only_generic_extractor(analysis_url):
+        result = try_browser_dom_fallback("전용 extractor가 없는 일반 웹페이지", browser_first=True)
+        if result:
+            return result
 
     info = None
     pending_error = None
@@ -5277,7 +5597,7 @@ def analyze_url(
                         pending_error = impersonate_exc
 
     if info is None:
-        if pending_error and should_try_browser_dom_fallback(str(pending_error)):
+        if pending_error and not browser_dom_attempted and should_try_browser_dom_fallback(str(pending_error)):
             result = try_browser_dom_fallback(pending_error)
             if result:
                 return result
@@ -5288,7 +5608,7 @@ def analyze_url(
     candidates = sort_candidates(enrich_missing_sizes(candidates_from_info(info, output_ext=output_ext)))
     if not candidates:
         reason = RuntimeError("No downloadable non-audio video formats were found.")
-        result = try_browser_dom_fallback(reason)
+        result = None if browser_dom_attempted else try_browser_dom_fallback(reason)
         if result:
             return result
         raise reason
@@ -5386,10 +5706,21 @@ def merge_chzzk_analysis_candidate(base, fresh):
     return merged
 
 
+def chzzk_clip_range_duration(candidate):
+    clip_range = clip_range_from_candidate(candidate)
+    if not clip_range:
+        return 0.0
+    end = clip_range.get("end")
+    if end is None:
+        return 0.0
+    return max(0.0, float(end) - float(clip_range.get("start") or 0))
+
+
 def chzzk_auto_route_enabled(candidate, total):
     if not candidate_looks_chzzk(candidate, candidate.get("source") or ""):
         return False
-    if clip_range_from_candidate(candidate):
+    clip_duration = chzzk_clip_range_duration(candidate)
+    if clip_duration > 0 and clip_duration < CHZZK_CLIP_AUTO_ROUTE_MIN_SECONDS:
         return False
     return safe_int(total) >= CHZZK_AUTO_ROUTE_MIN_BYTES
 
@@ -5402,9 +5733,11 @@ def chzzk_probe_direct_speed(url, headers, probe_bytes=None, offset=0):
     started = time.monotonic()
     try:
         with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
-            if safe_int(getattr(response, "status", 206)) not in {200, 206}:
+            if safe_int(getattr(response, "status", 206)) != 206:
                 return 0.0
-            data = response.read()
+            data = response.read(probe_bytes + 1)
+            if len(data) > probe_bytes:
+                data = data[:probe_bytes]
     except (OSError, urllib.error.URLError, RuntimeError, ValueError):
         return 0.0
     elapsed = time.monotonic() - started
@@ -5413,24 +5746,60 @@ def chzzk_probe_direct_speed(url, headers, probe_bytes=None, offset=0):
     return len(data) / elapsed
 
 
-def chzzk_probe_hls_speed(url, headers, segment_count=None):
+def chzzk_pick_hls_probe_segments(segment_urls, max_count=None):
+    urls = [str(url or "") for url in (segment_urls or []) if str(url or "")]
+    if not urls:
+        return []
+    max_count = max(1, safe_int(max_count or CHZZK_ROUTE_PROBE_HLS_SEGMENTS))
+    if len(urls) <= max_count:
+        return urls
+    if max_count == 1:
+        return [urls[0]]
+    if max_count == 2:
+        return [urls[0], urls[-1]]
+    mid_index = len(urls) // 2
+    tail_index = min(len(urls) - 1, max(0, int(len(urls) * 0.85)))
+    picks = [urls[0], urls[mid_index], urls[tail_index], urls[-1]]
+    deduped = []
+    seen = set()
+    for url in picks:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped[:max_count]
+
+
+def chzzk_probe_hls_speed(url, headers, segment_count=None, segment_urls=None):
     segment_count = max(1, safe_int(segment_count or CHZZK_ROUTE_PROBE_HLS_SEGMENTS))
     try:
-        playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
-        playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
-        segment_urls = list(playlist_meta.get("segment_urls") or [])[:segment_count]
-        if not segment_urls:
+        if segment_urls is None:
+            playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+            playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+            segment_urls = list(playlist_meta.get("segment_urls") or [])
+        sample_urls = chzzk_pick_hls_probe_segments(segment_urls, max_count=segment_count)
+        if not sample_urls:
             return 0.0
         started = time.monotonic()
         downloaded = 0
-        for segment_url in segment_urls:
+        downloaded_lock = threading.Lock()
+
+        def fetch_segment(segment_url):
+            nonlocal downloaded
+            size = 0
             request = urllib.request.Request(segment_url, headers=dict(headers or {}))
             with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
                 while True:
                     chunk = response.read(HLS_SEGMENT_READ_CHUNK)
                     if not chunk:
                         break
-                    downloaded += len(chunk)
+                    size += len(chunk)
+            with downloaded_lock:
+                downloaded += size
+
+        workers = max(1, min(HLS_PARALLEL_WORKERS, len(sample_urls)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(fetch_segment, sample_urls))
         elapsed = time.monotonic() - started
         if downloaded <= 0 or elapsed <= 0:
             return 0.0
@@ -5446,24 +5815,45 @@ def chzzk_media_url_host(url):
         return ""
 
 
+def chzzk_direct_profile_effective_bps(direct_profile):
+    samples = [
+        float(direct_profile.get("start_bps") or 0),
+        float(direct_profile.get("mid_bps") or 0),
+        float(direct_profile.get("tail_bps") or 0),
+    ]
+    positive = [value for value in samples if value > 0]
+    if not positive:
+        return 0.0
+    return min(positive)
+
+
 def chzzk_probe_direct_speed_profile(url, headers, total):
     total = max(1, safe_int(total))
     probe_bytes = CHZZK_ROUTE_PROBE_BYTES
     mid_offset = min(max(probe_bytes, total // 2), max(0, total - probe_bytes))
+    tail_offset = min(max(probe_bytes, int(total * 0.85)), max(0, total - probe_bytes))
     start_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=0)
     mid_bps = 0.0
+    tail_bps = 0.0
     if total > probe_bytes * 2:
         mid_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=mid_offset)
-    throttle_ratio = (mid_bps / start_bps) if start_bps > 0 and mid_bps > 0 else 0.0
+    if total > probe_bytes * 3 and tail_offset not in {0, mid_offset}:
+        tail_bps = chzzk_probe_direct_speed(url, headers, probe_bytes=probe_bytes, offset=tail_offset)
+    samples = [value for value in (start_bps, mid_bps, tail_bps) if value > 0]
+    min_bps = min(samples) if samples else 0.0
+    throttle_ratio = (min_bps / start_bps) if start_bps > 0 and min_bps > 0 else 0.0
     throttle_detected = bool(
         start_bps > 0
-        and mid_bps > 0
+        and min_bps > 0
         and throttle_ratio < CHZZK_DIRECT_RANGE_THROTTLE_RATIO
     )
     return {
         "start_bps": start_bps,
         "mid_bps": mid_bps,
+        "tail_bps": tail_bps,
+        "min_bps": min_bps,
         "mid_offset": mid_offset,
+        "tail_offset": tail_offset,
         "throttle_ratio": throttle_ratio,
         "throttle_detected": throttle_detected,
     }
@@ -5483,7 +5873,7 @@ def chzzk_hls_route_profile(url, headers):
         profile["segment_count"] = len(segment_urls)
         profile["fmp4"] = bool(playlist_meta.get("init_map_url"))
         profile["encrypted"] = hls_playlist_parallel_encryption(playlist_text) == "aes-128"
-        profile["probe_bps"] = chzzk_probe_hls_speed(url, headers)
+        profile["probe_bps"] = chzzk_probe_hls_speed(url, headers, segment_urls=segment_urls)
     except (OSError, urllib.error.URLError, RuntimeError, ValueError):
         pass
     return profile
@@ -5502,14 +5892,16 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
         reasons.append("direct-range-stable")
 
     start_bps = float(direct_profile.get("start_bps") or 0)
+    direct_min_bps = float(direct_profile.get("min_bps") or 0) or chzzk_direct_profile_effective_bps(direct_profile)
+    direct_effective_bps = direct_min_bps or start_bps
     hls_bps = float(hls_profile.get("probe_bps") or 0)
-    if hls_bps > 0 and start_bps > 0:
-        if hls_bps > start_bps * 1.15:
+    if hls_bps > 0 and direct_effective_bps > 0:
+        if hls_bps > direct_effective_bps * 1.15:
             hls_score += 3.0
             reasons.append(f"hls-probe-faster({display_size(hls_bps)}/s)")
-        elif start_bps > hls_bps * 1.15:
+        elif direct_effective_bps > hls_bps * 1.15:
             direct_score += 3.0
-            reasons.append(f"direct-probe-faster({display_size(start_bps)}/s)")
+            reasons.append(f"direct-probe-faster({display_size(direct_effective_bps)}/s)")
 
     total = safe_int(total)
     duration = safe_int(duration)
@@ -5518,9 +5910,22 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
         reasons.append("large-long-vod")
 
     segment_count = safe_int(hls_profile.get("segment_count"))
-    if segment_count >= 300:
+    if segment_count >= CHZZK_HLS_SEGMENTED_VOD_SEGMENTS:
         hls_score += 1.0
         reasons.append(f"hls-many-segments({segment_count})")
+        if (
+            total >= CHZZK_HLS_SEGMENTED_VOD_BYTES
+            and duration >= CHZZK_HLS_SEGMENTED_VOD_SECONDS
+            and not hls_profile.get("encrypted")
+        ):
+            hls_score += 5.0
+            reasons.append("hls-segmented-long-vod")
+        if hls_bps > 0 and direct_effective_bps > 0 and hls_bps >= direct_effective_bps * CHZZK_HLS_COMPARABLE_DIRECT_RATIO:
+            hls_score += 5.0
+            reasons.append(
+                f"hls-comparable-many-segments({display_size(hls_bps)}/s >= "
+                f"{int(CHZZK_HLS_COMPARABLE_DIRECT_RATIO * 100)}% direct)"
+            )
 
     workers = direct_media_worker_count(direct_candidate)
     part_size = direct_media_part_size_for_candidate(total, direct_candidate, workers)
@@ -5529,11 +5934,86 @@ def chzzk_route_signal_scores(direct_profile, hls_profile, direct_candidate, tot
         hls_score += 1.0
         reasons.append(f"direct-few-ranges({range_count})")
 
-    if hls_profile.get("encrypted"):
-        hls_score += 0.5
-        reasons.append("hls-encrypted")
-
     return direct_score, hls_score, reasons
+
+
+def chzzk_direct_slow_fallback_enabled(candidate, total):
+    if not candidate_looks_chzzk(candidate, candidate.get("source") or ""):
+        return False
+    if clip_range_from_candidate(candidate):
+        return False
+    return safe_int(total) >= CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES
+
+
+def chzzk_direct_speed_is_slow(downloaded, elapsed, total):
+    if safe_int(total) < CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES:
+        return False
+    if float(elapsed) < CHZZK_DIRECT_SLOW_FALLBACK_SECONDS:
+        return False
+    if safe_int(downloaded) <= 0:
+        return True
+    return (safe_int(downloaded) / float(elapsed)) < CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC
+
+
+def chzzk_direct_slow_check(total):
+    def check(downloaded, elapsed):
+        if chzzk_direct_speed_is_slow(downloaded, elapsed, total):
+            speed = safe_int(downloaded) / max(0.001, float(elapsed))
+            raise ChzzkDirectSlowFallback(
+                f"CHZZK direct {display_size(speed)}/s below "
+                f"{display_size(CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC)}/s after {int(elapsed)}s"
+            )
+
+    return check
+
+
+def chzzk_download_direct_with_hls_fallback(
+    direct_url,
+    direct_candidate,
+    output_dir,
+    page_url,
+    cookie_source,
+    hls_candidate=None,
+    on_event=None,
+):
+    headers = direct_media_request_headers(direct_candidate)
+    total = resolve_direct_media_total(direct_url, headers, direct_candidate) or candidate_expected_size(direct_candidate)
+    slow_check = None
+    if chzzk_direct_slow_fallback_enabled(direct_candidate, total):
+        slow_check = chzzk_direct_slow_check(total)
+    try:
+        return download_direct_media(
+            direct_url,
+            direct_candidate,
+            output_dir,
+            on_event=on_event,
+            slow_check=slow_check,
+        )
+    except ChzzkDirectSlowFallback as exc:
+        fallback_candidate = hls_candidate
+        if not fallback_candidate:
+            fallback_candidate = chzzk_alternative_hls_candidate(
+                direct_candidate,
+                page_url,
+                cookie_source,
+                on_event=on_event,
+            )
+        if not fallback_candidate:
+            raise RuntimeError(
+                "CHZZK direct download was too slow and no HLS fallback was found."
+            ) from exc
+        emit_event(on_event, "log", message=f"CHZZK auto-route: {exc}; switching to HLS")
+        fallback_candidate = candidate_with_request_cookies(fallback_candidate, cookie_source)
+        hls_url = str(fallback_candidate.get("url") or "").strip() or direct_url
+        emit_event(
+            on_event,
+            "log",
+            message=(
+                f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+                f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+            ),
+        )
+        return download_hls_parallel(hls_url, fallback_candidate, output_dir, on_event=on_event)
 
 
 def chzzk_alternative_direct_candidate(candidate, page_url, cookie_source, on_event=None):
@@ -5669,9 +6149,9 @@ def chzzk_choose_download_route(direct_candidate, hls_candidate, total=0, durati
         route = "direct"
         chosen = direct_candidate
     else:
-        start_bps = float(direct_profile.get("start_bps") or 0)
+        direct_effective_bps = float(direct_profile.get("min_bps") or 0) or chzzk_direct_profile_effective_bps(direct_profile)
         hls_bps = float(hls_profile.get("probe_bps") or 0)
-        if hls_bps > start_bps:
+        if hls_bps > direct_effective_bps:
             route = "hls"
             chosen = hls_candidate
         else:
@@ -5746,7 +6226,9 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
     media_url = str(candidate.get("url") or "").strip()
     if media_url:
         target_url = media_url
-    if clip_range_from_candidate(candidate):
+    clip_range = clip_range_from_candidate(candidate)
+    clip_duration = chzzk_clip_range_duration(candidate) if clip_range else 0.0
+    if clip_range and clip_duration < CHZZK_CLIP_AUTO_ROUTE_MIN_SECONDS:
         if is_chzzk_direct_mp4_candidate(candidate, page_url):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
         emit_event(
@@ -5763,6 +6245,35 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
     total = resolve_direct_media_total(target_url, headers, candidate) if is_chzzk_direct_mp4_candidate(candidate, page_url) else 0
     if not total:
         total = candidate_expected_size(candidate)
+
+    def start_chzzk_hls_download(hls_url, hls_cand):
+        emit_event(
+            on_event,
+            "log",
+            message=(
+                f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+                f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+            ),
+        )
+        return download_hls_parallel(hls_url, hls_cand, output_dir, on_event=on_event)
+
+    def finish_chzzk_route(route, chosen, direct_cand, hls_cand):
+        if route == "hls":
+            hls_url = str(chosen.get("url") or "").strip() or target_url
+            return start_chzzk_hls_download(hls_url, chosen)
+        direct_url = str(chosen.get("url") or "").strip() or target_url
+        if clip_range:
+            return download_direct_media_segment(direct_url, chosen, output_dir, on_event=on_event)
+        return chzzk_download_direct_with_hls_fallback(
+            direct_url,
+            chosen,
+            output_dir,
+            page_url,
+            cookie_source,
+            hls_candidate=hls_cand,
+            on_event=on_event,
+        )
+
     if chzzk_auto_route_enabled(candidate, total):
         direct_candidate, hls_candidate = chzzk_paired_route_candidates(
             candidate,
@@ -5782,36 +6293,33 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
                 duration=safe_int(candidate.get("duration")),
                 on_event=on_event,
             )
-            if route == "hls":
-                hls_url = str(chosen.get("url") or "").strip() or target_url
-                emit_event(
-                    on_event,
-                    "log",
-                    message=(
-                        f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-                        f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-                    ),
-                )
-                return download_hls_parallel(hls_url, chosen, output_dir, on_event=on_event)
-            direct_url = str(chosen.get("url") or "").strip() or target_url
-            return download_direct_media(direct_url, chosen, output_dir, on_event=on_event)
+            return finish_chzzk_route(route, chosen, direct_candidate, hls_candidate)
         if direct_candidate:
             direct_url = str(direct_candidate.get("url") or "").strip() or target_url
-            return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event)
+            if clip_range:
+                return download_direct_media_segment(direct_url, direct_candidate, output_dir, on_event=on_event)
+            return chzzk_download_direct_with_hls_fallback(
+                direct_url,
+                direct_candidate,
+                output_dir,
+                page_url,
+                cookie_source,
+                hls_candidate=hls_candidate,
+                on_event=on_event,
+            )
         if hls_candidate:
             hls_url = str(hls_candidate.get("url") or "").strip() or target_url
-            emit_event(
-                on_event,
-                "log",
-                message=(
-                    f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
-                    f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
-                ),
-            )
-            return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
+            return start_chzzk_hls_download(hls_url, hls_candidate)
 
     if is_chzzk_direct_mp4_candidate(candidate, page_url):
-        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+        return chzzk_download_direct_with_hls_fallback(
+            target_url,
+            candidate,
+            output_dir,
+            page_url,
+            cookie_source,
+            on_event=on_event,
+        )
     emit_event(
         on_event,
         "log",
@@ -6347,17 +6855,37 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                 (index, start, end, temp_root / f"seg_{index:08d}.part")
                 for index, start, end in direct_media_ranges(planned_total, part_size=resolved_part_size)
             ]
+            completed = []
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+            futures = {}
+            aborted = False
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
+                futures = {
+                    executor.submit(download_range, range_info): range_info
+                    for range_info in ranges
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    completed.append(future.result())
+                completed.sort(key=lambda item: item[0])
                 break
             except ChzzkDirectSlowFallback:
+                aborted = True
                 abort_event.set()
+                _reset_parallel_http_connections_for_thread()
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
                 if part_path.exists():
                     part_path.unlink()
                 raise
             except DirectMediaTotalChanged as exc:
                 if attempt == 0 and exc.actual_total and exc.actual_total != planned_total:
+                    aborted = True
+                    abort_event.set()
+                    _reset_parallel_http_connections_for_thread()
+                    for future in futures:
+                        future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
                     emit_event(
                         on_event,
                         "log",
@@ -6369,8 +6897,12 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                             seg_path.unlink()
                         except OSError:
                             pass
+                    abort_event.clear()
                     continue
                 raise
+            finally:
+                if not aborted:
+                    executor.shutdown(wait=True)
         else:
             raise RuntimeError("Direct media range rebuild exhausted")
         emit_event(on_event, "status", message="Finalizing direct download")
@@ -6453,8 +6985,9 @@ def download_direct_media(url, candidate, output_dir, on_event=None, slow_check=
 
 
 class _PersistentHttpResponse:
-    def __init__(self, response):
+    def __init__(self, response, drain_on_close=True):
         self._response = response
+        self._drain_on_close = drain_on_close
         self.status = response.status
         self.headers = {key: value for key, value in response.getheaders()}
 
@@ -6472,6 +7005,8 @@ class _PersistentHttpResponse:
         return self._response.read(size)
 
     def close(self):
+        if not self._drain_on_close:
+            return
         try:
             while self._response.read(64 * 1024):
                 pass
@@ -6543,7 +7078,7 @@ def parallel_http_urlopen(request, timeout=30):
                     response.status,
                     response.reason,
                     response.getheaders(),
-                    body,
+                    io.BytesIO(body),
                 )
             return _PersistentHttpResponse(response)
         except Exception as exc:
@@ -6760,6 +7295,22 @@ def fetch_hls_aes128_key(key_url, headers):
     if len(key) != 16:
         raise RuntimeError(f"HLS AES-128 key must be 16 bytes, got {len(key)}")
     return key
+
+
+def hls_media_prefix_is_clear(data):
+    data = bytes(data or b"")
+    if len(data) >= 189 and data[0] == 0x47 and data[188] == 0x47:
+        return True
+    return len(data) >= 8 and data[4:8] in {b"ftyp", b"styp", b"moof", b"sidx"}
+
+
+def hls_segment_is_clear_media(segment_url, headers):
+    request = urllib.request.Request(str(segment_url or ""), headers={**dict(headers or {}), "Range": "bytes=0-511"})
+    try:
+        with parallel_http_urlopen(request, timeout=30) as response:
+            return hls_media_prefix_is_clear(response.read(512))
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
 
 
 def iter_hls_cipher_blocks(chunk_iter):
@@ -6985,12 +7536,19 @@ def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
     if not playlist_meta["key_url"]:
         raise RuntimeError("Encrypted HLS playlist is missing an AES-128 key URL.")
     try:
+        key = fetch_hls_aes128_key(playlist_meta["key_url"], headers)
+    except (OSError, urllib.error.URLError, ValueError):
+        segment_urls = playlist_meta.get("segment_urls") or []
+        if segment_urls and hls_segment_is_clear_media(segment_urls[0], headers):
+            return None
+        raise
+    try:
         from Cryptodome.Cipher import AES  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
             "AES-128 HLS needs pycryptodomex. Install requirements or use a non-parallel fallback path."
         ) from exc
-    return fetch_hls_aes128_key(playlist_meta["key_url"], headers)
+    return key
 
 
 def download_hls_segment_to_path(index, segment_url, segment_path, aes_key, playlist_meta, headers):

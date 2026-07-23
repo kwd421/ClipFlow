@@ -1555,6 +1555,102 @@ for line in sys.stdin:
         self.assertEqual(candidate["sort_bytes"], 1_117_645_701)
         self.assertEqual(candidate["size_source"], "metadata")
 
+    def test_browser_dom_extracts_media_observed_in_generic_browser_resources(self):
+        page_url = "https://watch.example.test/watch?id=demo"
+        resources = [
+            "https://watch.example.test/app.js",
+            "blob:https://watch.example.test/not-downloadable",
+            "https://cdn.example.test/v1/manifest/670d26c7-f74d-4265-9214/master.m3u8?token=one",
+            "https://cdn.example.test/v1/manifest/670d26c7-f74d-4265-9214/720/playlist.m3u8?token=two",
+            "https://cdn.example.test/v1/manifest/demo/720/segment.ts?token=two",
+        ]
+
+        result = engine.analyze_browser_dom_media(
+            page_url,
+            (
+                "<html><head><title>Network Player</title>"
+                "<meta property='video:duration' content='120'></head>"
+                "<body><video src='blob:demo'></video></body></html>"
+            ),
+            resource_urls=resources,
+        )
+
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertEqual(result["candidates"][0]["height"], 720)
+        self.assertTrue(result["candidates"][0]["browser_resource"])
+        self.assertEqual(result["candidates"][0]["referer"], page_url)
+        self.assertTrue(all(candidate["is_manifest"] for candidate in result["candidates"]))
+
+    def test_browser_resource_urls_parse_truncated_chrome_netlog(self):
+        text = (
+            '{"constants":{},"events":['
+            '{"params":{"url":"https://cdn.example.test/master.m3u8?token=a\\u0026part=1"}},'
+            '{"params":{"url":"https://cdn.example.test/720/segment.ts"}}'
+        )
+
+        urls = engine.browser_resource_urls_from_netlog_text(text)
+
+        self.assertEqual(urls[0], "https://cdn.example.test/master.m3u8?token=a&part=1")
+        self.assertEqual(len(engine.browser_resource_media_from_urls(urls)), 1)
+
+    def test_browser_debug_page_title_reads_matching_page_target(self):
+        page_url = "https://watch.example.test/watch?id=demo"
+        targets = [
+            {"type": "page", "url": "about:blank", "title": ""},
+            {"type": "page", "url": page_url, "title": "Demo Episode - Watch"},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "DevToolsActivePort").write_text("9222\n/devtools/browser/demo\n", encoding="utf-8")
+            with mock.patch.object(
+                urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(json.dumps(targets).encode("utf-8")),
+            ):
+                title = engine.browser_debug_page_title(temp_dir, page_url)
+
+        self.assertEqual(title, "Demo Episode - Watch")
+
+    def test_browser_resource_manifest_refreshes_from_new_browser_requests(self):
+        page_url = "https://watch.example.test/watch?id=demo"
+        candidate = {
+            "format_id": "browser-720",
+            "url": "https://cdn.example.test/720/playlist.m3u8?token=old",
+            "height": 720,
+            "output_ext": "mp4",
+            "is_manifest": True,
+            "browser_resource": True,
+        }
+        capture = {
+            "dom": "<html><head><title>Network Player</title><meta property='video:duration' content='120'></head></html>",
+            "resource_urls": ["https://cdn.example.test/720/playlist.m3u8?token=new"],
+        }
+
+        with mock.patch.object(engine, "browser_dom_html_cached", return_value=""), mock.patch.object(
+            engine, "fetch_dom_html_with_urllib", return_value=""
+        ), mock.patch.object(engine, "capture_browser_page", return_value=capture) as browser_capture:
+            refreshed = engine.refresh_browser_dom_candidate_media(page_url, candidate)
+
+        self.assertEqual(refreshed["url"], "https://cdn.example.test/720/playlist.m3u8?token=new")
+        browser_capture.assert_called_once_with(page_url, on_event=None, timeout=45)
+
+    def test_recent_browser_resource_manifest_skips_duplicate_page_capture(self):
+        page_url = "https://watch.example.test/watch?id=demo"
+        candidate = {
+            "format_id": "browser-720",
+            "url": "https://cdn.example.test/720/playlist.m3u8?token=fresh",
+            "height": 720,
+            "output_ext": "mp4",
+            "is_manifest": True,
+            "browser_resource": True,
+            "browser_resource_fetched_at": time.time(),
+        }
+
+        with mock.patch.object(engine, "capture_browser_page") as browser_capture:
+            refreshed = engine.refresh_browser_dom_candidate_media(page_url, candidate)
+
+        self.assertEqual(refreshed["url"], candidate["url"])
+        browser_capture.assert_not_called()
+
     def test_analyze_uses_browser_dom_fallback_after_tls_reset(self):
         class ResetYoutubeDL(FakeYoutubeDL):
             def extract_info(self, url, download=False):
@@ -1770,6 +1866,42 @@ for line in sys.stdin:
         self.assertFalse(
             engine.should_try_browser_dom_fallback("ERROR: [TikTok] 123: Your IP address is blocked from accessing this post")
         )
+
+    def test_ytdlp_generic_only_detection_preserves_specific_extractors(self):
+        class GenericExtractor:
+            IE_NAME = "generic"
+
+            @staticmethod
+            def suitable(url):
+                return True
+
+        class SpecificExtractor:
+            IE_NAME = "ExampleSite"
+
+            @staticmethod
+            def suitable(url):
+                return "specific" in url
+
+        extractors = [SpecificExtractor, GenericExtractor]
+
+        self.assertTrue(engine.ytdlp_url_uses_only_generic_extractor("https://example.test/watch", extractors))
+        self.assertFalse(engine.ytdlp_url_uses_only_generic_extractor("https://specific.test/watch", extractors))
+        self.assertFalse(engine.ytdlp_url_uses_only_generic_extractor("https://example.test/video.mp4", extractors))
+
+    def test_generic_only_url_uses_browser_analysis_before_default_ytdlp(self):
+        html = "<html><head><title>Generic First</title></head><body><video src='https://cdn.example.test/video.mp4'></video></body></html>"
+        ydl_factory = mock.Mock()
+
+        with mock.patch.object(engine, "youtube_dl_factory", return_value=ydl_factory), mock.patch.object(
+            engine, "ytdlp_url_uses_only_generic_extractor", return_value=True
+        ):
+            result = engine.analyze_url(
+                "https://example.test/watch",
+                browser_dom_fetcher=lambda url, on_event=None: html,
+            )
+
+        self.assertEqual(result["source"], "browser-dom")
+        ydl_factory.assert_not_called()
 
     def test_should_retry_with_browser_cookies_for_instagram_empty_media(self):
         self.assertTrue(
@@ -2296,6 +2428,39 @@ for line in sys.stdin:
         self.assertTrue(engine.browser_dom_hls_prefers_parallel_download(candidate, encrypted, segments))
         sample_aes = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:1,\nseg.ts\n"
         self.assertFalse(engine.browser_dom_hls_prefers_parallel_download(candidate, sample_aes, segments))
+
+    def test_browser_dom_hls_parallel_accepts_medium_episode_playlist(self):
+        segments = [f"https://cdn.example.test/segment-{index}.ts" for index in range(355)]
+        candidate = {"url": "https://cdn.example.test/index.m3u8", "duration": 1420, "sort_bytes": 0}
+
+        self.assertTrue(engine.browser_dom_hls_prefers_parallel_download(candidate, "#EXTM3U\n", segments))
+
+    def test_hls_media_prefix_identifies_clear_transport_stream(self):
+        clear_ts = bytearray(512)
+        clear_ts[0] = 0x47
+        clear_ts[188] = 0x47
+
+        self.assertTrue(engine.hls_media_prefix_is_clear(clear_ts))
+        self.assertTrue(engine.hls_media_prefix_is_clear(b"\x00\x00\x00\x18ftypisom"))
+        self.assertFalse(engine.hls_media_prefix_is_clear(b"encrypted payload" * 32))
+
+    def test_hls_aes_key_ignores_missing_key_only_for_clear_segments(self):
+        playlist = '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="missing-key"\n#EXTINF:4,\nsegment.ts\n'
+        metadata = {
+            "key_url": "https://cdn.example.test/missing-key",
+            "segment_urls": ["https://cdn.example.test/segment.ts"],
+        }
+        missing_key = urllib.error.HTTPError(metadata["key_url"], 404, "Not Found", {}, None)
+
+        with mock.patch.object(engine, "fetch_hls_aes128_key", side_effect=missing_key), mock.patch.object(
+            engine, "hls_segment_is_clear_media", return_value=True
+        ):
+            self.assertIsNone(engine.hls_parallel_aes_key(playlist, metadata, {}))
+
+        with mock.patch.object(engine, "fetch_hls_aes128_key", side_effect=missing_key), mock.patch.object(
+            engine, "hls_segment_is_clear_media", return_value=False
+        ), self.assertRaises(urllib.error.HTTPError):
+            engine.hls_parallel_aes_key(playlist, metadata, {})
 
     def test_hls_aes128_iv_uses_media_sequence_when_iv_is_missing(self):
         self.assertEqual(engine.hls_aes128_iv(5, 2, None), (7).to_bytes(16, byteorder="big"))
@@ -3443,6 +3608,84 @@ for line in sys.stdin:
             engine.chzzk_probe_direct_speed_profile = original_direct_profile
             engine.chzzk_hls_route_profile = original_hls_profile
 
+    def test_chzzk_choose_download_route_prefers_hls_when_many_segments_are_comparable(self):
+        direct = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/vod.m3u8",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
+
+        try:
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 15 * 1024 * 1024,
+                "mid_bps": 35 * 1024 * 1024,
+                "tail_bps": 34 * 1024 * 1024,
+                "min_bps": 15 * 1024 * 1024,
+                "mid_offset": 860_000_000,
+                "tail_offset": 1_460_000_000,
+                "throttle_ratio": 1.0,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 420,
+                "probe_bps": 10 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": False,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=1_720_579_144, duration=1679)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
+
+    def test_chzzk_choose_download_route_prefers_segmented_hls_metadata_for_long_vod(self):
+        direct = {
+            "url": "https://cdn.example.test/glive/14046477/pd/video.mp4",
+            "source": "https://chzzk.naver.com/video/14046477",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/glive_2026_07_05_2092/hls/index.m3u8",
+            "source": "https://chzzk.naver.com/video/14046477",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_profile = engine.chzzk_probe_direct_speed_profile
+        original_hls_profile = engine.chzzk_hls_route_profile
+
+        try:
+            engine.chzzk_probe_direct_speed_profile = lambda *args, **kwargs: {
+                "start_bps": 15 * 1024 * 1024,
+                "mid_bps": 35 * 1024 * 1024,
+                "tail_bps": 34 * 1024 * 1024,
+                "min_bps": 15 * 1024 * 1024,
+                "mid_offset": 860_000_000,
+                "tail_offset": 1_460_000_000,
+                "throttle_ratio": 1.0,
+                "throttle_detected": False,
+            }
+            engine.chzzk_hls_route_profile = lambda *args, **kwargs: {
+                "segment_count": 420,
+                "probe_bps": 4 * 1024 * 1024,
+                "encrypted": False,
+                "fmp4": False,
+            }
+            route, chosen = engine.chzzk_choose_download_route(direct, hls, total=1_720_579_144, duration=1679)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed_profile = original_direct_profile
+            engine.chzzk_hls_route_profile = original_hls_profile
+
     def test_download_chzzk_starts_hls_when_probe_selects_hls(self):
         events = []
         hls_urls = []
@@ -3515,6 +3758,103 @@ for line in sys.stdin:
             engine.download_hls_parallel = original_hls
             engine.download_direct_media = original_direct
             engine.resolve_direct_media_total = original_total
+
+    def test_chzzk_probe_direct_speed_ignores_non_partial_responses(self):
+        class FakeResponse:
+            status = 200
+
+            def read(self, size=-1):
+                del size
+                return b"x" * (8 * 1024 * 1024)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                return False
+
+        original_open = engine.parallel_http_urlopen
+
+        try:
+            engine.parallel_http_urlopen = lambda *args, **kwargs: FakeResponse()
+            self.assertEqual(
+                engine.chzzk_probe_direct_speed("https://cdn.example.test/vod.mp4", {}, probe_bytes=1024),
+                0.0,
+            )
+        finally:
+            engine.parallel_http_urlopen = original_open
+
+    def test_chzzk_pick_hls_probe_segments_samples_start_middle_and_tail(self):
+        segment_urls = [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)]
+        picked = engine.chzzk_pick_hls_probe_segments(segment_urls, max_count=4)
+        self.assertEqual(
+            picked,
+            [
+                "https://cdn.example.test/seg-0.ts",
+                "https://cdn.example.test/seg-5.ts",
+                "https://cdn.example.test/seg-8.ts",
+                "https://cdn.example.test/seg-9.ts",
+            ],
+        )
+
+    def test_download_chzzk_direct_route_uses_slow_fallback_wrapper(self):
+        calls = []
+        original_choose = engine.chzzk_choose_download_route
+        original_pair = engine.chzzk_paired_route_candidates
+        original_wrapper = engine.chzzk_download_direct_with_hls_fallback
+        original_total = engine.resolve_direct_media_total
+
+        candidate = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/14056968",
+            "format_id": "chzzk-1080",
+            "title": "VOD",
+            "output_ext": "mp4",
+            "ext": "mp4",
+            "height": 1080,
+        }
+        hls_candidate = {
+            **candidate,
+            "url": "https://cdn.example.test/vod.m3u8",
+            "is_manifest": True,
+        }
+
+        def fake_pair(cand, page_url, cookie_source, on_event=None):
+            del page_url, cookie_source, on_event
+            return cand, hls_candidate
+
+        def fake_choose(direct_candidate, hls_cand, total=0, duration=0, on_event=None):
+            del hls_cand, total, duration, on_event
+            return "direct", direct_candidate
+
+        def fake_wrapper(direct_url, direct_candidate, output_dir, page_url, cookie_source, hls_candidate=None, on_event=None):
+            del direct_candidate, output_dir, page_url, cookie_source, on_event
+            calls.append((direct_url, hls_candidate["url"] if hls_candidate else None))
+            return {"ok": True, "target_url": direct_url}
+
+        def fake_total(url, headers, cand):
+            del url, headers, cand
+            return 80 * 1024 * 1024 * 1024
+
+        try:
+            engine.chzzk_paired_route_candidates = fake_pair
+            engine.chzzk_choose_download_route = fake_choose
+            engine.chzzk_download_direct_with_hls_fallback = fake_wrapper
+            engine.resolve_direct_media_total = fake_total
+            with tempfile.TemporaryDirectory() as temp:
+                engine.download_chzzk_candidate(
+                    "https://chzzk.naver.com/video/14056968",
+                    candidate,
+                    temp,
+                )
+        finally:
+            engine.chzzk_choose_download_route = original_choose
+            engine.chzzk_paired_route_candidates = original_pair
+            engine.chzzk_download_direct_with_hls_fallback = original_wrapper
+            engine.resolve_direct_media_total = original_total
+
+        self.assertEqual(calls, [("https://cdn.example.test/vod.mp4", "https://cdn.example.test/vod.m3u8")])
 
     def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):
         calls = []

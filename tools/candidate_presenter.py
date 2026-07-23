@@ -60,11 +60,13 @@ def candidate_visible_quality_key(candidate):
     media_type = candidate.get("media_type") or "video"
     if media_type == "audio" or ext == "wav":
         return ("audio", ext, candidate.get("note") or "")
+    delivery = _delivery_kind(candidate) if _is_chzzk_candidate(candidate) else ""
     return (
         "video",
         ext,
         engine.safe_int(candidate.get("height")),
         engine.safe_int(candidate.get("fps")),
+        delivery,
     )
 
 

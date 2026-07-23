@@ -281,7 +281,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual([candidate["id"] for candidate in filtered], ["chzzk-direct", "chzzk-hls"])
 
-    def test_group_candidates_collapses_chzzk_direct_and_hls_to_auto_entry(self):
+    def test_group_candidates_keeps_chzzk_direct_and_hls_as_separate_qualities(self):
         candidates = [
             {
                 "id": "chzzk-direct",
@@ -317,7 +317,10 @@ class CandidatePresenterTests(unittest.TestCase):
 
         rows = presenter.group_candidates(candidates)
 
-        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["chzzk-direct"])
+        self.assertEqual(
+            [candidate["id"] for candidate in rows[0]["qualities"]],
+            ["chzzk-direct", "chzzk-hls"],
+        )
 
     def test_chzzk_quality_label_shows_auto_route(self):
         label = presenter.quality_label(

@@ -227,6 +227,54 @@ print(window.cookie_combo.show_arrow)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["False", "True", "False"])
 
+    def test_clipflow_qt_finishing_progress_uses_finishing_row_state(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import DOWNLOAD_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=lambda *args, **kwargs: None, download_func=lambda *args, **kwargs: None)
+
+class FakeWidget:
+    def __init__(self):
+        self.status_calls = []
+        self.progress_calls = []
+        self.finishing_calls = []
+
+    def set_status(self, *args):
+        self.status_calls.append(args)
+
+    def set_progress(self, *args):
+        self.progress_calls.append(args)
+
+    def set_finishing(self, *args):
+        self.finishing_calls.append(args)
+
+widget = FakeWidget()
+row = {"status": DOWNLOAD_STATUS, "widget": widget}
+window._handle_engine_event_for(row, {"type": "progress", "percent": 100, "phase": "finishing", "message": "마무리 중"})
+
+print(row.get("download_finishing"))
+print(row.get("progress"))
+print(row.get("progress_text"))
+print(widget.finishing_calls)
+print(widget.progress_calls)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "True",
+                "100",
+                "마무리 중",
+                "[('마무리 중',)]",
+                "[]",
+            ],
+        )
+
     def test_clipflow_qt_discovers_favicon_links_from_html(self):
         script = r'''
 from tools.clipflow_widgets import default_favicon_urls, favicon_urls_from_html
