@@ -25,6 +25,7 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.security.MessageDigest
 
@@ -38,6 +39,7 @@ class DownloadWorker(
     override fun doWork(): Result {
         val sourceUrl = inputData.getString(KEY_URL).orEmpty()
         val directUrl = inputData.getString(KEY_DIRECT_URL).orEmpty()
+        val referer = inputData.getString(KEY_REFERER).orEmpty().ifBlank { sourceUrl }
         val formatSelector = inputData.getString(KEY_FORMAT).orEmpty().ifBlank { "best" }
         val treeUri = inputData.getString(KEY_TREE_URI).orEmpty()
         val audioFormat = inputData.getString(KEY_AUDIO_FORMAT).orEmpty().lowercase()
@@ -51,26 +53,50 @@ class DownloadWorker(
 
         return try {
             val preferDirect = inputData.getBoolean(KEY_PREFER_DIRECT, false)
+            val isManifest = directUrl.contains(".m3u8", ignoreCase = true) ||
+                directUrl.contains(".mpd", ignoreCase = true) ||
+                directUrl.contains("/media/hls", ignoreCase = true)
             val output = if (
                 audioFormat.isBlank() &&
                 directUrl.isNotBlank() &&
                 clipSection() == null &&
-                (preferDirect || !directUrl.contains(".m3u8", ignoreCase = true))
+                (preferDirect || isManifest)
             ) {
-                if (directUrl.contains(".m3u8", ignoreCase = true) || directUrl.contains(".mpd", ignoreCase = true)) {
-                    downloadWithYoutubeDl(directUrl, "best", concurrency, workDir, audioFormat)
+                if (isManifest) {
+                    // Browser-captured HLS/DASH: download the media URL itself with page referer.
+                    downloadWithYoutubeDl(
+                        directUrl,
+                        "best",
+                        concurrency,
+                        workDir,
+                        audioFormat,
+                        referer = referer,
+                    )
                 } else {
-                    runCatching { downloadDirectMp4(directUrl, workDir) }
+                    runCatching { downloadDirectMp4(directUrl, workDir, referer = referer) }
                         .getOrElse { directError ->
-                            // Some CDNs reject the simple Range client; fall back to yt-dlp.
                             publishProgress(0, "직접 요청 실패 · yt-dlp로 재시도", false)
                             runCatching {
-                                downloadWithYoutubeDl(sourceUrl, formatSelector, concurrency, workDir, audioFormat)
+                                downloadWithYoutubeDl(
+                                    sourceUrl,
+                                    formatSelector,
+                                    concurrency,
+                                    workDir,
+                                    audioFormat,
+                                    referer = referer,
+                                )
                             }.getOrElse { throw directError }
                         }
                 }
             } else {
-                downloadWithYoutubeDl(sourceUrl, formatSelector, concurrency, workDir, audioFormat)
+                downloadWithYoutubeDl(
+                    sourceUrl,
+                    formatSelector,
+                    concurrency,
+                    workDir,
+                    audioFormat,
+                    referer = referer,
+                )
             }
 
             setProgressAsync(workDataOf(PROGRESS to 100, DETAIL to "파일 저장 중", FINISHING to true)).get()
@@ -103,6 +129,7 @@ class DownloadWorker(
         concurrency: Int,
         workDir: File,
         audioFormat: String,
+        referer: String = "",
     ): File {
         (applicationContext as ClipFlowApplication).ensureEngine()
         val request = YoutubeDLRequest(sourceUrl).apply {
@@ -113,6 +140,14 @@ class DownloadWorker(
             addOption("--downloader", "libaria2c.so")
             addOption("--concurrent-fragments", concurrency)
             cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
+            if (referer.isNotBlank()) {
+                addOption("--referer", referer)
+                addOption("--add-header", "Referer:$referer")
+                runCatching {
+                    val origin = java.net.URI(referer).let { "${it.scheme}://${it.host}" }
+                    if (origin.isNotBlank()) addOption("--add-header", "Origin:$origin")
+                }
+            }
             if (audioFormat.isNotBlank()) {
                 addOption("--format", "bestaudio/best")
                 addOption("--extract-audio")
@@ -160,7 +195,7 @@ class DownloadWorker(
             ?: error("완성된 MP4 파일을 찾지 못했습니다.")
     }
 
-    private fun downloadDirectMp4(mediaUrl: String, workDir: File): File {
+    private fun downloadDirectMp4(mediaUrl: String, workDir: File, referer: String = ""): File {
         val stem = URL(mediaUrl).path.substringAfterLast('/').substringBeforeLast('.').ifBlank { "video" }
             .replace(Regex("[\\/:*?\"<>|]"), "_")
         val part = File(workDir, "$stem.mp4.part")
@@ -170,19 +205,23 @@ class DownloadWorker(
             instanceFollowRedirects = true
             connectTimeout = 15_000
             readTimeout = 30_000
-            setRequestProperty("User-Agent", YoutubeDlAnalyzer.BROWSER_USER_AGENT)
+            setRequestProperty("User-Agent", BrowserMediaFallback.DESKTOP_CHROME_UA)
             setRequestProperty("Accept", "*/*")
             setRequestProperty("Accept-Language", "en-US,en;q=0.9")
             setRequestProperty("Connection", "keep-alive")
-            // Some media CDNs require a plausible referer/origin of the host itself.
-            runCatching {
-                val host = URL(mediaUrl).host
-                if (host.isNotBlank()) {
-                    setRequestProperty("Referer", "https://$host/")
-                    setRequestProperty("Origin", "https://$host")
+            val ref = referer.ifBlank {
+                runCatching { "https://${URL(mediaUrl).host}/" }.getOrDefault("")
+            }
+            if (ref.isNotBlank()) {
+                setRequestProperty("Referer", ref)
+                runCatching {
+                    val host = URI(ref).host
+                    if (!host.isNullOrBlank()) setRequestProperty("Origin", "https://$host")
                 }
             }
-            cookieStore.cookieHeaderFor(mediaUrl).takeIf(String::isNotBlank)?.let {
+            cookieStore.cookieHeaderFor(mediaUrl).ifBlank {
+                cookieStore.cookieHeaderFor(ref)
+            }.takeIf(String::isNotBlank)?.let {
                 setRequestProperty("Cookie", it)
             }
             if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
@@ -305,6 +344,7 @@ class DownloadWorker(
         const val KEY_URL = "url"
         const val KEY_DIRECT_URL = "direct_url"
         const val KEY_PREFER_DIRECT = "prefer_direct"
+        const val KEY_REFERER = "referer"
         const val KEY_FORMAT = "format"
         const val KEY_TREE_URI = "tree_uri"
         const val KEY_CONCURRENCY = "concurrency"

@@ -103,7 +103,11 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         _state.update {
             it.copy(
                 analyzing = true,
-                analysisMessage = if (urls.size > 1) "대기열 ${urls.size}개 분석 중" else "영상 정보를 확인하는 중",
+                analysisMessage = if (urls.size > 1) {
+                    "대기열 ${urls.size}개 분석 중"
+                } else {
+                    "영상 정보를 확인하는 중 · 필요 시 브라우저 폴백 화면이 열립니다"
+                },
                 analysisQueueRemaining = urls.size,
                 error = "",
             )
@@ -451,13 +455,18 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         if (candidate.kind == RowKind.Playlist || candidate.childLoading) return
         val current = state.value
         val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.mediaUrl}|$clipRange")
-        val useDirect = candidate.prefersDirectUrl || candidate.route in setOf("chzzk", "browser", "direct")
+        val useDirect = candidate.mediaUrl.isNotBlank() && (
+            candidate.prefersDirectUrl ||
+                candidate.route in setOf("chzzk", "browser", "direct") ||
+                candidate.isManifest
+            )
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
                     DownloadWorker.KEY_URL to candidate.sourceUrl,
                     DownloadWorker.KEY_DIRECT_URL to candidate.mediaUrl.takeIf { useDirect || candidate.formatId == "direct" }.orEmpty(),
                     DownloadWorker.KEY_PREFER_DIRECT to useDirect,
+                    DownloadWorker.KEY_REFERER to candidate.sourceUrl,
                     DownloadWorker.KEY_FORMAT to candidate.formatSelector,
                     DownloadWorker.KEY_TREE_URI to current.outputTreeUri,
                     DownloadWorker.KEY_CONCURRENCY to current.preferences.concurrency,

@@ -31,8 +31,6 @@ data class PlaylistEntryRef(
 class YoutubeDlAnalyzer(private val context: Context) {
     private val cookieStore = CookieFileStore(context)
     private val siteRouter = SiteRouter(cookieStore)
-    private val browserFallback by lazy { BrowserMediaFallback(context, cookieStore) }
-
     fun analyze(url: String, allowBrowserFallback: Boolean = true): AnalysisResult {
         directMp4Candidate(url)?.let { return AnalysisResult(it.title, listOf(it), route = "direct") }
 
@@ -42,22 +40,42 @@ class YoutubeDlAnalyzer(private val context: Context) {
             .fold(onSuccess = { return it }, onFailure = { it })
 
         if (allowBrowserFallback && shouldTryBrowserFallback(url, ytdlpError.message.orEmpty())) {
-            return runCatching { browserFallback.capture(url) }
-                .getOrElse { browserError ->
-                    val ytdlpMessage = ytdlpError.message.orEmpty()
-                    val browserMessage = browserError.message.orEmpty()
-                    error(
-                        buildString {
-                            append(ytdlpMessage.ifBlank { "yt-dlp 분석 실패" })
-                            if (browserMessage.isNotBlank()) {
-                                append("\n브라우저 폴백: ")
-                                append(browserMessage)
-                            }
-                        },
-                    )
-                }
+            // Desktop 공용 폴백 = real browser + network capture.
+            // Android: open a visible WebView activity (headless WebView dies on CF/AniLife).
+            return runCatching {
+                app.clipflow.android.ui.BrowserCaptureActivity.captureBlocking(
+                    context = context.applicationContext,
+                    cookieStore = cookieStore,
+                    url = url,
+                    timeoutSeconds = 120,
+                )
+            }.getOrElse { browserError ->
+                val ytdlpMessage = friendlyAnalyzeError(ytdlpError.message.orEmpty())
+                val browserMessage = browserError.message.orEmpty()
+                error(
+                    buildString {
+                        append(ytdlpMessage)
+                        if (browserMessage.isNotBlank()) {
+                            append("\n")
+                            append(browserMessage)
+                        }
+                    },
+                )
+            }
         }
         throw ytdlpError
+    }
+
+    private fun friendlyAnalyzeError(raw: String): String {
+        val lower = raw.lowercase()
+        return when {
+            "ssl" in lower || "tls" in lower || "eof" in lower || "connection_closed" in lower ->
+                "사이트가 yt-dlp 연결을 끊었습니다. 브라우저 폴백으로 전환합니다."
+            "unsupported url" in lower || "no video formats" in lower ->
+                "yt-dlp가 이 URL을 해석하지 못했습니다."
+            raw.isBlank() -> "영상 분석에 실패했습니다."
+            else -> raw.lineSequence().firstOrNull().orEmpty().ifBlank { "영상 분석에 실패했습니다." }
+        }
     }
 
     fun analyzePlaylistShell(url: String): AnalysisResult {
@@ -293,6 +311,7 @@ class YoutubeDlAnalyzer(private val context: Context) {
     }
 
     private fun shouldTryBrowserFallback(url: String, message: String): Boolean {
+        // Desktop 공용 폴백과 같은 취지: yt-dlp generic/차단/미지원이면 브라우저 네트워크 캡처.
         val lower = message.lowercase()
         if (SiteRouter.isChzzkClip(url) || SiteRouter.isChzzkVideo(url)) return false
         if (looksLikePlaylist(url)) return false
@@ -307,15 +326,14 @@ class YoutubeDlAnalyzer(private val context: Context) {
             lower.contains("not find") ||
             lower.contains("http error 403") ||
             lower.contains("sign in") ||
-            lower.contains("generic")
+            lower.contains("generic") ||
+            lower.contains("tls")
     }
 
     private fun hash(value: String): String = value.hashCode().toUInt().toString(16)
 
     companion object {
-        // Google / CDN media hosts reject bare "Mozilla/5.0" with HTTP 403.
-        const val BROWSER_USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+        // Prefer desktop Chrome UA for yt-dlp/generic hosts (same family as browser fallback).
+        const val BROWSER_USER_AGENT = BrowserMediaFallback.DESKTOP_CHROME_UA
     }
 }
