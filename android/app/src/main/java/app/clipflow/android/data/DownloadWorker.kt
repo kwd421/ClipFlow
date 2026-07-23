@@ -60,7 +60,14 @@ class DownloadWorker(
                 if (directUrl.contains(".m3u8", ignoreCase = true) || directUrl.contains(".mpd", ignoreCase = true)) {
                     downloadWithYoutubeDl(directUrl, "best", concurrency, workDir, audioFormat)
                 } else {
-                    downloadDirectMp4(directUrl, workDir)
+                    runCatching { downloadDirectMp4(directUrl, workDir) }
+                        .getOrElse { directError ->
+                            // Some CDNs reject the simple Range client; fall back to yt-dlp.
+                            publishProgress(0, "직접 요청 실패 · yt-dlp로 재시도", false)
+                            runCatching {
+                                downloadWithYoutubeDl(sourceUrl, formatSelector, concurrency, workDir, audioFormat)
+                            }.getOrElse { throw directError }
+                        }
                 }
             } else {
                 downloadWithYoutubeDl(sourceUrl, formatSelector, concurrency, workDir, audioFormat)
@@ -164,6 +171,17 @@ class DownloadWorker(
             connectTimeout = 15_000
             readTimeout = 30_000
             setRequestProperty("User-Agent", YoutubeDlAnalyzer.BROWSER_USER_AGENT)
+            setRequestProperty("Accept", "*/*")
+            setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            setRequestProperty("Connection", "keep-alive")
+            // Some media CDNs require a plausible referer/origin of the host itself.
+            runCatching {
+                val host = URL(mediaUrl).host
+                if (host.isNotBlank()) {
+                    setRequestProperty("Referer", "https://$host/")
+                    setRequestProperty("Origin", "https://$host")
+                }
+            }
             cookieStore.cookieHeaderFor(mediaUrl).takeIf(String::isNotBlank)?.let {
                 setRequestProperty("Cookie", it)
             }

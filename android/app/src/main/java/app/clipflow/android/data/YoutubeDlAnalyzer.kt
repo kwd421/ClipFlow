@@ -296,6 +296,9 @@ class YoutubeDlAnalyzer(private val context: Context) {
     private fun hash(value: String): String = value.hashCode().toUInt().toString(16)
 
     companion object {
-        const val BROWSER_USER_AGENT = "Mozilla/5.0"
+        // Google / CDN media hosts reject bare "Mozilla/5.0" with HTTP 403.
+        const val BROWSER_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
     }
 }
