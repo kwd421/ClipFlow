@@ -107,6 +107,7 @@ import app.clipflow.android.model.DownloadPreferences
 import app.clipflow.android.model.DownloadTaskState
 import app.clipflow.android.model.MediaCandidate
 import app.clipflow.android.model.TaskStatus
+import app.clipflow.android.model.faviconUrlFor
 import app.clipflow.android.model.formatBytes
 import app.clipflow.android.model.formatDuration
 import app.clipflow.android.model.parseTimecode
@@ -128,6 +129,7 @@ fun ClipFlowScreen(
     onUrlChanged: (String) -> Unit,
     onAnalyze: () -> Unit,
     onToggleSelected: (String) -> Unit,
+    onSelectOnly: (String) -> Unit,
     onToggleSelectAll: () -> Unit,
     onDownloadSelected: () -> Unit,
     onDownloadSegment: (MediaCandidate, ClipRange) -> Unit,
@@ -282,7 +284,7 @@ fun ClipFlowScreen(
             onDismiss = { actionCandidate = null },
             onSelect = {
                 selectionMode = true
-                if (candidate.id !in state.selectedIds) onToggleSelected(candidate.id)
+                onSelectOnly(candidate.id)
                 actionCandidate = null
             },
             onUnselect = {
@@ -815,13 +817,31 @@ private fun CandidateCard(
                     lineHeight = 18.sp,
                     color = colors.ink,
                 )
-                Text(
-                    meta,
-                    color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    val favicon = faviconUrlFor(candidate.sourceUrl)
+                    if (favicon.isNotBlank()) {
+                        AsyncImage(
+                            model = favicon,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    Text(
+                        meta,
+                        color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
             if (candidate.kind == RowKind.Playlist) {
                 TooltipIconButton(

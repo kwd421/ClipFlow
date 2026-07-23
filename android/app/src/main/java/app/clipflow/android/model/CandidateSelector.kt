@@ -92,6 +92,17 @@ fun extractUrls(text: String): List<String> {
     return found
 }
 
+/** Google favicon service — same approach as desktop ClipFlow rows. */
+fun faviconUrlFor(pageUrl: String, size: Int = 64): String {
+    val host = runCatching {
+        java.net.URI(pageUrl).host?.lowercase().orEmpty()
+    }.getOrDefault("")
+    if (host.isBlank()) return ""
+    val origin = "https://$host"
+    val query = java.net.URLEncoder.encode(origin, Charsets.UTF_8.name())
+    return "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=$query&size=$size"
+}
+
 fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "--"
     val mb = bytes.toDouble() / 1_000_000.0

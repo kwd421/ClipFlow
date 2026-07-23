@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
                     onUrlChanged = viewModel::setUrl,
                     onAnalyze = viewModel::analyze,
                     onToggleSelected = viewModel::toggleSelected,
+                    onSelectOnly = viewModel::selectOnly,
                     onToggleSelectAll = viewModel::toggleSelectAll,
                     onDownloadSelected = viewModel::downloadSelected,
                     onDownloadSegment = viewModel::downloadSegment,

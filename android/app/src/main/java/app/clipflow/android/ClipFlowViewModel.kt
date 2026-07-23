@@ -154,6 +154,12 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         schedulePersist()
     }
 
+    /** Long-press "선택": only the pressed card, not the whole list. */
+    fun selectOnly(candidateId: String) {
+        _state.update { it.copy(selectedIds = setOf(candidateId)) }
+        schedulePersist()
+    }
+
     fun toggleSelectAll() {
         _state.update { current ->
             val all = current.candidates
@@ -560,7 +566,8 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         val sorted = sortCandidates(displayRows, state.value.sort)
         _state.update { current ->
             val selected = when {
-                selectId != null -> current.selectedIds + selectId
+                // Auto-select only the newly analyzed card; never accumulate the whole list.
+                selectId != null -> setOf(selectId)
                 else -> current.selectedIds.intersect(sorted.mapTo(mutableSetOf()) { it.id })
             }
             current.copy(
