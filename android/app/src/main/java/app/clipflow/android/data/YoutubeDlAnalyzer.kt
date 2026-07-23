@@ -3,8 +3,10 @@ package app.clipflow.android.data
 import android.content.Context
 import app.clipflow.android.ClipFlowApplication
 import app.clipflow.android.model.MediaCandidate
+import app.clipflow.android.model.RowKind
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URI
@@ -13,13 +15,126 @@ import java.net.URL
 data class AnalysisResult(
     val title: String,
     val candidates: List<MediaCandidate>,
+    val playlistEntries: List<PlaylistEntryRef> = emptyList(),
+    val isPlaylist: Boolean = false,
+    val route: String = "ytdlp",
+)
+
+data class PlaylistEntryRef(
+    val index: Int,
+    val url: String,
+    val title: String,
+    val thumbnailUrl: String = "",
+    val durationSeconds: Int = 0,
 )
 
 class YoutubeDlAnalyzer(private val context: Context) {
     private val cookieStore = CookieFileStore(context)
+    private val siteRouter = SiteRouter(cookieStore)
+    private val browserFallback by lazy { BrowserMediaFallback(context, cookieStore) }
 
-    fun analyze(url: String): AnalysisResult {
-        directMp4Candidate(url)?.let { return AnalysisResult(it.title, listOf(it)) }
+    fun analyze(url: String, allowBrowserFallback: Boolean = true): AnalysisResult {
+        directMp4Candidate(url)?.let { return AnalysisResult(it.title, listOf(it), route = "direct") }
+
+        siteRouter.analyzeIfKnown(url)?.let { return it.copy(route = siteRouter.routeName(url).ifBlank { it.route }) }
+
+        val ytdlpError = runCatching { analyzeWithYoutubeDl(url) }
+            .fold(onSuccess = { return it }, onFailure = { it })
+
+        if (allowBrowserFallback && shouldTryBrowserFallback(url, ytdlpError.message.orEmpty())) {
+            return runCatching { browserFallback.capture(url) }
+                .getOrElse { throw ytdlpError }
+        }
+        throw ytdlpError
+    }
+
+    fun analyzePlaylistShell(url: String): AnalysisResult {
+        (context.applicationContext as ClipFlowApplication).ensureEngine()
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-single-json")
+            addOption("--no-warnings")
+            addOption("--no-cache-dir")
+            cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
+            applySiteOptions(url)
+        }
+        val response = YoutubeDL.getInstance().execute(request)
+        val root = JSONObject(response.out.trim())
+        val type = root.optString("_type")
+        val entries = root.optJSONArray("entries")
+        if (type != "playlist" && entries == null) {
+            return analyze(url)
+        }
+        val title = root.optString("title").ifBlank { "재생목록" }
+        val playlistId = root.optString("id").ifBlank { hash(url) }
+        val parentId = "playlist-$playlistId"
+        val entryRefs = buildList {
+            if (entries != null) {
+                for (index in 0 until entries.length()) {
+                    val item = entries.optJSONObject(index) ?: continue
+                    val entryUrl = item.optString("url")
+                        .ifBlank { item.optString("webpage_url") }
+                        .ifBlank {
+                            val id = item.optString("id")
+                            if (id.isNotBlank() && url.contains("youtube", true)) {
+                                "https://www.youtube.com/watch?v=$id"
+                            } else ""
+                        }
+                    if (entryUrl.isBlank()) continue
+                    add(
+                        PlaylistEntryRef(
+                            index = index,
+                            url = entryUrl,
+                            title = item.optString("title").ifBlank { "항목 ${index + 1}" },
+                            thumbnailUrl = item.optString("thumbnail")
+                                .ifBlank { item.optJSONArray("thumbnails")?.optJSONObject(0)?.optString("url").orEmpty() },
+                            durationSeconds = item.optDouble("duration", 0.0).toInt(),
+                        ),
+                    )
+                }
+            }
+        }
+        val parent = MediaCandidate(
+            id = parentId,
+            sourceUrl = url,
+            mediaUrl = "",
+            title = title,
+            uploader = root.optString("uploader"),
+            thumbnailUrl = root.optString("thumbnail"),
+            formatId = "playlist",
+            extension = "playlist",
+            width = 0,
+            height = 0,
+            fps = 0,
+            videoCodec = "",
+            audioCodec = "",
+            dynamicRange = "",
+            sizeBytes = 0,
+            durationSeconds = entryRefs.sumOf { it.durationSeconds },
+            isManifest = false,
+            kind = RowKind.Playlist,
+            itemCount = entryRefs.size,
+            expanded = true,
+            route = "playlist",
+        )
+        return AnalysisResult(
+            title = title,
+            candidates = listOf(parent),
+            playlistEntries = entryRefs,
+            isPlaylist = true,
+            route = "playlist",
+        )
+    }
+
+    fun looksLikePlaylist(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("list=") ||
+            lower.contains("/playlist") ||
+            lower.contains("/sets/") ||
+            Regex("""[?&]index=\d+""").containsMatchIn(lower)
+    }
+
+    private fun analyzeWithYoutubeDl(url: String): AnalysisResult {
         (context.applicationContext as ClipFlowApplication).ensureEngine()
         val request = YoutubeDLRequest(url).apply {
             addOption("--dump-single-json")
@@ -27,9 +142,29 @@ class YoutubeDlAnalyzer(private val context: Context) {
             addOption("--no-warnings")
             addOption("--no-cache-dir")
             cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
+            applySiteOptions(url)
         }
         val response = YoutubeDL.getInstance().execute(request)
         val root = JSONObject(response.out.trim())
+        if (root.optString("_type") == "playlist" || root.optJSONArray("entries") != null) {
+            return analyzePlaylistShell(url)
+        }
+        return parseVideoJson(url, root, route = siteRouter.routeName(url).ifBlank { "ytdlp" })
+    }
+
+    private fun applySiteOptions(url: String) {
+        // Keep extractor choices stable for KR platforms when yt-dlp handles them.
+        when {
+            SiteRouter.isSoop(url) -> {
+                // no-op reserved for future extractor args
+            }
+            SiteRouter.isCime(url) -> {
+                // no-op reserved for future extractor args
+            }
+        }
+    }
+
+    private fun parseVideoJson(url: String, root: JSONObject, route: String): AnalysisResult {
         val title = root.optString("title").ifBlank { "제목 없는 영상" }
         val uploader = root.optString("uploader")
         val thumbnail = root.optString("thumbnail")
@@ -50,7 +185,7 @@ class YoutubeDlAnalyzer(private val context: Context) {
                     val manifestUrl = item.optString("manifest_url")
                     add(
                         MediaCandidate(
-                            id = "$formatId-$index",
+                            id = "$formatId-$index-${hash(url).take(6)}",
                             sourceUrl = url,
                             mediaUrl = mediaUrl,
                             title = title,
@@ -71,6 +206,7 @@ class YoutubeDlAnalyzer(private val context: Context) {
                             isManifest = manifestUrl.isNotBlank() ||
                                 protocol.contains("m3u8", true) ||
                                 protocol.contains("dash", true),
+                            route = route,
                         ),
                     )
                 }
@@ -79,7 +215,7 @@ class YoutubeDlAnalyzer(private val context: Context) {
             val mediaUrl = root.optString("url")
             if (mediaUrl.isBlank()) emptyList() else listOf(
                 MediaCandidate(
-                    id = root.optString("format_id", "best"),
+                    id = root.optString("format_id", "best") + "-" + hash(url).take(6),
                     sourceUrl = url,
                     mediaUrl = mediaUrl,
                     title = title,
@@ -96,11 +232,12 @@ class YoutubeDlAnalyzer(private val context: Context) {
                     sizeBytes = root.optLong("filesize", 0L),
                     durationSeconds = duration,
                     isManifest = mediaUrl.contains(".m3u8", true) || mediaUrl.contains(".mpd", true),
+                    route = route,
                 ),
             )
         }
         if (candidates.isEmpty()) error("다운로드 가능한 영상 형식을 찾지 못했습니다.")
-        return AnalysisResult(title, candidates)
+        return AnalysisResult(title, candidates, route = route)
     }
 
     private fun directMp4Candidate(url: String): MediaCandidate? {
@@ -122,7 +259,7 @@ class YoutubeDlAnalyzer(private val context: Context) {
             }
         }.getOrDefault(0L)
         return MediaCandidate(
-            id = "direct-mp4",
+            id = "direct-mp4-${hash(url).take(8)}",
             sourceUrl = url,
             mediaUrl = url,
             title = filename.replace('_', ' ').replace('-', ' '),
@@ -139,12 +276,26 @@ class YoutubeDlAnalyzer(private val context: Context) {
             sizeBytes = size,
             durationSeconds = 0,
             isManifest = false,
+            route = "direct",
         )
     }
 
+    private fun shouldTryBrowserFallback(url: String, message: String): Boolean {
+        val lower = message.lowercase()
+        if (SiteRouter.isChzzkClip(url) || SiteRouter.isChzzkVideo(url)) return false
+        if (looksLikePlaylist(url)) return false
+        return lower.contains("unsupported url") ||
+            lower.contains("no video formats") ||
+            lower.contains("unable to extract") ||
+            lower.contains("not find") ||
+            lower.contains("http error 403") ||
+            lower.contains("sign in") ||
+            lower.contains("generic")
+    }
+
+    private fun hash(value: String): String = value.hashCode().toUInt().toString(16)
+
     companion object {
-        // Some CDNs challenge fabricated full Chrome versions while accepting a
-        // neutral browser token for direct media requests.
         const val BROWSER_USER_AGENT = "Mozilla/5.0"
     }
 }

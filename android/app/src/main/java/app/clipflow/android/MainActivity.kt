@@ -25,9 +25,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            ClipFlowTheme {
-                val viewModel = clipFlowViewModel
-                val state by viewModel.state.collectAsStateWithLifecycle()
+            val viewModel = clipFlowViewModel
+            val state by viewModel.state.collectAsStateWithLifecycle()
+            ClipFlowTheme(darkTheme = state.darkTheme) {
                 val notificationPermission = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission(),
                 ) {}
@@ -67,6 +67,11 @@ class MainActivity : ComponentActivity() {
                     onCookieFileChanged = viewModel::importCookieFile,
                     onClearCookieFile = viewModel::clearCookieFile,
                     onErrorDismissed = viewModel::clearError,
+                    onToggleSort = viewModel::toggleSort,
+                    onToggleDarkTheme = viewModel::setDarkTheme,
+                    onTogglePlaylist = viewModel::togglePlaylistExpanded,
+                    onDownloadPlaylist = viewModel::downloadPlaylist,
+                    onDismissUpdate = viewModel::dismissUpdate,
                 )
             }
         }

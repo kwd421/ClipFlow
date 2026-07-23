@@ -3,6 +3,7 @@ package app.clipflow.android.model
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CandidateSelectorTest {
@@ -13,11 +14,17 @@ class CandidateSelectorTest {
         range: String = "SDR",
         audio: String = "none",
         size: Long = 0,
+        title: String = "Sample",
+        createdOrder: Long = 0,
+        kind: RowKind = RowKind.Video,
+        parentId: String = "",
+        playlistIndex: Int = 0,
+        expanded: Boolean = false,
     ) = MediaCandidate(
         id = id,
         sourceUrl = "https://example.com/watch",
         mediaUrl = "https://example.com/$id.mp4",
-        title = "Sample",
+        title = title,
         uploader = "",
         thumbnailUrl = "",
         formatId = id,
@@ -31,6 +38,11 @@ class CandidateSelectorTest {
         sizeBytes = size,
         durationSeconds = 60,
         isManifest = false,
+        kind = kind,
+        parentId = parentId,
+        playlistIndex = playlistIndex,
+        createdOrder = createdOrder,
+        expanded = expanded,
     )
 
     @Test
@@ -66,5 +78,45 @@ class CandidateSelectorTest {
     fun byteDisplayUsesFinderStyleDecimalUnits() {
         assertEquals("45.0 MB", formatBytes(45_000_000))
         assertEquals("1.2 GB", formatBytes(1_200_000_000))
+    }
+
+    @Test
+    fun nameSortIsAlphabeticalNotJustReversed() {
+        val rows = listOf(
+            candidate("a", 720, title = "Charlie", createdOrder = 1),
+            candidate("b", 720, title = "alpha", createdOrder = 2),
+            candidate("c", 720, title = "Bravo", createdOrder = 3),
+        )
+        val ascending = sortCandidates(rows, SortState(SortKey.Name, descending = false))
+        assertEquals(listOf("alpha", "Bravo", "Charlie"), ascending.map { it.title })
+        val descending = sortCandidates(rows, SortState(SortKey.Name, descending = true))
+        assertEquals(listOf("Charlie", "Bravo", "alpha"), descending.map { it.title })
+    }
+
+    @Test
+    fun playlistChildrenStayUnderExpandedParent() {
+        val rows = listOf(
+            candidate("p", 0, title = "PL", kind = RowKind.Playlist, expanded = true, createdOrder = 10),
+            candidate("c2", 720, title = "child2", kind = RowKind.PlaylistChild, parentId = "p", playlistIndex = 2, createdOrder = 12),
+            candidate("c1", 720, title = "child1", kind = RowKind.PlaylistChild, parentId = "p", playlistIndex = 1, createdOrder = 11),
+            candidate("other", 720, title = "solo", createdOrder = 5),
+        )
+        val sorted = sortCandidates(rows, SortState(SortKey.Latest, descending = true))
+        assertEquals(listOf("p", "c1", "c2", "other"), sorted.map { it.id })
+    }
+
+    @Test
+    fun extractMultipleUrlsFromPastedText() {
+        val urls = extractUrls(
+            """
+            check https://youtu.be/abc
+            and https://chzzk.naver.com/video/1,
+            ignore ftp://nope
+            """.trimIndent(),
+        )
+        assertEquals(
+            listOf("https://youtu.be/abc", "https://chzzk.naver.com/video/1"),
+            urls,
+        )
     }
 }

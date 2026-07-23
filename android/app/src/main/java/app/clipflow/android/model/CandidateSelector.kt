@@ -5,6 +5,7 @@ fun visibleCandidates(
     preferences: DownloadPreferences,
 ): List<MediaCandidate> {
     val filtered = candidates.filter { candidate ->
+        if (candidate.kind == RowKind.Playlist || candidate.childLoading) return@filter true
         val qualityMatches = preferences.quality == "자동" ||
             preferences.quality.removeSuffix("p").toIntOrNull() == candidate.height
         val codecMatches = preferences.codec == "자동" || when (preferences.codec) {
@@ -18,20 +19,77 @@ fun visibleCandidates(
     }
     val source = filtered.ifEmpty { candidates }
     return source
-        .groupBy { listOf(it.height, it.fps, it.dynamicRange, it.extension.uppercase()) }
+        .groupBy {
+            if (it.kind != RowKind.Video && it.kind != RowKind.PlaylistChild) {
+                listOf(it.id)
+            } else {
+                listOf(it.sourceUrl, it.height, it.fps, it.dynamicRange, it.extension.uppercase())
+            }
+        }
         .values
         .map { group ->
-            group.maxWithOrNull(
-                compareBy<MediaCandidate> { it.hasAudio }
-                    .thenBy { it.sizeBytes > 0 }
-                    .thenBy { it.sizeBytes },
-            ) ?: group.first()
+            if (group.first().kind == RowKind.Playlist || group.first().childLoading) {
+                group.first()
+            } else {
+                group.maxWithOrNull(
+                    compareBy<MediaCandidate> { it.hasAudio }
+                        .thenBy { it.sizeBytes > 0 }
+                        .thenBy { it.sizeBytes },
+                ) ?: group.first()
+            }
         }
         .sortedWith(
             compareByDescending<MediaCandidate> { it.height }
                 .thenByDescending { it.fps }
                 .thenByDescending { it.sizeBytes },
         )
+}
+
+/** Collapse multi-quality analysis into one preferred row per source URL. */
+fun preferredVisibleCandidate(
+    qualities: List<MediaCandidate>,
+    preferences: DownloadPreferences,
+): MediaCandidate? = visibleCandidates(qualities, preferences).firstOrNull()
+
+fun sortCandidates(candidates: List<MediaCandidate>, sort: SortState): List<MediaCandidate> {
+    val top = candidates.filter { it.kind != RowKind.PlaylistChild }
+    val childrenByParent = candidates.filter { it.kind == RowKind.PlaylistChild }
+        .groupBy { it.parentId }
+
+    val sortedTop = when (sort.key) {
+        SortKey.Name -> {
+            val comparator = compareBy<MediaCandidate> { it.title.lowercase() }
+            if (sort.descending) top.sortedWith(comparator.reversed()) else top.sortedWith(comparator)
+        }
+        SortKey.Latest -> {
+            val comparator = compareBy<MediaCandidate> { it.createdOrder }
+            if (sort.descending) top.sortedWith(comparator.reversed()) else top.sortedWith(comparator)
+        }
+    }
+
+    return buildList {
+        for (row in sortedTop) {
+            add(row)
+            if (row.kind == RowKind.Playlist && row.expanded) {
+                val children = childrenByParent[row.id].orEmpty()
+                    .sortedWith(
+                        compareBy<MediaCandidate> { it.playlistIndex }
+                            .thenBy { it.createdOrder },
+                    )
+                addAll(children)
+            }
+        }
+    }
+}
+
+fun extractUrls(text: String): List<String> {
+    val found = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE)
+        .findAll(text)
+        .map { it.value.trim().trimEnd(',', '.', ')', ']', '>', '"', '\'') }
+        .filter { it.startsWith("http://") || it.startsWith("https://") }
+        .distinct()
+        .toList()
+    return found
 }
 
 fun formatBytes(bytes: Long): String {

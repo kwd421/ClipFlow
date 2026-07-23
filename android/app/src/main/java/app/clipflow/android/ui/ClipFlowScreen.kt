@@ -112,15 +112,16 @@ import app.clipflow.android.model.TaskStatus
 import app.clipflow.android.model.formatBytes
 import app.clipflow.android.model.formatDuration
 import app.clipflow.android.model.parseTimecode
-import app.clipflow.android.ui.theme.Accent
-import app.clipflow.android.ui.theme.Canvas
-import app.clipflow.android.ui.theme.Danger
-import app.clipflow.android.ui.theme.Ink
-import app.clipflow.android.ui.theme.Muted
-import app.clipflow.android.ui.theme.Raised
-import app.clipflow.android.ui.theme.StrongBorder
-import app.clipflow.android.ui.theme.Success
+import app.clipflow.android.model.RowKind
+import app.clipflow.android.model.SortKey
+import app.clipflow.android.ui.theme.clipPalette
 import coil3.compose.AsyncImage
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.PlaylistPlay
+import androidx.compose.foundation.layout.offset
+import android.content.Intent
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -146,6 +147,11 @@ fun ClipFlowScreen(
     onCookieFileChanged: (Uri?) -> Unit,
     onClearCookieFile: () -> Unit,
     onErrorDismissed: () -> Unit,
+    onToggleSort: () -> Unit,
+    onToggleDarkTheme: (Boolean) -> Unit,
+    onTogglePlaylist: (String) -> Unit,
+    onDownloadPlaylist: (String) -> Unit,
+    onDismissUpdate: () -> Unit,
 ) {
     var showOptions by remember { mutableStateOf(false) }
     var showClipRange by remember { mutableStateOf(false) }
@@ -156,7 +162,7 @@ fun ClipFlowScreen(
     var selectionMode by remember { mutableStateOf(false) }
     var searchExpanded by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var newestFirst by remember { mutableStateOf(true) }
+    val colors = clipPalette()
     val context = LocalContext.current
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) {
         onOutputTreeChanged(it)
@@ -189,14 +195,14 @@ fun ClipFlowScreen(
     if (showDeleteSelectedConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteSelectedConfirmation = false },
-            title = { Text("선택한 파일 삭제", color = Ink, fontWeight = FontWeight.Bold) },
+            title = { Text("선택한 파일 삭제", color = colors.ink, fontWeight = FontWeight.Bold) },
             text = { Text("다운로드된 파일 ${selectedOutputIds.size}개를 삭제하시겠습니까?") },
             dismissButton = {
                 OutlinedButton(
                     onClick = { showDeleteSelectedConfirmation = false },
-                    border = BorderStroke(1.5.dp, StrongBorder),
+                    border = BorderStroke(1.5.dp, colors.strongBorder),
                     shape = RoundedCornerShape(8.dp),
-                ) { Text("취소", color = Ink) }
+                ) { Text("취소", color = colors.ink) }
             },
             confirmButton = {
                 Button(
@@ -204,24 +210,24 @@ fun ClipFlowScreen(
                         selectedOutputIds.forEach(onDeleteFile)
                         showDeleteSelectedConfirmation = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Danger),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
                     shape = RoundedCornerShape(8.dp),
                 ) { Text("삭제") }
             },
-            containerColor = Raised,
+            containerColor = colors.raised,
         )
     }
     deleteCandidateId?.let { candidateId ->
         AlertDialog(
             onDismissRequest = { deleteCandidateId = null },
-            title = { Text("파일 삭제", color = Ink, fontWeight = FontWeight.Bold) },
+            title = { Text("파일 삭제", color = colors.ink, fontWeight = FontWeight.Bold) },
             text = { Text("다운로드된 파일을 삭제하시겠습니까?") },
             dismissButton = {
                 OutlinedButton(
                     onClick = { deleteCandidateId = null },
-                    border = BorderStroke(1.5.dp, StrongBorder),
+                    border = BorderStroke(1.5.dp, colors.strongBorder),
                     shape = RoundedCornerShape(8.dp),
-                ) { Text("취소", color = Ink) }
+                ) { Text("취소", color = colors.ink) }
             },
             confirmButton = {
                 Button(
@@ -229,11 +235,11 @@ fun ClipFlowScreen(
                         onDeleteFile(candidateId)
                         deleteCandidateId = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Danger),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
                     shape = RoundedCornerShape(8.dp),
                 ) { Text("삭제") }
             },
-            containerColor = Raised,
+            containerColor = colors.raised,
         )
     }
     if (showOptions) {
@@ -313,7 +319,7 @@ fun ClipFlowScreen(
     }
 
     Scaffold(
-        containerColor = Canvas,
+        containerColor = colors.canvas,
     ) { contentPadding ->
         Column(
             modifier = Modifier
@@ -339,12 +345,33 @@ fun ClipFlowScreen(
                 },
                 onClearCookieFile = onClearCookieFile,
             )
+            if (state.updateMessage.isNotBlank()) {
+                AlertDialog(
+                    onDismissRequest = onDismissUpdate,
+                    title = { Text("업데이트", color = colors.ink, fontWeight = FontWeight.Bold) },
+                    text = { Text(state.updateMessage, color = colors.ink) },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(state.updateUrl))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            }
+                            onDismissUpdate()
+                        }) { Text("열기", color = colors.accent) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = onDismissUpdate) { Text("나중에", color = colors.ink) }
+                    },
+                    containerColor = colors.raised,
+                )
+            }
             ListToolbar(
                 state = state,
                 selectionMode = selectionMode,
                 searchExpanded = searchExpanded,
                 searchQuery = searchQuery,
-                newestFirst = newestFirst,
                 onToggleSelectAll = onToggleSelectAll,
                 onExitSelectionMode = { selectionMode = false },
                 onRemoveSelected = {
@@ -354,13 +381,13 @@ fun ClipFlowScreen(
                 onDeleteSelectedFiles = { showDeleteSelectedConfirmation = true },
                 onSearchExpanded = { searchExpanded = it },
                 onSearchQuery = { searchQuery = it },
-                onSort = { newestFirst = !newestFirst },
+                onSort = onToggleSort,
+                onToggleDarkTheme = { onToggleDarkTheme(!state.darkTheme) },
                 onOptions = { showOptions = true },
             )
 
             val rows = state.candidates
                 .filter { searchQuery.isBlank() || it.title.contains(searchQuery, ignoreCase = true) }
-                .let { if (newestFirst) it else it.reversed() }
             Box(Modifier.weight(1f)) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -379,6 +406,8 @@ fun ClipFlowScreen(
                             onRemove = { onRemove(candidate.id) },
                             onDeleteFile = { deleteCandidateId = candidate.id },
                             onLongPress = { actionCandidate = candidate },
+                            onTogglePlaylist = { onTogglePlaylist(candidate.id) },
+                            onDownloadPlaylist = { onDownloadPlaylist(candidate.id) },
                         )
                     }
                 }
@@ -388,8 +417,8 @@ fun ClipFlowScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        CircularProgressIndicator(color = Ink, strokeWidth = 3.dp)
-                        Text(state.analysisMessage, color = Muted, fontWeight = FontWeight.SemiBold)
+                        CircularProgressIndicator(color = colors.ink, strokeWidth = 3.dp)
+                        Text(state.analysisMessage, color = colors.muted, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -407,18 +436,20 @@ private fun TooltipIconButton(
     icon: ImageVector,
     label: String,
     modifier: Modifier = Modifier,
-    tint: Color = Ink,
+    tint: Color? = null,
     enabled: Boolean = true,
     iconSize: Dp = 22.dp,
     onClick: () -> Unit,
 ) {
+    val colors = clipPalette()
+    val resolvedTint = tint ?: colors.ink
     TooltipBox(
         positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
         tooltip = { PlainTooltip { Text(label) } },
         state = rememberTooltipState(),
     ) {
         IconButton(onClick = onClick, enabled = enabled, modifier = modifier.size(48.dp)) {
-            Icon(icon, contentDescription = label, tint = if (enabled) tint else Muted, modifier = Modifier.size(iconSize))
+            Icon(icon, contentDescription = label, tint = if (enabled) resolvedTint else colors.muted, modifier = Modifier.size(iconSize))
         }
     }
 }
@@ -437,14 +468,17 @@ private fun InputPanel(
     onCookieFile: () -> Unit,
     onClearCookieFile: () -> Unit,
 ) {
+    val colors = clipPalette()
     val keyboard = LocalSoftwareKeyboardController.current
     val hasCandidates = state.candidates.isNotEmpty()
     val hasSelection = state.selectedIds.isNotEmpty()
     val currentUrl = state.url.trim()
-    val showingCurrentUrl = hasCandidates && state.candidates.all { it.sourceUrl == currentUrl }
-    val primaryEnabled = !state.analyzing && if (showingCurrentUrl) hasSelection else currentUrl.isNotBlank()
+    val analyzedUrls = state.candidates.map { it.sourceUrl }.toSet()
+    val inputUrls = currentUrl.lineSequence().map { it.trim() }.filter { it.startsWith("http") }.toList()
+    val showingCurrentAnalysis = hasCandidates && inputUrls.isNotEmpty() && inputUrls.all { it in analyzedUrls }
+    val primaryEnabled = !state.analyzing && if (showingCurrentAnalysis) hasSelection else currentUrl.isNotBlank()
     val primaryAction: () -> Unit = {
-        if (showingCurrentUrl) {
+        if (showingCurrentAnalysis) {
             if (hasSelection) onDownloadSelected()
         } else {
             onAnalyze()
@@ -458,7 +492,7 @@ private fun InputPanel(
             OutlinedTextField(
                 value = state.url,
                 onValueChange = onUrlChanged,
-                placeholder = { Text("URL을 입력하세요") },
+                placeholder = { Text("URL · 여러 개는 줄바꿈") },
                 leadingIcon = { Icon(Icons.Default.Link, contentDescription = null) },
                 trailingIcon = {
                     if (state.url.isBlank()) {
@@ -467,7 +501,7 @@ private fun InputPanel(
                         TooltipIconButton(Icons.Default.Clear, "URL 지우기", onClick = onClear)
                     }
                 },
-                singleLine = true,
+                maxLines = 4,
                 shape = RoundedCornerShape(8.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = {
@@ -484,7 +518,7 @@ private fun InputPanel(
                 enabled = primaryEnabled,
                 contentPadding = PaddingValues(0.dp),
                 shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Ink),
+                colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                 modifier = Modifier.size(56.dp),
             ) {
                 if (state.analyzing) {
@@ -492,7 +526,7 @@ private fun InputPanel(
                 } else {
                     Icon(
                         Icons.Default.Download,
-                        contentDescription = if (showingCurrentUrl) "다운로드" else "분석",
+                        contentDescription = if (showingCurrentAnalysis) "다운로드" else "분석",
                     )
                 }
             }
@@ -501,17 +535,17 @@ private fun InputPanel(
             OutlinedButton(
                 onClick = onClipRange,
                 shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.5.dp, StrongBorder),
+                border = BorderStroke(1.5.dp, colors.strongBorder),
                 modifier = Modifier.height(48.dp),
             ) {
                 Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text(if (state.clipRange.isSet) "구간 적용됨" else "구간선택", color = Ink)
+                Text(if (state.clipRange.isSet) "구간 적용됨" else "구간선택", color = colors.ink)
             }
             Surface(
                 shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.5.dp, StrongBorder),
-                color = Raised,
+                border = BorderStroke(1.5.dp, colors.strongBorder),
+                color = colors.raised,
                 modifier = Modifier
                     .weight(1f)
                     .height(48.dp),
@@ -541,8 +575,8 @@ private fun InputPanel(
         }
         Surface(
             shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.5.dp, if (state.cookieEnabled) Accent else StrongBorder),
-            color = Raised,
+            border = BorderStroke(1.5.dp, if (state.cookieEnabled) colors.accent else colors.strongBorder),
+            color = colors.raised,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(48.dp),
@@ -557,13 +591,13 @@ private fun InputPanel(
                 Icon(
                     Icons.Default.Cookie,
                     contentDescription = null,
-                    tint = if (state.cookieEnabled) Accent else Ink,
+                    tint = if (state.cookieEnabled) colors.accent else colors.ink,
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     state.cookieLabel,
-                    color = if (state.cookieEnabled) Ink else Muted,
+                    color = if (state.cookieEnabled) colors.ink else colors.muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -589,7 +623,6 @@ private fun ListToolbar(
     selectionMode: Boolean,
     searchExpanded: Boolean,
     searchQuery: String,
-    newestFirst: Boolean,
     onToggleSelectAll: () -> Unit,
     onExitSelectionMode: () -> Unit,
     onRemoveSelected: () -> Unit,
@@ -598,9 +631,17 @@ private fun ListToolbar(
     onSearchExpanded: (Boolean) -> Unit,
     onSearchQuery: (String) -> Unit,
     onSort: () -> Unit,
+    onToggleDarkTheme: () -> Unit,
     onOptions: () -> Unit,
 ) {
+    val colors = clipPalette()
     val keyboard = LocalSoftwareKeyboardController.current
+    val sortLabel = when {
+        state.sort.key == SortKey.Latest && state.sort.descending -> "최신순"
+        state.sort.key == SortKey.Latest && !state.sort.descending -> "오래된순"
+        state.sort.key == SortKey.Name && !state.sort.descending -> "이름순"
+        else -> "이름역순"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -619,7 +660,7 @@ private fun ListToolbar(
                     Icons.Default.CheckBox
                 } else Icons.Default.CheckBoxOutlineBlank,
                 label = "전체 선택",
-                tint = if (state.selectedIds.isNotEmpty()) Accent else Ink,
+                tint = if (state.selectedIds.isNotEmpty()) colors.accent else colors.ink,
                 onClick = onToggleSelectAll,
             )
             TooltipIconButton(
@@ -631,7 +672,7 @@ private fun ListToolbar(
             TooltipIconButton(
                 icon = Icons.Default.Delete,
                 label = "선택 항목 파일 삭제",
-                tint = Danger,
+                tint = colors.danger,
                 enabled = canDeleteSelectedFiles,
                 onClick = onDeleteSelectedFiles,
             )
@@ -662,8 +703,13 @@ private fun ListToolbar(
             TooltipIconButton(Icons.Default.Search, "검색", onClick = { onSearchExpanded(true) })
             TextButton(onClick = onSort) {
                 Icon(Icons.Default.SwapVert, contentDescription = null)
-                Text(if (newestFirst) "다운로드순" else "이름순", color = Ink)
+                Text(sortLabel, color = colors.ink)
             }
+            TooltipIconButton(
+                Icons.Default.DarkMode,
+                if (state.darkTheme) "라이트 테마" else "다크 테마",
+                onClick = onToggleDarkTheme,
+            )
             TooltipIconButton(Icons.Default.Settings, "옵션", onClick = onOptions)
         }
     }
@@ -682,7 +728,10 @@ private fun CandidateCard(
     onRemove: () -> Unit,
     onDeleteFile: () -> Unit,
     onLongPress: () -> Unit,
+    onTogglePlaylist: () -> Unit,
+    onDownloadPlaylist: () -> Unit,
 ) {
+    val colors = clipPalette()
     val status = task?.status ?: TaskStatus.Ready
     val active = status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)
     val infinite = rememberInfiniteTransition(label = "finishing-border")
@@ -694,13 +743,13 @@ private fun CandidateCard(
     )
     val borderColor = when (status) {
         TaskStatus.Finishing -> Color.hsv(hue, 0.72f, 0.92f)
-        TaskStatus.Downloading, TaskStatus.Queued -> Accent
-        TaskStatus.Completed -> Success
-        TaskStatus.Failed -> Danger
-        else -> StrongBorder
+        TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
+        TaskStatus.Completed -> colors.success
+        TaskStatus.Failed -> colors.danger
+        else -> colors.strongBorder
     }
     Surface(
-        color = Raised,
+        color = colors.raised,
         shape = RoundedCornerShape(8.dp),
         border = BorderStroke(if (active || status == TaskStatus.Completed) 2.dp else 1.5.dp, borderColor),
         shadowElevation = if (active) 3.dp else 0.dp,
@@ -726,7 +775,7 @@ private fun CandidateCard(
                     modifier = Modifier
                         .size(width = 112.dp, height = 68.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFFE5E5E5)),
+                        .background(colors.thumbPlaceholder),
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -736,6 +785,34 @@ private fun CandidateCard(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         lineHeight = 20.sp,
+                    )
+                    if (candidate.kind == RowKind.Playlist) {
+                        Text(
+                            "재생목록 · ${candidate.itemCount}개",
+                            color = colors.muted,
+                            fontSize = 12.sp,
+                        )
+                    } else if (candidate.kind == RowKind.PlaylistChild) {
+                        Text(
+                            "항목 ${candidate.playlistIndex + 1}",
+                            color = colors.muted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    if (candidate.route.isNotBlank() && candidate.route !in setOf("ytdlp", "playlist", "")) {
+                        Text(candidate.route.uppercase(), color = colors.accent, fontSize = 11.sp)
+                    }
+                }
+                if (candidate.kind == RowKind.Playlist) {
+                    TooltipIconButton(
+                        if (candidate.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        if (candidate.expanded) "접기" else "펼치기",
+                        onClick = onTogglePlaylist,
+                    )
+                    TooltipIconButton(
+                        Icons.Default.PlaylistPlay,
+                        "재생목록 일괄 다운로드",
+                        onClick = onDownloadPlaylist,
                     )
                 }
             }
@@ -757,7 +834,7 @@ private fun CandidateCard(
                     Text(
                         listOf(formatDuration(candidate.durationSeconds), formatBytes(candidate.sizeBytes))
                             .joinToString("  ·  "),
-                        color = Muted,
+                        color = colors.muted,
                         fontSize = 13.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -766,14 +843,14 @@ private fun CandidateCard(
                 when (status) {
                     TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
                         TooltipIconButton(Icons.Default.Pause, "일시정지", onClick = onPause)
-                        TooltipIconButton(Icons.Default.Delete, "다운로드 삭제", tint = Danger, onClick = onRemove)
+                        TooltipIconButton(Icons.Default.Delete, "다운로드 삭제", tint = colors.danger, onClick = onRemove)
                     }
                     TaskStatus.Paused, TaskStatus.Failed -> {
                         TooltipIconButton(Icons.Default.PlayArrow, "다시 시작", onClick = onResume)
                         TooltipIconButton(
                             Icons.Default.Delete,
                             if (task?.outputUri?.isNotBlank() == true) "파일 삭제" else "다운로드 삭제",
-                            tint = Danger,
+                            tint = colors.danger,
                             onClick = if (task?.outputUri?.isNotBlank() == true) onDeleteFile else onRemove,
                         )
                     }
@@ -785,7 +862,7 @@ private fun CandidateCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             task.detail,
-                            color = if (status == TaskStatus.Failed) Danger else Muted,
+                            color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
@@ -798,7 +875,7 @@ private fun CandidateCard(
                     LinearProgressIndicator(
                         progress = { task.progress / 100f },
                         color = borderColor,
-                        trackColor = Color(0xFFE5E5E5),
+                        trackColor = colors.progressTrack,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(3.dp)
@@ -826,12 +903,13 @@ private fun CandidateActionsDialog(
     onSegmentExtract: () -> Unit,
     onExtractAudio: (String) -> Unit,
 ) {
+    val colors = clipPalette()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
                 candidate.title,
-                color = Ink,
+                color = colors.ink,
                 fontWeight = FontWeight.Bold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -859,7 +937,7 @@ private fun CandidateActionsDialog(
                             CandidateActionButton(
                                 Icons.Default.Delete,
                                 "파일 삭제",
-                                tint = Danger,
+                                tint = colors.danger,
                                 onClick = onDeleteFile,
                             )
                         }
@@ -876,9 +954,9 @@ private fun CandidateActionsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("닫기", color = Ink) }
+            TextButton(onClick = onDismiss) { Text("닫기", color = colors.ink) }
         },
-        containerColor = Raised,
+        containerColor = colors.raised,
     )
 }
 
@@ -886,19 +964,21 @@ private fun CandidateActionsDialog(
 private fun CandidateActionButton(
     icon: ImageVector,
     label: String,
-    tint: Color = Ink,
+    tint: Color? = null,
     onClick: () -> Unit,
 ) {
+    val colors = clipPalette()
+    val resolvedTint = tint ?: colors.ink
     OutlinedButton(
         onClick = onClick,
-        border = BorderStroke(1.5.dp, StrongBorder),
+        border = BorderStroke(1.5.dp, colors.strongBorder),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+        Icon(icon, contentDescription = null, tint = resolvedTint, modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(10.dp))
-        Text(label, color = tint, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        Text(label, color = resolvedTint, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
     }
 }
 
@@ -909,12 +989,13 @@ private fun PreferencesSheet(
     onDismiss: () -> Unit,
     onApply: (DownloadPreferences) -> Unit,
 ) {
+    val colors = clipPalette()
     var draft by remember(value) { mutableStateOf(value) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Raised,
+        containerColor = colors.raised,
     ) {
         Column(
             modifier = Modifier
@@ -923,7 +1004,7 @@ private fun PreferencesSheet(
                 .padding(horizontal = 24.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("다운로드 옵션", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("다운로드 옵션", color = colors.ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             OptionMenu(
                 "화질",
                 draft.quality,
@@ -934,7 +1015,7 @@ private fun PreferencesSheet(
                 draft = draft.copy(codec = it)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("HDR", color = Ink, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("HDR", color = colors.ink, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Switch(checked = draft.hdrEnabled, onCheckedChange = { draft = draft.copy(hdrEnabled = it) })
             }
             OptionMenu("병렬", draft.concurrency.toString(), (1..3).map(Int::toString)) {
@@ -943,13 +1024,13 @@ private fun PreferencesSheet(
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = { draft = DownloadPreferences() },
-                    border = BorderStroke(1.5.dp, StrongBorder),
+                    border = BorderStroke(1.5.dp, colors.strongBorder),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.weight(1f),
-                ) { Text("초기화", color = Ink) }
+                ) { Text("초기화", color = colors.ink) }
                 Button(
                     onClick = { onApply(draft) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.weight(1f),
                 ) { Text("적용") }
@@ -961,16 +1042,17 @@ private fun PreferencesSheet(
 
 @Composable
 private fun OptionMenu(label: String, value: String, options: List<String>, onSelected: (String) -> Unit) {
+    val colors = clipPalette()
     var expanded by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Ink, fontWeight = FontWeight.Bold, modifier = Modifier.width(76.dp))
+        Text(label, color = colors.ink, fontWeight = FontWeight.Bold, modifier = Modifier.width(76.dp))
         Box(modifier = Modifier.weight(1f)) {
             OutlinedButton(
                 onClick = { expanded = true },
-                border = BorderStroke(1.5.dp, StrongBorder),
+                border = BorderStroke(1.5.dp, colors.strongBorder),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(value, color = Ink, fontWeight = FontWeight.Bold) }
+            ) { Text(value, color = colors.ink, fontWeight = FontWeight.Bold) }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(0.65f)) {
                 options.forEach { option ->
                     DropdownMenuItem(
@@ -985,6 +1067,7 @@ private fun OptionMenu(label: String, value: String, options: List<String>, onSe
 
 @Composable
 private fun ClipRangeDialog(title: String, value: ClipRange, onDismiss: () -> Unit, onApply: (ClipRange) -> Unit) {
+    val colors = clipPalette()
     var start by remember { mutableStateOf(value.startSeconds?.toString().orEmpty()) }
     var end by remember { mutableStateOf(value.endSeconds?.toString().orEmpty()) }
     var exact by remember { mutableStateOf(value.exact) }
@@ -997,7 +1080,7 @@ private fun ClipRangeDialog(title: String, value: ClipRange, onDismiss: () -> Un
                 TimeInput("시작시간", start) { start = it }
                 TimeInput("종료시간", end) { end = it }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("컷 방식", color = Ink, fontWeight = FontWeight.Bold, modifier = Modifier.width(82.dp))
+                    Text("컷 방식", color = colors.ink, fontWeight = FontWeight.Bold, modifier = Modifier.width(82.dp))
                     Row(
                         modifier = Modifier.weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1005,41 +1088,41 @@ private fun ClipRangeDialog(title: String, value: ClipRange, onDismiss: () -> Un
                         if (exact) {
                             OutlinedButton(
                                 onClick = { exact = false },
-                                border = BorderStroke(1.5.dp, StrongBorder),
+                                border = BorderStroke(1.5.dp, colors.strongBorder),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.weight(1f),
-                            ) { Text("빠른 컷", color = Ink) }
+                            ) { Text("빠른 컷", color = colors.ink) }
                             Button(
                                 onClick = {},
-                                colors = ButtonDefaults.buttonColors(containerColor = Ink),
+                                colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.weight(1f),
                             ) { Text("정확 컷") }
                         } else {
                             Button(
                                 onClick = {},
-                                colors = ButtonDefaults.buttonColors(containerColor = Ink),
+                                colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.weight(1f),
                             ) { Text("빠른 컷") }
                             OutlinedButton(
                                 onClick = { exact = true },
-                                border = BorderStroke(1.5.dp, StrongBorder),
+                                border = BorderStroke(1.5.dp, colors.strongBorder),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.weight(1f),
-                            ) { Text("정확 컷", color = Ink) }
+                            ) { Text("정확 컷", color = colors.ink) }
                         }
                     }
                 }
-                if (validation.isNotBlank()) Text(validation, color = Danger, fontSize = 12.sp)
+                if (validation.isNotBlank()) Text(validation, color = colors.danger, fontSize = 12.sp)
             }
         },
         dismissButton = {
             OutlinedButton(
                 onClick = { onApply(ClipRange()) },
-                border = BorderStroke(1.5.dp, StrongBorder),
+                border = BorderStroke(1.5.dp, colors.strongBorder),
                 shape = RoundedCornerShape(8.dp),
-            ) { Text("초기화", color = Ink) }
+            ) { Text("초기화", color = colors.ink) }
         },
         confirmButton = {
             Button(
@@ -1052,7 +1135,7 @@ private fun ClipRangeDialog(title: String, value: ClipRange, onDismiss: () -> Un
                         validation = "종료구간은 시작구간보다 뒤여야 합니다."
                     } else onApply(ClipRange(startSeconds, endSeconds, exact))
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = Ink),
+                colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                 shape = RoundedCornerShape(8.dp),
             ) { Text("적용") }
         },
@@ -1061,6 +1144,7 @@ private fun ClipRangeDialog(title: String, value: ClipRange, onDismiss: () -> Un
 
 @Composable
 private fun TimeInput(label: String, value: String, onValueChanged: (String) -> Unit) {
+    val colors = clipPalette()
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontWeight = FontWeight.Bold, modifier = Modifier.width(82.dp))
         OutlinedTextField(

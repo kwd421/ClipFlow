@@ -50,8 +50,18 @@ class DownloadWorker(
         val workDir = File(applicationContext.filesDir, "downloads/$taskKey").apply { mkdirs() }
 
         return try {
-            val output = if (audioFormat.isBlank() && directUrl.isNotBlank() && clipSection() == null) {
-                downloadDirectMp4(directUrl, workDir)
+            val preferDirect = inputData.getBoolean(KEY_PREFER_DIRECT, false)
+            val output = if (
+                audioFormat.isBlank() &&
+                directUrl.isNotBlank() &&
+                clipSection() == null &&
+                (preferDirect || !directUrl.contains(".m3u8", ignoreCase = true))
+            ) {
+                if (directUrl.contains(".m3u8", ignoreCase = true) || directUrl.contains(".mpd", ignoreCase = true)) {
+                    downloadWithYoutubeDl(directUrl, "best", concurrency, workDir, audioFormat)
+                } else {
+                    downloadDirectMp4(directUrl, workDir)
+                }
             } else {
                 downloadWithYoutubeDl(sourceUrl, formatSelector, concurrency, workDir, audioFormat)
             }
@@ -276,6 +286,7 @@ class DownloadWorker(
     companion object {
         const val KEY_URL = "url"
         const val KEY_DIRECT_URL = "direct_url"
+        const val KEY_PREFER_DIRECT = "prefer_direct"
         const val KEY_FORMAT = "format"
         const val KEY_TREE_URI = "tree_uri"
         const val KEY_CONCURRENCY = "concurrency"

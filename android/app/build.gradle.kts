@@ -12,14 +12,32 @@ android {
         applicationId = "app.clipflow.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = (project.findProperty("clipflow.versionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("clipflow.versionName") as String?) ?: "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        // Optional release signing. Provide via gradle.properties / CI env:
+        // CLIPFLOW_STORE_FILE, CLIPFLOW_STORE_PASSWORD, CLIPFLOW_KEY_ALIAS, CLIPFLOW_KEY_PASSWORD
+        val storeFilePath = System.getenv("CLIPFLOW_STORE_FILE")
+            ?: (project.findProperty("clipflow.storeFile") as String?)
+        if (!storeFilePath.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(storeFilePath)
+                storePassword = System.getenv("CLIPFLOW_STORE_PASSWORD")
+                    ?: (project.findProperty("clipflow.storePassword") as String?)
+                keyAlias = System.getenv("CLIPFLOW_KEY_ALIAS")
+                    ?: (project.findProperty("clipflow.keyAlias") as String?)
+                keyPassword = System.getenv("CLIPFLOW_KEY_PASSWORD")
+                    ?: (project.findProperty("clipflow.keyPassword") as String?)
+            }
         }
     }
 
@@ -30,6 +48,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 
