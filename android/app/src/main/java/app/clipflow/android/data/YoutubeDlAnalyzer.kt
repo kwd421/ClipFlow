@@ -43,7 +43,19 @@ class YoutubeDlAnalyzer(private val context: Context) {
 
         if (allowBrowserFallback && shouldTryBrowserFallback(url, ytdlpError.message.orEmpty())) {
             return runCatching { browserFallback.capture(url) }
-                .getOrElse { throw ytdlpError }
+                .getOrElse { browserError ->
+                    val ytdlpMessage = ytdlpError.message.orEmpty()
+                    val browserMessage = browserError.message.orEmpty()
+                    error(
+                        buildString {
+                            append(ytdlpMessage.ifBlank { "yt-dlp 분석 실패" })
+                            if (browserMessage.isNotBlank()) {
+                                append("\n브라우저 폴백: ")
+                                append(browserMessage)
+                            }
+                        },
+                    )
+                }
         }
         throw ytdlpError
     }
@@ -284,9 +296,14 @@ class YoutubeDlAnalyzer(private val context: Context) {
         val lower = message.lowercase()
         if (SiteRouter.isChzzkClip(url) || SiteRouter.isChzzkVideo(url)) return false
         if (looksLikePlaylist(url)) return false
+        val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
+        if (host.contains("anilife")) return true
         return lower.contains("unsupported url") ||
             lower.contains("no video formats") ||
             lower.contains("unable to extract") ||
+            lower.contains("unable to download webpage") ||
+            lower.contains("ssl") ||
+            lower.contains("eof") ||
             lower.contains("not find") ||
             lower.contains("http error 403") ||
             lower.contains("sign in") ||

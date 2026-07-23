@@ -49,7 +49,6 @@ import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -68,7 +67,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -741,18 +739,40 @@ private fun CandidateCard(
         animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Restart),
         label = "hue",
     )
+    // Loading feedback is border-only (desktop-style), not a bottom progress strip.
     val borderColor = when (status) {
         TaskStatus.Finishing -> Color.hsv(hue, 0.72f, 0.92f)
         TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
         TaskStatus.Completed -> colors.success
         TaskStatus.Failed -> colors.danger
+        TaskStatus.Paused -> colors.muted
         else -> colors.strongBorder
     }
+    val borderWidth = when {
+        active -> 2.dp
+        status == TaskStatus.Completed || status == TaskStatus.Failed || status == TaskStatus.Paused -> 2.dp
+        else -> 1.5.dp
+    }
+    val meta = buildList {
+        if (candidate.kind == RowKind.Playlist) add("재생목록 · ${candidate.itemCount}개")
+        else if (candidate.kind == RowKind.PlaylistChild) add("항목 ${candidate.playlistIndex + 1}")
+        add(formatDuration(candidate.durationSeconds))
+        add(formatBytes(candidate.sizeBytes))
+        // Failures only: keep a short status; never show bare "완료".
+        if (status == TaskStatus.Failed) {
+            add(task?.detail?.takeIf { it.isNotBlank() && it != "다운로드 실패" } ?: "실패")
+        } else if (status == TaskStatus.Paused) {
+            add("일시정지")
+        } else if (status == TaskStatus.Downloading && (task?.progress ?: 0) > 0) {
+            add("${task?.progress}%")
+        }
+    }.joinToString("  ·  ")
+
     Surface(
         color = colors.raised,
         shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(if (active || status == TaskStatus.Completed) 2.dp else 1.5.dp, borderColor),
-        shadowElevation = if (active) 3.dp else 0.dp,
+        border = BorderStroke(borderWidth, borderColor),
+        shadowElevation = if (active) 2.dp else 0.dp,
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
@@ -760,128 +780,85 @@ private fun CandidateCard(
                 onLongClick = onLongPress,
             ),
     ) {
-        Column {
-            Row(
-                modifier = Modifier.padding(8.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                if (selectionMode) {
-                    Checkbox(checked = selected, onCheckedChange = { onToggleSelected() })
-                }
-                AsyncImage(
-                    model = candidate.thumbnailUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(width = 112.dp, height = 68.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(colors.thumbPlaceholder),
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onToggleSelected() },
+                    modifier = Modifier.size(28.dp),
                 )
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        candidate.title,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 20.sp,
-                    )
-                    if (candidate.kind == RowKind.Playlist) {
-                        Text(
-                            "재생목록 · ${candidate.itemCount}개",
-                            color = colors.muted,
-                            fontSize = 12.sp,
-                        )
-                    } else if (candidate.kind == RowKind.PlaylistChild) {
-                        Text(
-                            "항목 ${candidate.playlistIndex + 1}",
-                            color = colors.muted,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    if (candidate.route.isNotBlank() && candidate.route !in setOf("ytdlp", "playlist", "")) {
-                        Text(candidate.route.uppercase(), color = colors.accent, fontSize = 11.sp)
-                    }
-                }
-                if (candidate.kind == RowKind.Playlist) {
-                    TooltipIconButton(
-                        if (candidate.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        if (candidate.expanded) "접기" else "펼치기",
-                        onClick = onTogglePlaylist,
-                    )
-                    TooltipIconButton(
-                        Icons.Default.PlaylistPlay,
-                        "재생목록 일괄 다운로드",
-                        onClick = onDownloadPlaylist,
-                    )
-                }
+                Spacer(Modifier.width(2.dp))
             }
-            FlowRow(
-                modifier = Modifier.padding(
-                    start = if (selectionMode) 58.dp else 12.dp,
-                    end = 8.dp,
-                    bottom = 8.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(0.dp),
-                horizontalArrangement = Arrangement.End,
+            AsyncImage(
+                model = candidate.thumbnailUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(width = 96.dp, height = 54.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(colors.thumbPlaceholder),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        listOf(formatDuration(candidate.durationSeconds), formatBytes(candidate.sizeBytes))
-                            .joinToString("  ·  "),
-                        color = colors.muted,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                when (status) {
-                    TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
-                        TooltipIconButton(Icons.Default.Pause, "일시정지", onClick = onPause)
-                        TooltipIconButton(Icons.Default.Delete, "다운로드 삭제", tint = colors.danger, onClick = onRemove)
-                    }
-                    TaskStatus.Paused, TaskStatus.Failed -> {
-                        TooltipIconButton(Icons.Default.PlayArrow, "다시 시작", onClick = onResume)
-                        TooltipIconButton(
-                            Icons.Default.Delete,
-                            if (task?.outputUri?.isNotBlank() == true) "파일 삭제" else "다운로드 삭제",
-                            tint = colors.danger,
-                            onClick = if (task?.outputUri?.isNotBlank() == true) onDeleteFile else onRemove,
-                        )
-                    }
-                    else -> Unit
-                }
+                Text(
+                    candidate.title,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 15.sp,
+                    lineHeight = 18.sp,
+                    color = colors.ink,
+                )
+                Text(
+                    meta,
+                    color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            if (task != null && status != TaskStatus.Ready) {
-                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            task.detail,
-                            color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (status == TaskStatus.Downloading) Text("${task.progress}%", fontSize = 12.sp)
-                    }
-                    Spacer(Modifier.height(5.dp))
-                    LinearProgressIndicator(
-                        progress = { task.progress / 100f },
-                        color = borderColor,
-                        trackColor = colors.progressTrack,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(2.dp)),
+            if (candidate.kind == RowKind.Playlist) {
+                TooltipIconButton(
+                    if (candidate.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    if (candidate.expanded) "접기" else "펼치기",
+                    iconSize = 20.dp,
+                    onClick = onTogglePlaylist,
+                )
+                TooltipIconButton(
+                    Icons.Default.PlaylistPlay,
+                    "재생목록 일괄 다운로드",
+                    iconSize = 20.dp,
+                    onClick = onDownloadPlaylist,
+                )
+            }
+            when (status) {
+                TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
+                    TooltipIconButton(Icons.Default.Pause, "일시정지", iconSize = 20.dp, onClick = onPause)
+                    TooltipIconButton(
+                        Icons.Default.Delete,
+                        "다운로드 삭제",
+                        tint = colors.danger,
+                        iconSize = 20.dp,
+                        onClick = onRemove,
                     )
                 }
+                TaskStatus.Paused, TaskStatus.Failed -> {
+                    TooltipIconButton(Icons.Default.PlayArrow, "다시 시작", iconSize = 20.dp, onClick = onResume)
+                    TooltipIconButton(
+                        Icons.Default.Delete,
+                        if (task?.outputUri?.isNotBlank() == true) "파일 삭제" else "다운로드 삭제",
+                        tint = colors.danger,
+                        iconSize = 20.dp,
+                        onClick = if (task?.outputUri?.isNotBlank() == true) onDeleteFile else onRemove,
+                    )
+                }
+                else -> Unit
             }
         }
     }
