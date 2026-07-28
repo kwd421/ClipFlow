@@ -5,6 +5,7 @@ import android.app.DownloadManager
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Log
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
@@ -44,6 +45,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.UUID
@@ -94,6 +96,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     fun analyze() {
         val urls = extractUrls(state.value.url)
+        Log.i(LOG_TAG, "analyze() urls=$urls")
         if (urls.isEmpty()) {
             _state.update { it.copy(error = "http 또는 https URL을 입력하세요. 여러 개는 줄바꿈으로 넣을 수 있습니다.") }
             return
@@ -224,26 +227,57 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     fun pause(candidateId: String) {
         val task = state.value.tasks[candidateId] ?: return
         task.workId.toUuidOrNull()?.let(workManager::cancelWorkById)
-        updateTask(candidateId) { it.copy(status = TaskStatus.Paused, detail = "일시정지됨") }
+        updateTask(candidateId) { it.copy(status = TaskStatus.Paused, detail = "일시정지") }
         schedulePersist()
     }
 
     fun resume(candidate: MediaCandidate) = enqueueDownload(candidate)
 
+    /**
+     * List remove (desktop remove_row / paused "다운로드 삭제"):
+     * cancel worker, wipe partial work dir, drop row. Does not delete a
+     * completed public Download/ClipFlow file unless outputUri is set and
+     * caller intends full wipe — for paused in-progress, only temps are wiped.
+     */
     fun remove(candidateId: String) {
-        state.value.tasks[candidateId]?.workId?.toUuidOrNull()?.let(workManager::cancelWorkById)
+        val task = state.value.tasks[candidateId]
+        task?.workId?.toUuidOrNull()?.let(workManager::cancelWorkById)
         val row = allRows.firstOrNull { it.id == candidateId }
+        val related = if (row?.kind == RowKind.Playlist) {
+            allRows.filter { it.id == candidateId || it.parentId == candidateId }
+        } else {
+            listOfNotNull(row)
+        }
+        related.forEach { candidate ->
+            val relatedTask = state.value.tasks[candidate.id]
+            relatedTask?.workId?.toUuidOrNull()?.let(workManager::cancelWorkById)
+            // Paused/failed mid-download: drop partials. Completed public file stays
+            // unless deleteOutput was used — list remove alone matches desktop.
+            wipeWorkDir(candidate, relatedTask?.taskKey.orEmpty())
+        }
         allRows = if (row?.kind == RowKind.Playlist) {
             allRows.filterNot { it.id == candidateId || it.parentId == candidateId }
         } else {
             allRows.filterNot { it.id == candidateId }
         }
         qualityPool.remove(candidateId)
-        qualityPool.keys.filter { key -> qualityPool[key].orEmpty().none { it.id in allRows.map(MediaCandidate::id) } }
+        related.forEach { qualityPool.remove(it.id) }
+        val removedIds = related.map { it.id }.toSet() + candidateId
+        val removedSource = row?.sourceUrl.orEmpty()
         _state.update { current ->
+            // Drop the URL field when the last card for that link is gone.
+            val stillHasSource = allRows.any { it.sourceUrl == removedSource }
             current.copy(
-                selectedIds = current.selectedIds - candidateId,
-                tasks = current.tasks - candidateId,
+                selectedIds = current.selectedIds - removedIds,
+                tasks = current.tasks.filterKeys { it !in removedIds },
+                url = if (!stillHasSource && removedSource.isNotBlank() &&
+                    (current.url == removedSource || current.url.contains(removedSource) ||
+                        removedSource.contains(current.url.trim()))
+                ) {
+                    ""
+                } else {
+                    current.url
+                },
             )
         }
         recomputeVisible()
@@ -327,14 +361,58 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
             .onFailure { _state.update { it.copy(error = "폴더를 열 수 없습니다.") } }
     }
 
+    /**
+     * Delete the saved output file (desktop delete_file_for_row).
+     * Row stays; task returns to Ready. Also clears the private work dir.
+     */
     fun deleteOutput(candidateId: String) {
         val task = state.value.tasks[candidateId] ?: return
         val uri = task.outputUri.takeIf(String::isNotBlank)?.toUri()
+        var deleted = false
         if (uri != null) {
-            runCatching { getApplication<Application>().contentResolver.delete(uri, null, null) }
+            deleted = runCatching {
+                getApplication<Application>().contentResolver.delete(uri, null, null) > 0
+            }.getOrDefault(false)
+            if (!deleted) {
+                // Fallback: DocumentFile / path-style URIs.
+                deleted = runCatching {
+                    DocumentFile.fromSingleUri(getApplication(), uri)?.delete() == true
+                }.getOrDefault(false)
+            }
         }
-        _state.update { current -> current.copy(tasks = current.tasks - candidateId) }
+        allRows.firstOrNull { it.id == candidateId }?.let { wipeWorkDir(it, task.taskKey) }
+        task.workId.toUuidOrNull()?.let(workManager::cancelWorkById)
+        if (uri != null && !deleted) {
+            _state.update {
+                it.copy(error = "저장된 파일을 지우지 못했습니다. 폴더 권한을 확인하세요.")
+            }
+            // Still clear task association so UI is not stuck on a missing file.
+        }
+        _state.update { current ->
+            current.copy(
+                tasks = current.tasks + (
+                    candidateId to DownloadTaskState(
+                        status = TaskStatus.Ready,
+                        detail = "",
+                        progress = 0,
+                        taskKey = task.taskKey,
+                    )
+                    ),
+            )
+        }
         schedulePersist()
+    }
+
+    private fun wipeWorkDir(candidate: MediaCandidate, knownTaskKey: String = "") {
+        val keys = buildSet {
+            if (knownTaskKey.isNotBlank()) add(knownTaskKey)
+            add(hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|${state.value.clipRange}"))
+        }
+        val root = File(getApplication<Application>().filesDir, "downloads")
+        keys.forEach { key ->
+            val dir = File(root, key)
+            if (dir.exists()) runCatching { dir.deleteRecursively() }
+        }
     }
 
     private suspend fun drainAnalysisQueue() {
@@ -349,7 +427,9 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 )
             }
             runCatching { withContext(Dispatchers.IO) { analyzeOne(url) } }
+                .onSuccess { Log.i(LOG_TAG, "analyzeOne ok url=$url candidates=${state.value.candidates.size}") }
                 .onFailure { error ->
+                    Log.e(LOG_TAG, "analyzeOne failed url=$url: ${error.message}", error)
                     _state.update {
                         it.copy(error = listOfNotNull(it.error.takeIf(String::isNotBlank), error.message).joinToString("\n"))
                     }
@@ -453,21 +533,79 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     private fun enqueueDownload(candidate: MediaCandidate, clipRange: ClipRange = state.value.clipRange) {
         if (candidate.kind == RowKind.Playlist || candidate.childLoading) return
+        // AniLife gcdn tokens expire quickly; always mint a fresh master URL at download time.
+        if (candidate.route == "anilife" || candidate.sourceUrl.contains("anilife.app", ignoreCase = true)) {
+            updateTask(candidate.id) {
+                DownloadTaskState(status = TaskStatus.Queued, detail = "스트림 토큰 갱신 중")
+            }
+            viewModelScope.launch {
+                val refreshed = runCatching {
+                    withContext(Dispatchers.IO) {
+                        analyzer.analyze(candidate.sourceUrl, allowBrowserFallback = false)
+                    }
+                }.getOrElse { error ->
+                    updateTask(candidate.id) {
+                        DownloadTaskState(
+                            status = TaskStatus.Failed,
+                            detail = error.message ?: "AniLife 스트림 갱신 실패",
+                        )
+                    }
+                    schedulePersist()
+                    return@launch
+                }
+                val match = refreshed.candidates
+                    .firstOrNull { it.height == candidate.height && it.mediaUrl.isNotBlank() }
+                    ?: refreshed.candidates.firstOrNull { it.mediaUrl.isNotBlank() }
+                if (match == null) {
+                    updateTask(candidate.id) {
+                        DownloadTaskState(status = TaskStatus.Failed, detail = "AniLife 미디어 URL을 갱신하지 못했습니다.")
+                    }
+                    schedulePersist()
+                    return@launch
+                }
+                val updated = candidate.copy(
+                    mediaUrl = match.mediaUrl,
+                    title = match.title.ifBlank { candidate.title },
+                    thumbnailUrl = match.thumbnailUrl.ifBlank { candidate.thumbnailUrl },
+                    durationSeconds = match.durationSeconds.takeIf { it > 0 } ?: candidate.durationSeconds,
+                    width = match.width.takeIf { it > 0 } ?: candidate.width,
+                    height = match.height.takeIf { it > 0 } ?: candidate.height,
+                    route = "anilife",
+                    isManifest = true,
+                )
+                allRows = allRows.map { if (it.id == candidate.id) updated else it }
+                qualityPool[candidate.id] = refreshed.candidates
+                recomputeVisible(selectId = candidate.id)
+                enqueueDownloadNow(updated, clipRange)
+            }
+            return
+        }
+        enqueueDownloadNow(candidate, clipRange)
+    }
+
+    private fun enqueueDownloadNow(candidate: MediaCandidate, clipRange: ClipRange = state.value.clipRange) {
         val current = state.value
-        val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.mediaUrl}|$clipRange")
-        val useDirect = candidate.mediaUrl.isNotBlank() && (
+        // Task key ignores volatile media tokens so resume reuses the same work folder.
+        val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|$clipRange")
+        // YouTube/ytdlp: always download from the page URL so yt-dlp merges video+audio.
+        // Never feed a bare googlevideo progressive/audio URL as "direct".
+        val useDirect = !candidate.isYoutubeSource && candidate.mediaUrl.isNotBlank() && (
             candidate.prefersDirectUrl ||
-                candidate.route in setOf("chzzk", "browser", "direct") ||
+                candidate.route in setOf("chzzk", "browser", "direct", "anilife") ||
                 candidate.isManifest
             )
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
                     DownloadWorker.KEY_URL to candidate.sourceUrl,
-                    DownloadWorker.KEY_DIRECT_URL to candidate.mediaUrl.takeIf { useDirect || candidate.formatId == "direct" }.orEmpty(),
+                    DownloadWorker.KEY_DIRECT_URL to candidate.mediaUrl.takeIf {
+                        useDirect || candidate.formatId == "direct"
+                    }.orEmpty(),
                     DownloadWorker.KEY_PREFER_DIRECT to useDirect,
                     DownloadWorker.KEY_REFERER to candidate.sourceUrl,
                     DownloadWorker.KEY_FORMAT to candidate.formatSelector,
+                    DownloadWorker.KEY_TITLE to candidate.title,
+                    DownloadWorker.KEY_EXPECTED_BYTES to candidate.sizeBytes,
                     DownloadWorker.KEY_TREE_URI to current.outputTreeUri,
                     DownloadWorker.KEY_CONCURRENCY to current.preferences.concurrency,
                     DownloadWorker.KEY_START to (clipRange.startSeconds ?: -1),
@@ -484,6 +622,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 workId = request.id.toString(),
                 status = TaskStatus.Queued,
                 detail = "대기 중",
+                taskKey = taskKey,
             )
         }
         observeWork(candidate.id, request.id)
@@ -673,5 +812,6 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     companion object {
         private const val DOWNLOAD_TAG = "clipflow-download"
+        private const val LOG_TAG = "ClipFlowVM"
     }
 }

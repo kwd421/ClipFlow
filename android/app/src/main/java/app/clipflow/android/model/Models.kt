@@ -5,7 +5,8 @@ data class DownloadPreferences(
     val format: String = "MP4",
     val codec: String = "자동",
     val hdrEnabled: Boolean = false,
-    val concurrency: Int = 3,
+    /** yt-dlp concurrent-fragments (desktop default 16 for HLS). */
+    val concurrency: Int = 16,
 )
 
 data class ClipRange(
@@ -60,25 +61,47 @@ data class MediaCandidate(
     val route: String = "ytdlp",
     val qualities: List<MediaCandidate> = emptyList(),
 ) {
-    val hasAudio: Boolean get() = audioCodec.isNotBlank() && audioCodec != "none"
+    val hasAudio: Boolean get() = audioCodec.isNotBlank() && audioCodec != "none" &&
+        !audioCodec.equals("null", true)
+    val hasVideo: Boolean get() = height > 0 &&
+        videoCodec.isNotBlank() &&
+        !videoCodec.equals("none", true) &&
+        !videoCodec.equals("null", true)
     val isHdr: Boolean get() = dynamicRange.contains("HDR", ignoreCase = true) ||
         dynamicRange.contains("HLG", ignoreCase = true) ||
         dynamicRange.contains("PQ", ignoreCase = true)
 
+    /**
+     * yt-dlp -f selector. YouTube adaptive streams are video-only or audio-only;
+     * never download a bare audio itag as the "video" card.
+     */
     val formatSelector: String
         get() = when {
-            formatId in setOf("direct", "best", "playlist", "loading", "failed") -> "best"
+            formatId in setOf("direct", "best", "playlist", "loading", "failed") ->
+                "bestvideo*+bestaudio/best/best"
             formatId.startsWith("chzzk") || formatId.startsWith("browser") ||
-                formatId.startsWith("soop") || formatId.startsWith("cime") -> "best"
-            hasAudio -> formatId
-            else -> "$formatId+bestaudio[ext=m4a]/$formatId+bestaudio/$formatId"
+                formatId.startsWith("soop") || formatId.startsWith("cime") ||
+                formatId.startsWith("anilife") -> "best"
+            // Site is YouTube (or generic ytdlp): merge video+audio when needed.
+            isYoutubeSource || route == "ytdlp" -> when {
+                !hasVideo -> "bestvideo*+bestaudio/best/best"
+                !hasAudio -> "$formatId+bestaudio[ext=m4a]/$formatId+bestaudio/best"
+                else -> formatId // progressive already has both
+            }
+            hasAudio && hasVideo -> formatId
+            hasVideo && !hasAudio -> "$formatId+bestaudio[ext=m4a]/$formatId+bestaudio/$formatId"
+            else -> "bestvideo*+bestaudio/best/best"
         }
 
+    val isYoutubeSource: Boolean
+        get() = sourceUrl.contains("youtube.com", ignoreCase = true) ||
+            sourceUrl.contains("youtu.be", ignoreCase = true)
+
+    /** Direct progressive only for known direct routes — never googlevideo signed URLs. */
     val prefersDirectUrl: Boolean
-        get() = mediaUrl.isNotBlank() && !isManifest && (
+        get() = mediaUrl.isNotBlank() && !isManifest && !isYoutubeSource && (
             formatId == "direct" ||
-                route in setOf("chzzk", "browser", "direct") ||
-                mediaUrl.contains(".mp4", ignoreCase = true)
+                route in setOf("chzzk", "browser", "direct", "anilife")
             )
 }
 
@@ -99,6 +122,8 @@ data class DownloadTaskState(
     val detail: String = "",
     val outputName: String = "",
     val outputUri: String = "",
+    /** Private work-dir key under files/downloads/ — used to wipe partials on delete. */
+    val taskKey: String = "",
 )
 
 data class ClipFlowUiState(

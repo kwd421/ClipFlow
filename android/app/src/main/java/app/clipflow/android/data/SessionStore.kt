@@ -90,6 +90,7 @@ class SessionStore(context: Context) {
                 detail = item.optString("detail"),
                 outputName = item.optString("outputName"),
                 outputUri = item.optString("outputUri"),
+                taskKey = item.optString("taskKey"),
             )
         }
         return map
@@ -100,7 +101,7 @@ class SessionStore(context: Context) {
         format = optString("format", "MP4"),
         codec = optString("codec", "자동"),
         hdrEnabled = optBoolean("hdrEnabled", false),
-        concurrency = optInt("concurrency", 3).coerceIn(1, 8),
+        concurrency = optInt("concurrency", 16).coerceIn(1, 16),
     )
 
     private fun JSONObject.toClipRange() = ClipRange(
@@ -167,6 +168,7 @@ class SessionStore(context: Context) {
         .put("detail", detail)
         .put("outputName", outputName)
         .put("outputUri", outputUri)
+        .put("taskKey", taskKey)
 
     private fun MediaCandidate.toJson() = JSONObject()
         .put("id", id)

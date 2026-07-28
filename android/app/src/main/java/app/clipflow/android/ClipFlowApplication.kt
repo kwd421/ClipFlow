@@ -9,6 +9,17 @@ class ClipFlowApplication : Application() {
     @Volatile
     private var engineReady = false
 
+    override fun onCreate() {
+        super.onCreate()
+        // Warm yt-dlp/ffmpeg/aria2 off the main thread so first analyze doesn't ANR.
+        Thread({
+            runCatching { ensureEngine() }
+        }, "clipflow-engine-init").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     @Synchronized
     fun ensureEngine() {
         if (engineReady) return

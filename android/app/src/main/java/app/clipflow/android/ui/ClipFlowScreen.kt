@@ -7,14 +7,18 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -32,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,6 +46,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Clear
@@ -51,6 +57,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -84,21 +91,35 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.clipflow.android.model.ClipFlowUiState
@@ -107,7 +128,6 @@ import app.clipflow.android.model.DownloadPreferences
 import app.clipflow.android.model.DownloadTaskState
 import app.clipflow.android.model.MediaCandidate
 import app.clipflow.android.model.TaskStatus
-import app.clipflow.android.model.faviconUrlFor
 import app.clipflow.android.model.formatBytes
 import app.clipflow.android.model.formatDuration
 import app.clipflow.android.model.parseTimecode
@@ -115,6 +135,10 @@ import app.clipflow.android.model.RowKind
 import app.clipflow.android.model.SortKey
 import app.clipflow.android.ui.theme.clipPalette
 import coil3.compose.AsyncImage
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -315,6 +339,15 @@ fun ClipFlowScreen(
                 onExtractAudio(candidate, format)
                 actionCandidate = null
             },
+            onOpenSource = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(candidate.sourceUrl))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+                actionCandidate = null
+            },
         )
     }
 
@@ -412,13 +445,36 @@ fun ClipFlowScreen(
                     }
                 }
                 if (state.analyzing) {
-                    Column(
-                        modifier = Modifier.align(Alignment.Center),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Desktop-style analyzing card: track + rotating dash ring (not a dead border).
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .height(72.dp),
                     ) {
-                        CircularProgressIndicator(color = colors.ink, strokeWidth = 3.dp)
-                        Text(state.analysisMessage, color = colors.muted, fontWeight = FontWeight.SemiBold)
+                        Surface(
+                            color = colors.raised,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.4.dp, colors.strongBorder.copy(alpha = 0.28f)),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    state.analysisMessage.ifBlank { "영상 정보를 확인하는 중" },
+                                    color = colors.muted,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                )
+                            }
+                        }
+                        CardProgressRing(
+                            progress = 0,
+                            trackColor = colors.accentTint,
+                            progressColor = colors.accent,
+                            indeterminate = true,
+                            modifier = Modifier.matchParentSize(),
+                        )
                     }
                 }
             }
@@ -734,6 +790,8 @@ private fun CandidateCard(
     val colors = clipPalette()
     val status = task?.status ?: TaskStatus.Ready
     val active = status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)
+    val progress = (task?.progress ?: 0).coerceIn(0, 100)
+    val detail = task?.detail.orEmpty()
     val infinite = rememberInfiniteTransition(label = "finishing-border")
     val hue by infinite.animateFloat(
         initialValue = 0f,
@@ -741,40 +799,71 @@ private fun CandidateCard(
         animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Restart),
         label = "hue",
     )
-    // Loading feedback is border-only (desktop-style), not a bottom progress strip.
-    val borderColor = when (status) {
-        TaskStatus.Finishing -> Color.hsv(hue, 0.72f, 0.92f)
-        TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
-        TaskStatus.Completed -> colors.success
+    // Desktop clipflow_rows: fixed ~1.4dp stroke; progress is a partial perimeter path.
+    val trackColor = when (status) {
         TaskStatus.Failed -> colors.danger
+        TaskStatus.Completed -> colors.strongBorder
         TaskStatus.Paused -> colors.muted
+        TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing -> colors.accentTint
         else -> colors.strongBorder
     }
-    val borderWidth = when {
-        active -> 2.dp
-        status == TaskStatus.Completed || status == TaskStatus.Failed || status == TaskStatus.Paused -> 2.dp
-        else -> 1.5.dp
+    val progressColor = when (status) {
+        TaskStatus.Finishing -> Color.hsv(hue, 0.72f, 0.92f)
+        TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
+        TaskStatus.Failed -> colors.danger
+        TaskStatus.Completed -> colors.strongBorder
+        else -> colors.accent
     }
-    val meta = buildList {
-        if (candidate.kind == RowKind.Playlist) add("재생목록 · ${candidate.itemCount}개")
-        else if (candidate.kind == RowKind.PlaylistChild) add("항목 ${candidate.playlistIndex + 1}")
-        add(formatDuration(candidate.durationSeconds))
-        add(formatBytes(candidate.sizeBytes))
-        // Failures only: keep a short status; never show bare "완료".
-        if (status == TaskStatus.Failed) {
-            add(task?.detail?.takeIf { it.isNotBlank() && it != "다운로드 실패" } ?: "실패")
-        } else if (status == TaskStatus.Paused) {
-            add("일시정지")
-        } else if (status == TaskStatus.Downloading && (task?.progress ?: 0) > 0) {
-            add("${task?.progress}%")
-        }
-    }.joinToString("  ·  ")
+    val ringProgress = when (status) {
+        TaskStatus.Completed, TaskStatus.Failed -> 100
+        TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing, TaskStatus.Paused -> progress
+        else -> 0
+    }
+    // Desktop: indeterminate dash ring while analyzing/starting/finishing;
+    // determinate perimeter fill while downloading; full graphite when completed.
+    val showRing = status != TaskStatus.Ready || active
+    val indeterminateRing = status == TaskStatus.Queued || status == TaskStatus.Finishing
 
-    Surface(
-        color = colors.raised,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(borderWidth, borderColor),
-        shadowElevation = if (active) 2.dp else 0.dp,
+    val statusLine = when (status) {
+        TaskStatus.Failed -> detail.takeIf { it.isNotBlank() && it != "다운로드 실패" } ?: "실패"
+        TaskStatus.Paused -> "일시정지"
+        TaskStatus.Finishing -> detail.ifBlank { "마무리 중" }
+        TaskStatus.Downloading -> when {
+            detail.isNotBlank() && detail != "대기 중" -> detail
+            progress > 0 -> "$progress%"
+            else -> "다운로드 중"
+        }
+        TaskStatus.Queued -> detail.ifBlank { "대기 중" }
+        else -> ""
+    }
+    val showStatusLine = statusLine.isNotBlank()
+    val context = LocalContext.current
+    val thumbRequest = remember(candidate.thumbnailUrl, candidate.sourceUrl) {
+        val thumb = candidate.thumbnailUrl.trim()
+        if (thumb.isBlank()) {
+            null
+        } else {
+            val referer = runCatching {
+                val uri = Uri.parse(candidate.sourceUrl)
+                "${uri.scheme}://${uri.host}/"
+            }.getOrDefault("https://anilife.app/")
+            ImageRequest.Builder(context)
+                .data(thumb)
+                .crossfade(true)
+                .httpHeaders(
+                    NetworkHeaders.Builder()
+                        .set(
+                            "User-Agent",
+                            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36",
+                        )
+                        .set("Referer", referer)
+                        .build(),
+                )
+                .build()
+        }
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
@@ -782,105 +871,328 @@ private fun CandidateCard(
                 onLongClick = onLongPress,
             ),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Surface(
+            color = colors.raised,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(
+                1.4.dp,
+                if (showRing) colors.strongBorder.copy(alpha = 0.28f) else colors.strongBorder,
+            ),
+            shadowElevation = if (active) 2.dp else 0.dp,
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            if (selectionMode) {
-                Checkbox(
-                    checked = selected,
-                    onCheckedChange = { onToggleSelected() },
-                    modifier = Modifier.size(28.dp),
-                )
-                Spacer(Modifier.width(2.dp))
-            }
-            AsyncImage(
-                model = candidate.thumbnailUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(width = 96.dp, height = 54.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(colors.thumbPlaceholder),
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    candidate.title,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontSize = 15.sp,
-                    lineHeight = 18.sp,
-                    color = colors.ink,
+                if (selectionMode) {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = { onToggleSelected() },
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.width(2.dp))
+                }
+                // Desktop ThumbnailPlaceholder: fixed 96×54 — never stretch with status line.
+                AsyncImage(
+                    model = thumbRequest,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(width = 96.dp, height = 54.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(colors.thumbPlaceholder),
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    val favicon = faviconUrlFor(candidate.sourceUrl)
-                    if (favicon.isNotBlank()) {
-                        AsyncImage(
-                            model = favicon,
-                            contentDescription = null,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .size(14.dp)
-                                .clip(RoundedCornerShape(2.dp)),
-                        )
-                        Spacer(Modifier.width(5.dp))
-                    }
                     Text(
-                        meta,
-                        color = if (status == TaskStatus.Failed) colors.danger else colors.muted,
-                        fontSize = 12.sp,
+                        text = candidate.title,
+                        color = colors.ink,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        lineHeight = 18.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                        softWrap = false,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                velocity = 28.dp,
+                            ),
                     )
+                    // Desktop meta: clock + duration, download icon + size.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (candidate.kind == RowKind.Playlist) {
+                            Text(
+                                "재생목록 · ${candidate.itemCount}개",
+                                color = colors.muted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                            )
+                        } else if (candidate.kind == RowKind.PlaylistChild) {
+                            Text(
+                                "항목 ${candidate.playlistIndex + 1}",
+                                color = colors.muted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                            )
+                        }
+                        MetaIconText(
+                            icon = Icons.Default.AccessTime,
+                            text = formatDuration(candidate.durationSeconds),
+                            color = colors.muted,
+                        )
+                        MetaIconText(
+                            icon = Icons.Default.Download,
+                            text = formatBytes(candidate.sizeBytes),
+                            color = colors.muted,
+                        )
+                    }
+                    if (showStatusLine) {
+                        Text(
+                            statusLine,
+                            color = if (status == TaskStatus.Failed) colors.danger else colors.accent,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-            }
-            if (candidate.kind == RowKind.Playlist) {
-                TooltipIconButton(
-                    if (candidate.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    if (candidate.expanded) "접기" else "펼치기",
-                    iconSize = 20.dp,
-                    onClick = onTogglePlaylist,
-                )
-                TooltipIconButton(
-                    Icons.Default.PlaylistPlay,
-                    "재생목록 일괄 다운로드",
-                    iconSize = 20.dp,
-                    onClick = onDownloadPlaylist,
-                )
-            }
-            when (status) {
-                TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
-                    TooltipIconButton(Icons.Default.Pause, "일시정지", iconSize = 20.dp, onClick = onPause)
+                if (candidate.kind == RowKind.Playlist) {
                     TooltipIconButton(
-                        Icons.Default.Delete,
-                        "다운로드 삭제",
-                        tint = colors.danger,
+                        if (candidate.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        if (candidate.expanded) "접기" else "펼치기",
                         iconSize = 20.dp,
-                        onClick = onRemove,
+                        onClick = onTogglePlaylist,
                     )
-                }
-                TaskStatus.Paused, TaskStatus.Failed -> {
-                    TooltipIconButton(Icons.Default.PlayArrow, "다시 시작", iconSize = 20.dp, onClick = onResume)
                     TooltipIconButton(
-                        Icons.Default.Delete,
-                        if (task?.outputUri?.isNotBlank() == true) "파일 삭제" else "다운로드 삭제",
-                        tint = colors.danger,
+                        Icons.Default.PlaylistPlay,
+                        "재생목록 일괄 다운로드",
                         iconSize = 20.dp,
-                        onClick = if (task?.outputUri?.isNotBlank() == true) onDeleteFile else onRemove,
+                        onClick = onDownloadPlaylist,
                     )
                 }
-                else -> Unit
+                // Desktop clipflow_rows._refresh_actions:
+                // downloading → pause only; paused/failed → resume + remove/delete.
+                when (status) {
+                    TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
+                        TooltipIconButton(Icons.Default.Pause, "일시정지", iconSize = 20.dp, onClick = onPause)
+                    }
+                    TaskStatus.Paused, TaskStatus.Failed -> {
+                        TooltipIconButton(Icons.Default.PlayArrow, "재시작", iconSize = 20.dp, onClick = onResume)
+                        TooltipIconButton(
+                            Icons.Default.Delete,
+                            if (task?.outputUri?.isNotBlank() == true) "파일 삭제" else "다운로드 삭제",
+                            tint = colors.danger,
+                            iconSize = 20.dp,
+                            onClick = if (task?.outputUri?.isNotBlank() == true) onDeleteFile else onRemove,
+                        )
+                    }
+                    else -> Unit
+                }
             }
         }
+        if (showRing) {
+            CardProgressRing(
+                progress = ringProgress,
+                trackColor = trackColor,
+                progressColor = progressColor,
+                indeterminate = indeterminateRing,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+    }
+}
+
+/**
+ * Desktop clipflow_rows ring (paintEvent + _ring_segment_path):
+ * - phase 0 = top edge left→right, 1 = right, 2 = bottom, 3 = left
+ * - download fill: start 3.82, length 4*p/100 (near top-left, clockwise)
+ * - analysis/starting: rotating dash length 0.46
+ * Stroke fixed 1.4dp — progress never changes thickness.
+ */
+@Composable
+private fun CardProgressRing(
+    progress: Int,
+    trackColor: Color,
+    progressColor: Color,
+    indeterminate: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val infinite = rememberInfiniteTransition(label = "ring-spin")
+    val spinPhase by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "ring-phase",
+    )
+    Canvas(modifier = modifier) {
+        val stroke = 1.4.dp.toPx()
+        val inset = stroke / 2f
+        val left = inset
+        val top = inset
+        val right = size.width - inset
+        val bottom = size.height - inset
+        val radius = minOf(8.dp.toPx(), (right - left) / 2f, (bottom - top) / 2f)
+        val style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val full = desktopRingSegmentPath(left, top, right, bottom, radius, 0f, 4f)
+        drawPath(full, color = trackColor, style = style)
+        if (indeterminate) {
+            val dash = desktopRingSegmentPath(
+                left, top, right, bottom, radius,
+                startPhase = spinPhase,
+                lengthPhase = 0.46f,
+            )
+            drawPath(dash, color = progressColor, style = style)
+            return@Canvas
+        }
+        val bounded = progress.coerceIn(0, 100)
+        if (bounded <= 0) return@Canvas
+        if (bounded >= 100) {
+            drawPath(full, color = progressColor, style = style)
+            return@Canvas
+        }
+        // Desktop: partial = _ring_segment_path(rect, 3.82, 4.0 * progress / 100.0)
+        val partial = desktopRingSegmentPath(
+            left, top, right, bottom, radius,
+            startPhase = 3.82f,
+            lengthPhase = 4f * bounded / 100f,
+        )
+        drawPath(partial, color = progressColor, style = style)
+    }
+}
+
+/** Port of clipflow_rows._ring_segment_path / _analysis_ring_point (phase 0..4). */
+private fun desktopRingSegmentPath(
+    left: Float,
+    top: Float,
+    right: Float,
+    bottom: Float,
+    radius: Float,
+    startPhase: Float,
+    lengthPhase: Float,
+): Path {
+    val path = Path()
+    val length = lengthPhase.coerceIn(0f, 4f)
+    if (length <= 0f) return path
+    val straightFraction = 0.82f
+    val cornerSpan = 1f - straightFraction
+    fun point(phaseIn: Float): Offset {
+        val phase = ((phaseIn % 4f) + 4f) % 4f
+        val side = phase.toInt()
+        val t = phase - side
+        val cornerT = if (t < straightFraction) 0f else (t - straightFraction) / cornerSpan
+        return when (side) {
+            0 -> {
+                if (t < straightFraction) {
+                    val x = (left + radius) + (right - 2 * radius - left) * (t / straightFraction)
+                    Offset(x, top)
+                } else {
+                    val angle = Math.toRadians((-90.0 + 90.0 * cornerT))
+                    Offset(
+                        (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
+                        (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
+                    )
+                }
+            }
+            1 -> {
+                if (t < straightFraction) {
+                    val y = (top + radius) + (bottom - 2 * radius - top) * (t / straightFraction)
+                    Offset(right, y)
+                } else {
+                    val angle = Math.toRadians(90.0 * cornerT)
+                    Offset(
+                        (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
+                        (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
+                    )
+                }
+            }
+            2 -> {
+                if (t < straightFraction) {
+                    val x = (right - radius) - (right - 2 * radius - left) * (t / straightFraction)
+                    Offset(x, bottom)
+                } else {
+                    val angle = Math.toRadians(90.0 + 90.0 * cornerT)
+                    Offset(
+                        (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
+                        (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
+                    )
+                }
+            }
+            else -> {
+                if (t < straightFraction) {
+                    val y = (bottom - radius) - (bottom - 2 * radius - top) * (t / straightFraction)
+                    Offset(left, y)
+                } else {
+                    val angle = Math.toRadians(180.0 + 90.0 * cornerT)
+                    Offset(
+                        (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
+                        (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
+                    )
+                }
+            }
+        }
+    }
+
+    val start = ((startPhase % 4f) + 4f) % 4f
+    val end = start + length
+    var phase = start
+    val first = point(start)
+    path.moveTo(first.x, first.y)
+    while (phase < end - 1e-6f) {
+        val base = kotlin.math.floor(phase + 1e-9f)
+        val t = phase - base
+        val pieceEnd = if (t < straightFraction - 1e-9f) {
+            minOf(end, base + straightFraction)
+        } else {
+            minOf(end, base + 1f)
+        }
+        // Sample densely enough for smooth corners (desktop uses true arcs).
+        val steps = maxOf(2, ((pieceEnd - phase) * 24f).toInt())
+        for (i in 1..steps) {
+            val p = phase + (pieceEnd - phase) * (i / steps.toFloat())
+            val pt = point(p)
+            path.lineTo(pt.x, pt.y)
+        }
+        phase = pieceEnd
+    }
+    return path
+}
+
+@Composable
+private fun MetaIconText(
+    icon: ImageVector,
+    text: String,
+    color: Color,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(13.dp),
+        )
+        Text(
+            text,
+            color = color,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -899,6 +1211,7 @@ private fun CandidateActionsDialog(
     onDeleteFile: () -> Unit,
     onSegmentExtract: () -> Unit,
     onExtractAudio: (String) -> Unit,
+    onOpenSource: () -> Unit,
 ) {
     val colors = clipPalette()
     AlertDialog(
@@ -921,6 +1234,11 @@ private fun CandidateActionsDialog(
                     icon = if (selected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
                     label = if (selected) "선택 해제" else "선택",
                     onClick = if (selected) onUnselect else onSelect,
+                )
+                CandidateActionButton(
+                    icon = Icons.Default.OpenInBrowser,
+                    label = "사이트 열기",
+                    onClick = onOpenSource,
                 )
                 when (status) {
                     TaskStatus.Ready -> {
@@ -946,7 +1264,9 @@ private fun CandidateActionsDialog(
                             onExtractAudio("MP3")
                         }
                     }
-                    else -> Unit
+                    else -> {
+                        CandidateActionButton(Icons.Default.Clear, "목록에서 삭제", onClick = onRemove)
+                    }
                 }
             }
         },
@@ -1015,7 +1335,11 @@ private fun PreferencesSheet(
                 Text("HDR", color = colors.ink, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Switch(checked = draft.hdrEnabled, onCheckedChange = { draft = draft.copy(hdrEnabled = it) })
             }
-            OptionMenu("병렬", draft.concurrency.toString(), (1..3).map(Int::toString)) {
+            OptionMenu(
+                "병렬",
+                draft.concurrency.toString(),
+                listOf("4", "8", "12", "16"),
+            ) {
                 draft = draft.copy(concurrency = it.toInt())
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

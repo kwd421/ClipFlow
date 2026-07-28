@@ -200,19 +200,27 @@ class YoutubeDlAnalyzer(private val context: Context) {
         val thumbnail = root.optString("thumbnail")
         val duration = root.optDouble("duration", 0.0).toInt()
         val formats = root.optJSONArray("formats")
+        // Never promote audio-only streams (e.g. YouTube itag 139 ~0.7MB) as the card.
+        // yt-dlp resolves format_id from the page URL even when format "url" is blank.
         val candidates = buildList {
             if (formats != null) {
                 for (index in 0 until formats.length()) {
                     val item = formats.optJSONObject(index) ?: continue
                     val formatId = item.optString("format_id")
-                    val mediaUrl = item.optString("url")
                     val videoCodec = item.optString("vcodec")
                     val extension = item.optString("ext")
-                    if (formatId.isBlank() || mediaUrl.isBlank()) continue
-                    if (videoCodec.isBlank() || videoCodec == "none") continue
-                    if (extension in setOf("mhtml", "html")) continue
+                    if (formatId.isBlank()) continue
+                    if (videoCodec.isBlank() || videoCodec.equals("none", true)) continue
+                    if (extension in setOf("mhtml", "html", "m4a", "webm") &&
+                        item.optString("acodec").isNotBlank() &&
+                        item.optInt("height", 0) <= 0 &&
+                        item.optInt("width", 0) <= 0
+                    ) {
+                        continue
+                    }
                     val protocol = item.optString("protocol")
                     val manifestUrl = item.optString("manifest_url")
+                    val mediaUrl = item.optString("url")
                     add(
                         MediaCandidate(
                             id = "$formatId-$index-${hash(url).take(6)}",
@@ -242,29 +250,58 @@ class YoutubeDlAnalyzer(private val context: Context) {
                 }
             }
         }.ifEmpty {
-            val mediaUrl = root.optString("url")
-            if (mediaUrl.isBlank()) emptyList() else listOf(
-                MediaCandidate(
-                    id = root.optString("format_id", "best") + "-" + hash(url).take(6),
-                    sourceUrl = url,
-                    mediaUrl = mediaUrl,
-                    title = title,
-                    uploader = uploader,
-                    thumbnailUrl = thumbnail,
-                    formatId = root.optString("format_id", "best"),
-                    extension = root.optString("ext", "mp4"),
-                    width = root.optInt("width", 0),
-                    height = root.optInt("height", 0),
-                    fps = root.optDouble("fps", 0.0).toInt(),
-                    videoCodec = root.optString("vcodec"),
-                    audioCodec = root.optString("acodec"),
-                    dynamicRange = root.optString("dynamic_range"),
-                    sizeBytes = root.optLong("filesize", 0L),
-                    durationSeconds = duration,
-                    isManifest = mediaUrl.contains(".m3u8", true) || mediaUrl.contains(".mpd", true),
-                    route = route,
-                ),
-            )
+            // Page-level fallback: only if the selected format actually has video.
+            val vcodec = root.optString("vcodec")
+            val height = root.optInt("height", 0)
+            val hasVideo = height > 0 && vcodec.isNotBlank() && !vcodec.equals("none", true)
+            if (!hasVideo) {
+                // Let yt-dlp pick best video+audio at download time from the page URL.
+                listOf(
+                    MediaCandidate(
+                        id = "best-${hash(url).take(6)}",
+                        sourceUrl = url,
+                        mediaUrl = "",
+                        title = title,
+                        uploader = uploader,
+                        thumbnailUrl = thumbnail,
+                        formatId = "best",
+                        extension = "mp4",
+                        width = root.optInt("width", 0),
+                        height = height,
+                        fps = root.optDouble("fps", 0.0).toInt(),
+                        videoCodec = "unknown",
+                        audioCodec = "unknown",
+                        dynamicRange = "",
+                        sizeBytes = 0L,
+                        durationSeconds = duration,
+                        isManifest = false,
+                        route = route,
+                    ),
+                )
+            } else {
+                listOf(
+                    MediaCandidate(
+                        id = root.optString("format_id", "best") + "-" + hash(url).take(6),
+                        sourceUrl = url,
+                        mediaUrl = "", // never bind expired googlevideo direct for ytdlp page downloads
+                        title = title,
+                        uploader = uploader,
+                        thumbnailUrl = thumbnail,
+                        formatId = root.optString("format_id", "best"),
+                        extension = root.optString("ext", "mp4"),
+                        width = root.optInt("width", 0),
+                        height = height,
+                        fps = root.optDouble("fps", 0.0).toInt(),
+                        videoCodec = vcodec,
+                        audioCodec = root.optString("acodec"),
+                        dynamicRange = root.optString("dynamic_range"),
+                        sizeBytes = root.optLong("filesize", 0L),
+                        durationSeconds = duration,
+                        isManifest = false,
+                        route = route,
+                    ),
+                )
+            }
         }
         if (candidates.isEmpty()) error("다운로드 가능한 영상 형식을 찾지 못했습니다.")
         return AnalysisResult(title, candidates, route = route)

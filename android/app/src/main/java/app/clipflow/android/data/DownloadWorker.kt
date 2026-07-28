@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
@@ -28,6 +29,11 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 class DownloadWorker(
     appContext: Context,
@@ -35,6 +41,9 @@ class DownloadWorker(
 ) : Worker(appContext, params) {
     private val processId = id.toString()
     private val cookieStore = CookieFileStore(appContext)
+    private val progressPercent = AtomicInteger(0)
+    private val progressDetail = AtomicReference("다운로드 중")
+    private val progressFinishing = AtomicBoolean(false)
 
     override fun doWork(): Result {
         val sourceUrl = inputData.getString(KEY_URL).orEmpty()
@@ -43,7 +52,7 @@ class DownloadWorker(
         val formatSelector = inputData.getString(KEY_FORMAT).orEmpty().ifBlank { "best" }
         val treeUri = inputData.getString(KEY_TREE_URI).orEmpty()
         val audioFormat = inputData.getString(KEY_AUDIO_FORMAT).orEmpty().lowercase()
-        val concurrency = inputData.getInt(KEY_CONCURRENCY, 3).coerceIn(1, 8)
+        val concurrency = inputData.getInt(KEY_CONCURRENCY, 16).coerceIn(1, 16)
         if (sourceUrl.isBlank()) return Result.failure(errorData("URL이 비어 있습니다."))
 
         val preparingText = if (audioFormat.isNotBlank()) "음원 추출 준비 중" else "다운로드 준비 중"
@@ -55,7 +64,9 @@ class DownloadWorker(
             val preferDirect = inputData.getBoolean(KEY_PREFER_DIRECT, false)
             val isManifest = directUrl.contains(".m3u8", ignoreCase = true) ||
                 directUrl.contains(".mpd", ignoreCase = true) ||
-                directUrl.contains("/media/hls", ignoreCase = true)
+                directUrl.contains("/media/hls", ignoreCase = true) ||
+                directUrl.contains("/manifest/", ignoreCase = true) ||
+                directUrl.contains("gcdn.app", ignoreCase = true)
             val output = if (
                 audioFormat.isBlank() &&
                 directUrl.isNotBlank() &&
@@ -132,14 +143,31 @@ class DownloadWorker(
         referer: String = "",
     ): File {
         (applicationContext as ClipFlowApplication).ensureEngine()
+        val isHls = sourceUrl.contains(".m3u8", ignoreCase = true) ||
+            sourceUrl.contains("/manifest/", ignoreCase = true) ||
+            sourceUrl.contains("gcdn.app", ignoreCase = true)
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--continue")
             addOption("--newline")
-            addOption("--downloader", "libaria2c.so")
-            addOption("--concurrent-fragments", concurrency)
+            addOption("--no-warnings")
+            // Progressive: aria2c multi-connection. HLS: native downloader (clean merge)
+            // with desktop YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS=16 default.
+            if (!isHls) {
+                addOption("--downloader", "libaria2c.so")
+                addOption("--downloader-args", "aria2c:-x16 -s16 -k1M")
+            }
+            val fragmentConcurrency = if (isHls) {
+                // Prefer user setting when raised; otherwise match desktop 16.
+                maxOf(concurrency, HLS_FRAGMENT_CONCURRENCY).coerceIn(4, 16)
+            } else {
+                concurrency.coerceIn(1, 8)
+            }
+            addOption("--concurrent-fragments", fragmentConcurrency)
+            addOption("--http-chunk-size", "10485760")
             cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
+            addOption("--user-agent", BrowserMediaFallback.DESKTOP_CHROME_UA)
             if (referer.isNotBlank()) {
                 addOption("--referer", referer)
                 addOption("--add-header", "Referer:$referer")
@@ -152,13 +180,24 @@ class DownloadWorker(
                 addOption("--format", "bestaudio/best")
                 addOption("--extract-audio")
                 addOption("--audio-format", audioFormat)
+            } else if (isHls) {
+                // Playlist URL is already quality-specific for AniLife; no "-f best".
+                addOption("--merge-output-format", "mp4")
             } else {
                 addOption("--format", formatSelector)
                 addOption("--merge-output-format", "mp4")
                 addOption("--recode-video", "mp4")
             }
             addOption("--paths", workDir.absolutePath)
-            addOption("--output", "%(title).120s [%(id)s].%(ext)s")
+            val preferredName = inputData.getString(KEY_TITLE).orEmpty()
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                .trim()
+                .take(80)
+            if (preferredName.isNotBlank()) {
+                addOption("--output", "$preferredName.%(ext)s")
+            } else {
+                addOption("--output", "%(title).120s [%(id)s].%(ext)s")
+            }
             addOption("--print", "after_move:__CLIPFLOW_FILE__%(filepath)s")
             clipSection()?.let { section ->
                 addOption("--download-sections", section)
@@ -167,32 +206,233 @@ class DownloadWorker(
                 }
             }
         }
-        val response = YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
-            val percent = progress.toInt().coerceIn(0, 100)
-            val detail = when {
-                percent >= 100 -> "마무리 중"
-                eta > 0 -> "$percent% · ${eta}초 남음"
-                line.isNotBlank() -> "$percent%"
-                else -> "다운로드 중"
+        val expectedBytes = inputData.getLong(KEY_EXPECTED_BYTES, 0L)
+        // HLS often never invokes yt-dlp progress with a useful %; poll workDir size instead.
+        // Desktop: progress_hook + _progress_text → "N% · speed" (display_size base 1000).
+        val stopTicker = AtomicBoolean(false)
+        val ticker = startProgressTicker(workDir, expectedBytes, stopTicker)
+        try {
+            val response = YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
+                val parsed = parseProgress(line, progress, expectedBytes, workDir)
+                val percent = maxOf(parsed.percent, progressPercent.get()).coerceIn(0, 100)
+                val etaText = if (etaInSeconds > 0) formatEta(etaInSeconds.toLong()) else parsed.eta
+                val detail = progressText(
+                    percent = percent,
+                    speedText = parsed.speed,
+                    etaText = etaText,
+                    finishing = percent >= 100 || parsed.finishing,
+                    fallback = progressDetail.get(),
+                )
+                publishProgress(percent, detail, percent >= 100 || parsed.finishing)
             }
-            publishProgress(percent, detail, percent >= 100)
+            val marked = response.out.lineSequence()
+                .lastOrNull { it.startsWith(FILE_MARKER) }
+                ?.removePrefix(FILE_MARKER)
+                ?.trim()
+                ?.let(::File)
+                ?.takeIf { it.isFile && it.length() > 0 }
+            if (marked != null) return marked
+            findFinishedMedia(workDir, audioFormat)?.let { return it }
+            val errTail = response.out.lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .filterNot { line ->
+                    line.startsWith("WARNING:", ignoreCase = true) ||
+                        line.startsWith("DEPRECATED", ignoreCase = true) ||
+                        line.contains("yt-dlp version", ignoreCase = true) ||
+                        line.contains("--update", ignoreCase = true)
+                }
+                .toList()
+                .takeLast(4)
+                .joinToString(" | ")
+            error(
+                if (errTail.isNotBlank()) "완성된 MP4를 만들지 못했습니다: $errTail"
+                else "완성된 MP4 파일을 찾지 못했습니다.",
+            )
+        } finally {
+            stopTicker.set(true)
+            ticker.interrupt()
+            runCatching { ticker.join(800) }
         }
-        return response.out.lineSequence()
-            .lastOrNull { it.startsWith(FILE_MARKER) }
-            ?.removePrefix(FILE_MARKER)
-            ?.trim()
-            ?.let(::File)
-            ?.takeIf(File::isFile)
-            ?: workDir.walkTopDown()
-                .filter {
-                    it.isFile && if (audioFormat.isNotBlank()) {
-                        it.extension.equals(audioFormat, true)
+    }
+
+    private fun startProgressTicker(
+        workDir: File,
+        expectedBytes: Long,
+        stop: AtomicBoolean,
+    ): Thread {
+        val lastBytes = AtomicLong(0L)
+        val lastAt = AtomicLong(System.currentTimeMillis())
+        // Smoothed speed so UI doesn't flicker to empty between fragment bursts.
+        val smoothSpeed = AtomicLong(0L)
+        return thread(name = "clipflow-progress", isDaemon = true) {
+            while (!stop.get() && !isStopped) {
+                try {
+                    val written = workDirDownloadedBytes(workDir)
+                    val now = System.currentTimeMillis()
+                    val prevAt = lastAt.getAndSet(now)
+                    val prevBytes = lastBytes.getAndSet(written)
+                    val elapsedMs = (now - prevAt).coerceAtLeast(1L)
+                    val delta = (written - prevBytes).coerceAtLeast(0L)
+                    val instantBps = if (delta > 0) delta * 1000L / elapsedMs else 0L
+                    val prevSmooth = smoothSpeed.get()
+                    val speedBps = when {
+                        instantBps > 0L && prevSmooth > 0L -> (prevSmooth * 2L + instantBps) / 3L
+                        instantBps > 0L -> instantBps
+                        prevSmooth > 0L -> (prevSmooth * 3L) / 4L // decay when idle between fragments
+                        else -> 0L
+                    }
+                    smoothSpeed.set(speedBps)
+                    val fromSize = if (expectedBytes > 0 && written > 0) {
+                        ((written * 100L) / expectedBytes).toInt().coerceIn(0, 99)
                     } else {
-                        it.extension.equals("mp4", true)
+                        0
+                    }
+                    val percent = maxOf(fromSize, progressPercent.get()).coerceIn(0, 99)
+                    val speedText = formatSpeed(speedBps)
+                    val detail = progressText(
+                        percent = percent,
+                        speedText = speedText,
+                        etaText = "",
+                        finishing = false,
+                        fallback = if (written > 0) "다운로드 중" else progressDetail.get(),
+                    )
+                    // Always push while bytes are moving or detail changed — UI must update.
+                    if (written > 0 ||
+                        percent > progressPercent.get() ||
+                        detail != progressDetail.get() ||
+                        progressDetail.get() in setOf("다운로드 중", "대기 중", "다운로드 준비 중")
+                    ) {
+                        publishProgress(percent, detail, false)
+                    }
+                    Thread.sleep(400)
+                } catch (_: InterruptedException) {
+                    break
+                } catch (_: Throwable) {
+                    try {
+                        Thread.sleep(400)
+                    } catch (_: InterruptedException) {
+                        break
                     }
                 }
-                .maxByOrNull(File::lastModified)
-            ?: error("완성된 MP4 파일을 찾지 못했습니다.")
+            }
+        }
+    }
+
+    private fun workDirDownloadedBytes(workDir: File): Long {
+        if (!workDir.exists()) return 0L
+        return workDir.walkTopDown()
+            .filter { it.isFile }
+            .filter {
+                val n = it.name.lowercase()
+                // Count any growing media/temp artifact yt-dlp leaves in the work dir.
+                !n.endsWith(".ytdl") &&
+                    !n.endsWith(".json") &&
+                    !n.endsWith(".vtt") &&
+                    !n.endsWith(".srt") &&
+                    it.length() > 0L
+            }
+            .sumOf { it.length() }
+    }
+
+    /**
+     * Desktop clipflow_qt._progress_text / engine.display_size:
+     * "N% · 12.3 MB/s" (SIZE_UNIT_BASE=1000 on non-Windows).
+     */
+    private fun progressText(
+        percent: Int,
+        speedText: String,
+        etaText: String,
+        finishing: Boolean,
+        fallback: String,
+    ): String {
+        if (finishing || percent >= 100) return "마무리 중"
+        val speed = speedText.trim()
+        val eta = etaText.trim()
+        if (percent > 0 && speed.isNotBlank()) {
+            val base = "$percent% · $speed"
+            return if (eta.isNotBlank()) "$base · ETA $eta" else base
+        }
+        if (percent > 0) {
+            // Keep prior speed line if callback had no speed this tick.
+            val existing = fallback.trim()
+            if (existing.contains('%') && existing.contains('·')) {
+                val kept = existing.replace(Regex("""^\d+%"""), "$percent%")
+                return if (eta.isNotBlank() && !kept.contains("ETA")) "$kept · ETA $eta" else kept
+            }
+            return if (eta.isNotBlank()) "$percent% · ETA $eta" else "$percent%"
+        }
+        if (speed.isNotBlank()) return "다운로드 중 · $speed"
+        return fallback.ifBlank { "다운로드 중" }
+    }
+
+    /** Match tools/downloader_engine.display_size (base 1000) + "/s". */
+    private fun formatSpeed(bytesPerSec: Long): String {
+        if (bytesPerSec <= 0L) return ""
+        return "${displaySize(bytesPerSec)}/s"
+    }
+
+    private fun displaySize(numBytes: Long): String {
+        if (numBytes <= 0L) return ""
+        val units = arrayOf("B", "KB", "MB", "GB")
+        var value = numBytes.toDouble()
+        var unitIndex = 0
+        while (value >= SIZE_UNIT_BASE && unitIndex < units.lastIndex) {
+            value /= SIZE_UNIT_BASE
+            unitIndex++
+        }
+        return if (units[unitIndex] == "B") {
+            "${numBytes.toInt()} B"
+        } else {
+            String.format("%.1f %s", value, units[unitIndex])
+        }
+    }
+
+    private fun formatEta(seconds: Long): String {
+        if (seconds <= 0L) return ""
+        val total = seconds.toInt()
+        val hours = total / 3600
+        val minutes = (total % 3600) / 60
+        val secs = total % 60
+        return if (hours > 0) {
+            String.format("%d:%02d:%02d", hours, minutes, secs)
+        } else {
+            String.format("%d:%02d", minutes, secs)
+        }
+    }
+
+    private fun findFinishedMedia(workDir: File, audioFormat: String): File? {
+        val candidates = workDir.walkTopDown()
+            .filter { it.isFile && it.length() > 1024 }
+            .filter { file ->
+                val name = file.name.lowercase()
+                if (name.endsWith(".ytdl") || name.contains("-frag") || name.contains(".part-frag")) {
+                    return@filter false
+                }
+                if (audioFormat.isNotBlank()) {
+                    return@filter file.extension.equals(audioFormat, true) ||
+                        name.endsWith(".$audioFormat.part")
+                }
+                val ext = file.extension.lowercase()
+                ext in setOf("mp4", "mkv", "webm", "mov", "ts", "m4a") ||
+                    name.endsWith(".mp4.part") ||
+                    name.endsWith(".mkv.part") ||
+                    name.endsWith(".ts.part")
+            }
+            .sortedByDescending { it.lastModified() }
+            .toList()
+        val best = candidates.firstOrNull() ?: return null
+        // Promote leftover yt-dlp temp names into a real media file.
+        if (best.name.endsWith(".part", ignoreCase = true) && !best.name.contains("-Frag", ignoreCase = true)) {
+            val promoted = File(
+                best.parentFile,
+                best.name.removeSuffix(".part").removeSuffix(".PART").let { base ->
+                    if (base.contains('.')) base else "$base.mp4"
+                },
+            )
+            if (best.renameTo(promoted)) return promoted
+        }
+        return best
     }
 
     private fun downloadDirectMp4(mediaUrl: String, workDir: File, referer: String = ""): File {
@@ -238,14 +478,32 @@ class DownloadWorker(
         connection.inputStream.use { input ->
             FileOutputStream(part, append).use { file ->
                 val buffer = ByteArray(256 * 1024)
+                val startedAt = System.currentTimeMillis()
+                var lastPublishAt = 0L
+                var lastPublishedBytes = downloaded
                 while (true) {
                     if (isStopped) error("일시정지됨")
                     val count = input.read(buffer)
                     if (count < 0) break
                     file.write(buffer, 0, count)
                     downloaded += count
+                    val now = System.currentTimeMillis()
+                    if (now - lastPublishAt < 250L && downloaded - lastPublishedBytes < 256 * 1024) {
+                        continue
+                    }
+                    val elapsedSec = ((now - startedAt).coerceAtLeast(1L)) / 1000.0
+                    val speedBps = ((downloaded - downloadedBefore) / elapsedSec).toLong()
                     val percent = if (total > 0) (downloaded * 100 / total).toInt().coerceIn(0, 99) else 0
-                    publishProgress(percent, if (percent > 0) "$percent%" else "다운로드 중", false)
+                    val detail = progressText(
+                        percent = percent,
+                        speedText = formatSpeed(speedBps),
+                        etaText = "",
+                        finishing = false,
+                        fallback = "다운로드 중",
+                    )
+                    publishProgress(percent, detail, false)
+                    lastPublishAt = now
+                    lastPublishedBytes = downloaded
                 }
             }
         }
@@ -259,9 +517,82 @@ class DownloadWorker(
         return output
     }
 
+    private data class ParsedProgress(
+        val percent: Int,
+        val speed: String = "",
+        val eta: String = "",
+        val finishing: Boolean = false,
+    )
+
+    /**
+     * yt-dlp HLS often reports progress=0 in the callback; scrape the log line and/or
+     * estimate from growing work-dir files so the UI can show % and speed.
+     */
+    private fun parseProgress(
+        line: String,
+        callbackProgress: Float,
+        expectedBytes: Long,
+        workDir: File,
+    ): ParsedProgress {
+        val text = line.trim()
+        val percentFromCallback = callbackProgress.toInt().coerceIn(0, 100)
+        val percentFromLine = Regex("""(\d{1,3}(?:\.\d+)?)%""").find(text)
+            ?.groupValues?.getOrNull(1)
+            ?.toFloatOrNull()
+            ?.toInt()
+            ?.coerceIn(0, 100)
+            ?: 0
+        // Normalize "3.3MiB/s" / "3.3 MiB/s" → desktop-like "3.5 MB/s" when possible.
+        val rawSpeed = Regex(
+            """(\d+(?:\.\d+)?)\s*([KMGT]i?B)/s""",
+            RegexOption.IGNORE_CASE,
+        ).find(text)
+        val speed = if (rawSpeed != null) {
+            val n = rawSpeed.groupValues[1].toDoubleOrNull() ?: 0.0
+            val unit = rawSpeed.groupValues[2].uppercase()
+            val bytes = when (unit) {
+                "B" -> n
+                "KB", "KIB" -> n * if (unit == "KIB") 1024.0 else 1000.0
+                "MB", "MIB" -> n * if (unit == "MIB") 1024.0 * 1024.0 else 1000.0 * 1000.0
+                "GB", "GIB" -> n * if (unit == "GIB") 1024.0 * 1024.0 * 1024.0 else 1e9
+                else -> 0.0
+            }
+            if (bytes > 0) formatSpeed(bytes.toLong()) else "${rawSpeed.groupValues[1]} ${rawSpeed.groupValues[2]}/s"
+        } else {
+            ""
+        }
+        val eta = Regex("""ETA\s+(\d+:\d+(?::\d+)?)""", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.getOrNull(1).orEmpty()
+        val finishing = text.contains("Merging", ignoreCase = true) ||
+            text.contains("Fixing", ignoreCase = true) ||
+            text.contains("Destination", ignoreCase = true) ||
+            text.contains("after_move", ignoreCase = true) ||
+            text.contains("finalizing", ignoreCase = true)
+        var percent = maxOf(percentFromCallback, percentFromLine)
+        if (percent <= 0 && expectedBytes > 0) {
+            val written = workDirDownloadedBytes(workDir)
+            if (written > 0) {
+                percent = ((written * 100L) / expectedBytes).toInt().coerceIn(0, 99)
+            }
+        }
+        return ParsedProgress(percent = percent, speed = speed, eta = eta, finishing = finishing)
+    }
+
     private fun publishProgress(percent: Int, detail: String, finishing: Boolean) {
-        setProgressAsync(workDataOf(PROGRESS to percent, DETAIL to detail, FINISHING to finishing))
-        setForegroundAsync(notificationInfo(percent, detail))
+        val next = percent.coerceIn(0, 100)
+        // Never go backwards except when finishing completes.
+        val merged = if (finishing) {
+            next
+        } else {
+            maxOf(next, progressPercent.get())
+        }
+        progressPercent.set(merged)
+        progressDetail.set(detail)
+        progressFinishing.set(finishing)
+        Log.i(PROGRESS_LOG_TAG, "p=$merged finishing=$finishing detail=$detail")
+        setProgressAsync(workDataOf(PROGRESS to merged, DETAIL to detail, FINISHING to finishing))
+        // Foreground update is relatively expensive; still needed for notification %.
+        setForegroundAsync(notificationInfo(merged, detail))
     }
 
     private fun saveOutput(source: File, treeUri: String): Pair<String, String> {
@@ -353,6 +684,8 @@ class DownloadWorker(
         const val KEY_EXACT_CUT = "exact_cut"
         const val KEY_AUDIO_FORMAT = "audio_format"
         const val KEY_TASK_KEY = "task_key"
+        const val KEY_TITLE = "title"
+        const val KEY_EXPECTED_BYTES = "expected_bytes"
         const val PROGRESS = "progress"
         const val DETAIL = "detail"
         const val FINISHING = "finishing"
@@ -362,5 +695,10 @@ class DownloadWorker(
         private const val FILE_MARKER = "__CLIPFLOW_FILE__"
         private const val CHANNEL_ID = "clipflow_downloads"
         private const val NOTIFICATION_ID_BASE = 21000
+        /** Match tools/downloader_engine.SIZE_UNIT_BASE on non-Windows. */
+        private const val SIZE_UNIT_BASE = 1000.0
+        private const val PROGRESS_LOG_TAG = "ClipFlowProgress"
+        /** Match tools/downloader_engine.YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS. */
+        private const val HLS_FRAGMENT_CONCURRENCY = 16
     }
 }

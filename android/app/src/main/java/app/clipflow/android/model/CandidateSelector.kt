@@ -17,7 +17,11 @@ fun visibleCandidates(
         }
         qualityMatches && codecMatches && (preferences.hdrEnabled || !candidate.isHdr)
     }
-    val source = filtered.ifEmpty { candidates }
+    // Drop pure audio rows so 0.7MB itag-139 never wins the card.
+    val videoOnly = filtered.filter {
+        it.kind == RowKind.Playlist || it.childLoading || it.hasVideo || it.formatId == "best"
+    }
+    val source = videoOnly.ifEmpty { filtered.ifEmpty { candidates } }
     return source
         .groupBy {
             if (it.kind != RowKind.Video && it.kind != RowKind.PlaylistChild) {
@@ -32,7 +36,8 @@ fun visibleCandidates(
                 group.first()
             } else {
                 group.maxWithOrNull(
-                    compareBy<MediaCandidate> { it.hasAudio }
+                    compareBy<MediaCandidate> { it.hasVideo }
+                        .thenBy { it.hasAudio }
                         .thenBy { it.sizeBytes > 0 }
                         .thenBy { it.sizeBytes },
                 ) ?: group.first()

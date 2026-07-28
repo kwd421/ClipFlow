@@ -67,6 +67,25 @@ class CandidateSelectorTest {
     }
 
     @Test
+    fun audioOnlyItagNeverBecomesPreferredVideoCard() {
+        val audioOnly = candidate("139", height = 0, codec = "none", audio = "mp4a.40.5", size = 669_711)
+            .copy(extension = "m4a", width = 0)
+        val video = candidate("137", height = 1080, codec = "avc1", audio = "none", size = 21_000_000)
+        val preferred = preferredVisibleCandidate(listOf(audioOnly, video), DownloadPreferences())
+        assertEquals("137", preferred?.id)
+        assertTrue(preferred?.hasVideo == true)
+        assertFalse(audioOnly.hasVideo)
+    }
+
+    @Test
+    fun youtubeVideoOnlyUsesMergeFormatSelector() {
+        val videoOnly = candidate("137", height = 1080, codec = "avc1", audio = "none")
+            .copy(sourceUrl = "https://youtu.be/jmk282X0pzk", formatId = "137")
+        assertTrue(videoOnly.formatSelector.contains("bestaudio"))
+        assertFalse(videoOnly.prefersDirectUrl)
+    }
+
+    @Test
     fun parsesCommonTimecodes() {
         assertEquals(65, parseTimecode("01:05"))
         assertEquals(3723, parseTimecode("1:02:03"))

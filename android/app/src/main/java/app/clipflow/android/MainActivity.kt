@@ -15,8 +15,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import app.clipflow.android.ui.ClipFlowScreen
 import app.clipflow.android.ui.theme.ClipFlowTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val clipFlowViewModel: ClipFlowViewModel by viewModels()
@@ -33,7 +36,7 @@ class MainActivity : ComponentActivity() {
                 ) {}
 
                 LaunchedEffect(Unit) {
-                    sharedUrl(intent)?.let(viewModel::setUrl)
+                    handleIncomingIntent(intent, viewModel)
                     if (
                         Build.VERSION.SDK_INT >= 33 &&
                         ContextCompat.checkSelfPermission(
@@ -81,7 +84,19 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        sharedUrl(intent)?.let(clipFlowViewModel::setUrl)
+        handleIncomingIntent(intent, clipFlowViewModel)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?, viewModel: ClipFlowViewModel) {
+        sharedUrl(intent)?.let(viewModel::setUrl)
+        // Emulator/automation: adb --ez app.clipflow.EXTRA_ANALYZE true
+        // Delay past first frame so analyzing UI can paint before yt-dlp warms up.
+        if (intent?.getBooleanExtra(EXTRA_ANALYZE, false) == true) {
+            lifecycleScope.launch {
+                delay(400)
+                viewModel.analyze()
+            }
+        }
     }
 
     private fun sharedUrl(intent: Intent?): String? {
@@ -89,5 +104,9 @@ class MainActivity : ComponentActivity() {
         return intent.getStringExtra(Intent.EXTRA_TEXT)
             ?.trim()
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+    }
+
+    companion object {
+        const val EXTRA_ANALYZE = "app.clipflow.EXTRA_ANALYZE"
     }
 }
