@@ -34,15 +34,14 @@ class DownloadWorkerSmokeTest {
     }
 
     @Test
-    fun directPublicMp4DownloadsAndIsReadableAfterMediaStoreSave() {
-        val mediaUrl = PUBLIC_MP4
+    fun directMp4DownloadsAndIsReadableAfterMediaStoreSave() {
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
-                    DownloadWorker.KEY_URL to mediaUrl,
-                    DownloadWorker.KEY_DIRECT_URL to mediaUrl,
+                    DownloadWorker.KEY_URL to TEST_MP4,
+                    DownloadWorker.KEY_DIRECT_URL to TEST_MP4,
                     DownloadWorker.KEY_PREFER_DIRECT to true,
-                    DownloadWorker.KEY_REFERER to "https://media.w3.org/",
+                    DownloadWorker.KEY_REFERER to TEST_ORIGIN,
                     DownloadWorker.KEY_FORMAT to "best",
                     DownloadWorker.KEY_OUTPUT_FORMAT to "mp4",
                     DownloadWorker.KEY_CONCURRENCY to 4,
@@ -57,15 +56,15 @@ class DownloadWorkerSmokeTest {
     }
 
     @Test
-    fun ytDlpPublicMp4DownloadsAndIsReadableAfterMediaStoreSave() {
+    fun ytDlpMp4DownloadsAndIsReadableAfterMediaStoreSave() {
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
                     // Leave DIRECT_URL empty on purpose: exercise the same yt-dlp +
                     // bundled FFmpeg path used by YouTube/generic desktop-parity downloads.
-                    DownloadWorker.KEY_URL to PUBLIC_MP4,
+                    DownloadWorker.KEY_URL to TEST_MP4,
                     DownloadWorker.KEY_PREFER_DIRECT to false,
-                    DownloadWorker.KEY_REFERER to "https://media.w3.org/",
+                    DownloadWorker.KEY_REFERER to TEST_ORIGIN,
                     DownloadWorker.KEY_FORMAT to "best",
                     DownloadWorker.KEY_OUTPUT_FORMAT to "mp4",
                     DownloadWorker.KEY_CONCURRENCY to 4,
@@ -134,7 +133,10 @@ class DownloadWorkerSmokeTest {
     }
 
     companion object {
-        private const val PUBLIC_MP4 =
-            "https://media.w3.org/wai/perspective-videos/large-links-buttons-controls.mp4"
+        // 10.0.2.2 is the Android emulator alias for the CI host. The workflow
+        // generates and serves this MP4 locally so the smoke test has no CDN or
+        // anti-bot dependency.
+        private const val TEST_ORIGIN = "http://10.0.2.2:8765/"
+        private const val TEST_MP4 = "${TEST_ORIGIN}sample.mp4"
     }
 }
