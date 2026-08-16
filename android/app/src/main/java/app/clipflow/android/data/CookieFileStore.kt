@@ -48,11 +48,8 @@ class CookieFileStore(private val context: Context) {
             .asSequence()
             .filter { it.expiresAt <= 0 || it.expiresAt > nowSeconds }
             .filter { !it.secure || secureRequest }
-            .filter { cookie ->
-                val domain = cookie.domain.removePrefix(".").lowercase()
-                host == domain || (cookie.includeSubdomains && host.endsWith(".$domain"))
-            }
-            .filter { path.startsWith(it.path.ifBlank { "/" }) }
+            .filter { cookieDomainMatches(it, host) }
+            .filter { cookiePathMatches(it.path, path) }
             .joinToString("; ") { "${it.name}=${it.value}" }
     }
 
@@ -82,12 +79,29 @@ internal data class NetscapeCookie(
     val expiresAt: Long,
     val name: String,
     val value: String,
+    val httpOnly: Boolean = false,
 )
+
+internal fun cookieDomainMatches(cookie: NetscapeCookie, requestHost: String): Boolean {
+    val host = requestHost.trim().trimEnd('.').lowercase()
+    val domain = cookie.domain.removePrefix(".").trim().trimEnd('.').lowercase()
+    if (host.isBlank() || domain.isBlank()) return false
+    return host == domain || (cookie.includeSubdomains && host.endsWith(".$domain"))
+}
+
+internal fun cookiePathMatches(cookiePath: String, requestPath: String): Boolean {
+    val cookie = cookiePath.ifBlank { "/" }
+    val request = requestPath.ifBlank { "/" }
+    if (request == cookie) return true
+    if (!request.startsWith(cookie)) return false
+    return cookie.endsWith('/') || request.getOrNull(cookie.length) == '/'
+}
 
 internal fun parseNetscapeCookies(contents: String): List<NetscapeCookie> {
     return contents.lineSequence().mapNotNull { rawLine ->
+        val httpOnly = rawLine.startsWith("#HttpOnly_")
         val line = when {
-            rawLine.startsWith("#HttpOnly_") -> rawLine.removePrefix("#HttpOnly_")
+            httpOnly -> rawLine.removePrefix("#HttpOnly_")
             rawLine.startsWith("#") -> return@mapNotNull null
             else -> rawLine
         }.trim()
@@ -102,6 +116,7 @@ internal fun parseNetscapeCookies(contents: String): List<NetscapeCookie> {
             expiresAt = fields[4].toLongOrNull() ?: 0,
             name = fields[5],
             value = fields.subList(6, fields.size).joinToString("\t"),
+            httpOnly = httpOnly,
         ).takeIf { it.domain.isNotBlank() && it.name.isNotBlank() }
     }.toList()
 }
