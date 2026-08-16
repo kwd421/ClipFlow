@@ -62,6 +62,8 @@ android {
     }
 
     packaging {
+        // youtubedl-android executes bundled Python/FFmpeg from nativeLibraryDir.
+        // Legacy JNI packaging keeps those binaries extracted on install.
         jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -106,7 +108,6 @@ dependencies {
     val youtubeDlAndroid = "0.18.1"
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubeDlAndroid")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubeDlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:aria2c:$youtubeDlAndroid")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:core:1.7.0")
