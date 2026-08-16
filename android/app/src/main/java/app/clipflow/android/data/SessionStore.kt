@@ -15,13 +15,14 @@ import java.io.File
 
 data class PersistedSession(
     val candidates: List<MediaCandidate>,
+    val qualityPool: Map<String, List<MediaCandidate>>,
     val tasks: Map<String, DownloadTaskState>,
     val preferences: DownloadPreferences,
     val clipRange: ClipRange,
     val sort: SortState,
     val darkTheme: Boolean,
     val selectedIds: Set<String>,
-    val url: String,
+    val url: String = "",
 )
 
 class SessionStore(context: Context) {
@@ -33,13 +34,15 @@ class SessionStore(context: Context) {
             val root = JSONObject(file.readText())
             PersistedSession(
                 candidates = root.optJSONArray("candidates")?.toCandidates().orEmpty(),
+                qualityPool = root.optJSONObject("qualityPool")?.toCandidateMap().orEmpty(),
                 tasks = root.optJSONObject("tasks")?.toTasks().orEmpty(),
                 preferences = root.optJSONObject("preferences")?.toPreferences() ?: DownloadPreferences(),
                 clipRange = root.optJSONObject("clipRange")?.toClipRange() ?: ClipRange(),
                 sort = root.optJSONObject("sort")?.toSort() ?: SortState(),
                 darkTheme = root.optBoolean("darkTheme", false),
                 selectedIds = root.optJSONArray("selectedIds")?.toStringSet().orEmpty(),
-                url = root.optString("url"),
+                // The URL box is transient input on desktop too. Never resurrect a stale link.
+                url = "",
             )
         }.getOrNull()
     }
@@ -47,7 +50,6 @@ class SessionStore(context: Context) {
     fun save(session: PersistedSession) {
         file.parentFile?.mkdirs()
         val root = JSONObject()
-            .put("url", session.url)
             .put("darkTheme", session.darkTheme)
             .put("selectedIds", JSONArray(session.selectedIds.toList()))
             .put("preferences", session.preferences.toJson())
@@ -55,16 +57,30 @@ class SessionStore(context: Context) {
             .put("sort", session.sort.toJson())
             .put("candidates", JSONArray(session.candidates.map { it.toJson() }))
             .put(
+                "qualityPool",
+                JSONObject().also { obj ->
+                    session.qualityPool.forEach { (id, candidates) ->
+                        obj.put(id, JSONArray(candidates.map { it.toJson() }))
+                    }
+                },
+            )
+            .put(
                 "tasks",
                 JSONObject().also { obj ->
                     session.tasks.forEach { (id, task) -> obj.put(id, task.toJson()) }
                 },
             )
-        file.writeText(root.toString())
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(root.toString())
+        if (!temp.renameTo(file)) {
+            temp.copyTo(file, overwrite = true)
+            temp.delete()
+        }
     }
 
     fun clear() {
         file.delete()
+        File(file.parentFile, "${file.name}.tmp").delete()
     }
 
     private fun JSONArray.toStringSet(): Set<String> = buildSet {
@@ -76,6 +92,14 @@ class SessionStore(context: Context) {
             val item = optJSONObject(i) ?: continue
             add(item.toCandidate())
         }
+    }
+
+    private fun JSONObject.toCandidateMap(): Map<String, List<MediaCandidate>> {
+        val map = mutableMapOf<String, List<MediaCandidate>>()
+        keys().forEach { key ->
+            map[key] = optJSONArray(key)?.toCandidates().orEmpty()
+        }
+        return map
     }
 
     private fun JSONObject.toTasks(): Map<String, DownloadTaskState> {
