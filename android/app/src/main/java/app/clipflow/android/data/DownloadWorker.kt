@@ -20,7 +20,6 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import app.clipflow.android.ClipFlowApplication
 import app.clipflow.android.MainActivity
-import app.clipflow.android.R
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
@@ -50,6 +49,7 @@ class DownloadWorker(
         val directUrl = inputData.getString(KEY_DIRECT_URL).orEmpty()
         val referer = inputData.getString(KEY_REFERER).orEmpty().ifBlank { sourceUrl }
         val formatSelector = inputData.getString(KEY_FORMAT).orEmpty().ifBlank { "best" }
+        val outputFormat = inputData.getString(KEY_OUTPUT_FORMAT).orEmpty().lowercase().ifBlank { "mp4" }
         val treeUri = inputData.getString(KEY_TREE_URI).orEmpty()
         val audioFormat = inputData.getString(KEY_AUDIO_FORMAT).orEmpty().lowercase()
         val concurrency = inputData.getInt(KEY_CONCURRENCY, 16).coerceIn(1, 16)
@@ -57,16 +57,12 @@ class DownloadWorker(
 
         val preparingText = if (audioFormat.isNotBlank()) "음원 추출 준비 중" else "다운로드 준비 중"
         setForegroundAsync(notificationInfo(0, preparingText)).get()
-        val taskKey = inputData.getString(KEY_TASK_KEY).orEmpty().ifBlank { hash("$sourceUrl|$formatSelector") }
+        val taskKey = inputData.getString(KEY_TASK_KEY).orEmpty().ifBlank { hash("$sourceUrl|$formatSelector|$outputFormat") }
         val workDir = File(applicationContext.filesDir, "downloads/$taskKey").apply { mkdirs() }
 
         return try {
             val preferDirect = inputData.getBoolean(KEY_PREFER_DIRECT, false)
-            val isManifest = directUrl.contains(".m3u8", ignoreCase = true) ||
-                directUrl.contains(".mpd", ignoreCase = true) ||
-                directUrl.contains("/media/hls", ignoreCase = true) ||
-                directUrl.contains("/manifest/", ignoreCase = true) ||
-                directUrl.contains("gcdn.app", ignoreCase = true)
+            val isManifest = looksLikeManifest(directUrl)
             val output = if (
                 audioFormat.isBlank() &&
                 directUrl.isNotBlank() &&
@@ -74,29 +70,53 @@ class DownloadWorker(
                 (preferDirect || isManifest)
             ) {
                 if (isManifest) {
-                    // Browser-captured HLS/DASH: download the media URL itself with page referer.
                     downloadWithYoutubeDl(
                         directUrl,
                         "best",
                         concurrency,
                         workDir,
                         audioFormat,
+                        outputFormat,
                         referer = referer,
                     )
                 } else {
-                    runCatching { downloadDirectMp4(directUrl, workDir, referer = referer) }
+                    runCatching { downloadDirectMedia(directUrl, workDir, referer = referer, outputFormat = outputFormat) }
                         .getOrElse { directError ->
                             publishProgress(0, "직접 요청 실패 · yt-dlp로 재시도", false)
                             runCatching {
+                                // Retry the concrete media URL first. It preserves browser-captured
+                                // signed URLs while still letting yt-dlp handle remux/headers.
+                                downloadWithYoutubeDl(
+                                    directUrl,
+                                    "best",
+                                    concurrency,
+                                    workDir,
+                                    audioFormat,
+                                    outputFormat,
+                                    referer = referer,
+                                )
+                            }.recoverCatching {
+                                // Some direct URLs expire; page re-extraction mirrors desktop fallback.
                                 downloadWithYoutubeDl(
                                     sourceUrl,
                                     formatSelector,
                                     concurrency,
                                     workDir,
                                     audioFormat,
+                                    outputFormat,
                                     referer = referer,
                                 )
-                            }.getOrElse { throw directError }
+                            }.getOrElse { ytdlpError ->
+                                throw IllegalStateException(
+                                    buildString {
+                                        append("직접 요청 실패: ")
+                                        append(directError.message ?: directError::class.java.simpleName)
+                                        append("\nyt-dlp 재시도 실패: ")
+                                        append(ytdlpError.message ?: ytdlpError::class.java.simpleName)
+                                    },
+                                    ytdlpError,
+                                )
+                            }
                         }
                 }
             } else {
@@ -106,15 +126,34 @@ class DownloadWorker(
                     concurrency,
                     workDir,
                     audioFormat,
+                    outputFormat,
                     referer = referer,
                 )
             }
 
+            if (!output.isFile || output.length() <= 0L) {
+                error("다운로드 결과 파일이 비어 있습니다.")
+            }
             setProgressAsync(workDataOf(PROGRESS to 100, DETAIL to "파일 저장 중", FINISHING to true)).get()
+            val sourceBytes = output.length()
             val (savedName, savedUri) = saveOutput(output, treeUri)
+            try {
+                verifySavedOutput(savedUri, sourceBytes)
+            } catch (error: Throwable) {
+                deleteSavedOutput(savedUri)
+                throw error
+            }
             output.delete()
-            Result.success(workDataOf(OUTPUT_NAME to savedName, OUTPUT_URI to savedUri))
+            runCatching { workDir.deleteRecursively() }
+            Result.success(
+                workDataOf(
+                    OUTPUT_NAME to savedName,
+                    OUTPUT_URI to savedUri,
+                    OUTPUT_BYTES to sourceBytes,
+                ),
+            )
         } catch (error: Throwable) {
+            Log.e(PROGRESS_LOG_TAG, "download failed", error)
             if (isStopped) Result.failure(errorData("일시정지됨"))
             else Result.failure(errorData(error.message ?: "다운로드에 실패했습니다."))
         } finally {
@@ -134,37 +173,36 @@ class DownloadWorker(
         return "*${start.coerceAtLeast(0)}-${if (end >= 0) end else "inf"}"
     }
 
+    private fun looksLikeManifest(url: String): Boolean =
+        url.contains(".m3u8", ignoreCase = true) ||
+            url.contains(".mpd", ignoreCase = true) ||
+            url.contains("/media/hls", ignoreCase = true) ||
+            url.contains("/manifest/", ignoreCase = true) ||
+            url.contains("gcdn.app", ignoreCase = true)
+
     private fun downloadWithYoutubeDl(
         sourceUrl: String,
         formatSelector: String,
         concurrency: Int,
         workDir: File,
         audioFormat: String,
+        outputFormat: String,
         referer: String = "",
     ): File {
         (applicationContext as ClipFlowApplication).ensureEngine()
-        val isHls = sourceUrl.contains(".m3u8", ignoreCase = true) ||
-            sourceUrl.contains("/manifest/", ignoreCase = true) ||
-            sourceUrl.contains("gcdn.app", ignoreCase = true)
+        val isHls = looksLikeManifest(sourceUrl)
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--continue")
             addOption("--newline")
             addOption("--no-warnings")
-            // Progressive: aria2c multi-connection. HLS: native downloader (clean merge)
-            // with desktop YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS=16 default.
-            if (!isHls) {
-                addOption("--downloader", "libaria2c.so")
-                addOption("--downloader-args", "aria2c:-x16 -s16 -k1M")
-            }
-            val fragmentConcurrency = if (isHls) {
-                // Prefer user setting when raised; otherwise match desktop 16.
-                maxOf(concurrency, HLS_FRAGMENT_CONCURRENCY).coerceIn(4, 16)
-            } else {
-                concurrency.coerceIn(1, 8)
-            }
-            addOption("--concurrent-fragments", fragmentConcurrency)
+            addOption("--retries", "10")
+            addOption("--fragment-retries", "10")
+            // Desktop ClipFlow lets yt-dlp own the transport. Do not force aria2 for
+            // every progressive download: native-library/extractor mismatches then
+            // cannot prevent an otherwise valid yt-dlp download.
+            addOption("--concurrent-fragments", concurrency.coerceIn(1, 16))
             addOption("--http-chunk-size", "10485760")
             cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
             addOption("--user-agent", BrowserMediaFallback.DESKTOP_CHROME_UA)
@@ -172,21 +210,27 @@ class DownloadWorker(
                 addOption("--referer", referer)
                 addOption("--add-header", "Referer:$referer")
                 runCatching {
-                    val origin = java.net.URI(referer).let { "${it.scheme}://${it.host}" }
-                    if (origin.isNotBlank()) addOption("--add-header", "Origin:$origin")
+                    val parsed = URI(referer)
+                    if (!parsed.scheme.isNullOrBlank() && !parsed.host.isNullOrBlank()) {
+                        addOption("--add-header", "Origin:${parsed.scheme}://${parsed.host}")
+                    }
                 }
             }
             if (audioFormat.isNotBlank()) {
                 addOption("--format", "bestaudio/best")
                 addOption("--extract-audio")
                 addOption("--audio-format", audioFormat)
-            } else if (isHls) {
-                // Playlist URL is already quality-specific for AniLife; no "-f best".
-                addOption("--merge-output-format", "mp4")
             } else {
                 addOption("--format", formatSelector)
-                addOption("--merge-output-format", "mp4")
-                addOption("--recode-video", "mp4")
+                if (formatSelector.startsWith("best", ignoreCase = true)) {
+                    addOption("--format-sort", "vcodec:h264,quality,res,fps,hdr:12,acodec:aac")
+                }
+                addOption("--merge-output-format", outputFormat)
+                // Remux only; desktop does not re-encode every MP4 download either.
+                addOption("--remux-video", outputFormat)
+                if (isHls && outputFormat == "mp4") {
+                    addOption("--fixup", "never")
+                }
             }
             addOption("--paths", workDir.absolutePath)
             val preferredName = inputData.getString(KEY_TITLE).orEmpty()
@@ -207,8 +251,6 @@ class DownloadWorker(
             }
         }
         val expectedBytes = inputData.getLong(KEY_EXPECTED_BYTES, 0L)
-        // HLS often never invokes yt-dlp progress with a useful %; poll workDir size instead.
-        // Desktop: progress_hook + _progress_text → "N% · speed" (display_size base 1000).
         val stopTicker = AtomicBoolean(false)
         val ticker = startProgressTicker(workDir, expectedBytes, stopTicker)
         try {
@@ -246,8 +288,8 @@ class DownloadWorker(
                 .takeLast(4)
                 .joinToString(" | ")
             error(
-                if (errTail.isNotBlank()) "완성된 MP4를 만들지 못했습니다: $errTail"
-                else "완성된 MP4 파일을 찾지 못했습니다.",
+                if (errTail.isNotBlank()) "완성된 미디어 파일을 만들지 못했습니다: $errTail"
+                else "완성된 미디어 파일을 찾지 못했습니다.",
             )
         } finally {
             stopTicker.set(true)
@@ -263,7 +305,6 @@ class DownloadWorker(
     ): Thread {
         val lastBytes = AtomicLong(0L)
         val lastAt = AtomicLong(System.currentTimeMillis())
-        // Smoothed speed so UI doesn't flicker to empty between fragment bursts.
         val smoothSpeed = AtomicLong(0L)
         return thread(name = "clipflow-progress", isDaemon = true) {
             while (!stop.get() && !isStopped) {
@@ -279,7 +320,7 @@ class DownloadWorker(
                     val speedBps = when {
                         instantBps > 0L && prevSmooth > 0L -> (prevSmooth * 2L + instantBps) / 3L
                         instantBps > 0L -> instantBps
-                        prevSmooth > 0L -> (prevSmooth * 3L) / 4L // decay when idle between fragments
+                        prevSmooth > 0L -> (prevSmooth * 3L) / 4L
                         else -> 0L
                     }
                     smoothSpeed.set(speedBps)
@@ -297,7 +338,6 @@ class DownloadWorker(
                         finishing = false,
                         fallback = if (written > 0) "다운로드 중" else progressDetail.get(),
                     )
-                    // Always push while bytes are moving or detail changed — UI must update.
                     if (written > 0 ||
                         percent > progressPercent.get() ||
                         detail != progressDetail.get() ||
@@ -325,7 +365,6 @@ class DownloadWorker(
             .filter { it.isFile }
             .filter {
                 val n = it.name.lowercase()
-                // Count any growing media/temp artifact yt-dlp leaves in the work dir.
                 !n.endsWith(".ytdl") &&
                     !n.endsWith(".json") &&
                     !n.endsWith(".vtt") &&
@@ -335,10 +374,6 @@ class DownloadWorker(
             .sumOf { it.length() }
     }
 
-    /**
-     * Desktop clipflow_qt._progress_text / engine.display_size:
-     * "N% · 12.3 MB/s" (SIZE_UNIT_BASE=1000 on non-Windows).
-     */
     private fun progressText(
         percent: Int,
         speedText: String,
@@ -354,7 +389,6 @@ class DownloadWorker(
             return if (eta.isNotBlank()) "$base · ETA $eta" else base
         }
         if (percent > 0) {
-            // Keep prior speed line if callback had no speed this tick.
             val existing = fallback.trim()
             if (existing.contains('%') && existing.contains('·')) {
                 val kept = existing.replace(Regex("""^\d+%"""), "$percent%")
@@ -366,7 +400,6 @@ class DownloadWorker(
         return fallback.ifBlank { "다운로드 중" }
     }
 
-    /** Match tools/downloader_engine.display_size (base 1000) + "/s". */
     private fun formatSpeed(bytesPerSec: Long): String {
         if (bytesPerSec <= 0L) return ""
         return "${displaySize(bytesPerSec)}/s"
@@ -402,46 +435,38 @@ class DownloadWorker(
     }
 
     private fun findFinishedMedia(workDir: File, audioFormat: String): File? {
-        val candidates = workDir.walkTopDown()
+        return workDir.walkTopDown()
             .filter { it.isFile && it.length() > 1024 }
             .filter { file ->
                 val name = file.name.lowercase()
-                if (name.endsWith(".ytdl") || name.contains("-frag") || name.contains(".part-frag")) {
+                if (name.endsWith(".part") || name.endsWith(".ytdl") || name.contains("-frag") || name.contains(".part-frag")) {
                     return@filter false
                 }
                 if (audioFormat.isNotBlank()) {
-                    return@filter file.extension.equals(audioFormat, true) ||
-                        name.endsWith(".$audioFormat.part")
+                    return@filter file.extension.equals(audioFormat, true)
                 }
-                val ext = file.extension.lowercase()
-                ext in setOf("mp4", "mkv", "webm", "mov", "ts", "m4a") ||
-                    name.endsWith(".mp4.part") ||
-                    name.endsWith(".mkv.part") ||
-                    name.endsWith(".ts.part")
+                file.extension.lowercase() in COMPLETED_VIDEO_EXTENSIONS
             }
-            .sortedByDescending { it.lastModified() }
-            .toList()
-        val best = candidates.firstOrNull() ?: return null
-        // Promote leftover yt-dlp temp names into a real media file.
-        if (best.name.endsWith(".part", ignoreCase = true) && !best.name.contains("-Frag", ignoreCase = true)) {
-            val promoted = File(
-                best.parentFile,
-                best.name.removeSuffix(".part").removeSuffix(".PART").let { base ->
-                    if (base.contains('.')) base else "$base.mp4"
-                },
-            )
-            if (best.renameTo(promoted)) return promoted
-        }
-        return best
+            .maxByOrNull { it.lastModified() }
     }
 
-    private fun downloadDirectMp4(mediaUrl: String, workDir: File, referer: String = ""): File {
-        val stem = URL(mediaUrl).path.substringAfterLast('/').substringBeforeLast('.').ifBlank { "video" }
+    private fun downloadDirectMedia(
+        mediaUrl: String,
+        workDir: File,
+        referer: String = "",
+        outputFormat: String = "mp4",
+    ): File {
+        val url = URL(mediaUrl)
+        val sourceExtension = url.path.substringAfterLast('.', "").lowercase()
+            .takeIf { it in COMPLETED_VIDEO_EXTENSIONS }
+            ?: outputFormat.takeIf { it in COMPLETED_VIDEO_EXTENSIONS }
+            ?: "mp4"
+        val stem = url.path.substringAfterLast('/').substringBeforeLast('.').ifBlank { "video" }
             .replace(Regex("[\\/:*?\"<>|]"), "_")
-        val part = File(workDir, "$stem.mp4.part")
-        val output = File(workDir, "$stem.mp4")
+        val part = File(workDir, "$stem.$sourceExtension.part")
+        val output = File(workDir, "$stem.$sourceExtension")
         val existing = part.length()
-        val connection = (URL(mediaUrl).openConnection() as HttpURLConnection).apply {
+        val connection = (url.openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 15_000
             readTimeout = 30_000
@@ -450,13 +475,15 @@ class DownloadWorker(
             setRequestProperty("Accept-Language", "en-US,en;q=0.9")
             setRequestProperty("Connection", "keep-alive")
             val ref = referer.ifBlank {
-                runCatching { "https://${URL(mediaUrl).host}/" }.getOrDefault("")
+                runCatching { "https://${url.host}/" }.getOrDefault("")
             }
             if (ref.isNotBlank()) {
                 setRequestProperty("Referer", ref)
                 runCatching {
-                    val host = URI(ref).host
-                    if (!host.isNullOrBlank()) setRequestProperty("Origin", "https://$host")
+                    val parsed = URI(ref)
+                    if (!parsed.scheme.isNullOrBlank() && !parsed.host.isNullOrBlank()) {
+                        setRequestProperty("Origin", "${parsed.scheme}://${parsed.host}")
+                    }
                 }
             }
             cookieStore.cookieHeaderFor(mediaUrl).ifBlank {
@@ -468,8 +495,9 @@ class DownloadWorker(
             connect()
         }
         if (connection.responseCode !in 200..299) {
+            val code = connection.responseCode
             connection.disconnect()
-            error("HTTP ${connection.responseCode}: 직접 영상 요청이 거부되었습니다.")
+            error("HTTP $code: 직접 영상 요청이 거부되었습니다.")
         }
         val append = existing > 0 && connection.responseCode == HttpURLConnection.HTTP_PARTIAL
         val downloadedBefore = if (append) existing else 0L
@@ -508,6 +536,7 @@ class DownloadWorker(
             }
         }
         connection.disconnect()
+        if (downloaded <= 0L) error("직접 다운로드 결과가 비어 있습니다.")
         if (output.exists()) output.delete()
         if (!part.renameTo(output)) {
             part.copyTo(output, overwrite = true)
@@ -524,10 +553,6 @@ class DownloadWorker(
         val finishing: Boolean = false,
     )
 
-    /**
-     * yt-dlp HLS often reports progress=0 in the callback; scrape the log line and/or
-     * estimate from growing work-dir files so the UI can show % and speed.
-     */
     private fun parseProgress(
         line: String,
         callbackProgress: Float,
@@ -542,7 +567,6 @@ class DownloadWorker(
             ?.toInt()
             ?.coerceIn(0, 100)
             ?: 0
-        // Normalize "3.3MiB/s" / "3.3 MiB/s" → desktop-like "3.5 MB/s" when possible.
         val rawSpeed = Regex(
             """(\d+(?:\.\d+)?)\s*([KMGT]i?B)/s""",
             RegexOption.IGNORE_CASE,
@@ -580,35 +604,27 @@ class DownloadWorker(
 
     private fun publishProgress(percent: Int, detail: String, finishing: Boolean) {
         val next = percent.coerceIn(0, 100)
-        // Never go backwards except when finishing completes.
-        val merged = if (finishing) {
-            next
-        } else {
-            maxOf(next, progressPercent.get())
-        }
+        val merged = if (finishing) next else maxOf(next, progressPercent.get())
         progressPercent.set(merged)
         progressDetail.set(detail)
         progressFinishing.set(finishing)
         Log.i(PROGRESS_LOG_TAG, "p=$merged finishing=$finishing detail=$detail")
         setProgressAsync(workDataOf(PROGRESS to merged, DETAIL to detail, FINISHING to finishing))
-        // Foreground update is relatively expensive; still needed for notification %.
         setForegroundAsync(notificationInfo(merged, detail))
     }
 
     private fun saveOutput(source: File, treeUri: String): Pair<String, String> {
         val extension = source.extension.lowercase().ifBlank { "mp4" }
-        val mimeType = when (extension) {
-            "mp3" -> "audio/mpeg"
-            "wav" -> "audio/wav"
-            else -> "video/mp4"
-        }
+        val mimeType = mimeTypeFor(extension)
         val displayName = source.nameWithoutExtension + ".$extension"
         if (treeUri.isNotBlank()) {
             val root = DocumentFile.fromTreeUri(applicationContext, treeUri.toUri())
                 ?: error("선택한 저장 폴더를 열 수 없습니다.")
             val target = root.createFile(mimeType, displayName)
                 ?: error("선택한 폴더에 파일을 만들 수 없습니다.")
-            applicationContext.contentResolver.openOutputStream(target.uri, "w")!!.use { output ->
+            val stream = applicationContext.contentResolver.openOutputStream(target.uri, "w")
+                ?: error("선택한 폴더의 출력 스트림을 열 수 없습니다.")
+            stream.use { output ->
                 source.inputStream().use { input -> input.copyTo(output) }
             }
             return (target.name ?: source.name) to target.uri.toString()
@@ -624,17 +640,60 @@ class DownloadWorker(
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: error("다운로드 폴더에 파일을 만들 수 없습니다.")
         try {
-            resolver.openOutputStream(uri, "w")!!.use { output ->
+            val stream = resolver.openOutputStream(uri, "w")
+                ?: error("다운로드 폴더의 출력 스트림을 열 수 없습니다.")
+            stream.use { output ->
                 source.inputStream().use { input -> input.copyTo(output) }
             }
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+            if (resolver.update(uri, values, null, null) <= 0) {
+                error("저장된 파일을 공개 상태로 전환하지 못했습니다.")
+            }
         } catch (error: Throwable) {
             resolver.delete(uri, null, null)
             throw error
         }
         return displayName to uri.toString()
+    }
+
+    private fun verifySavedOutput(savedUri: String, sourceBytes: Long) {
+        val uri = savedUri.toUri()
+        val resolver = applicationContext.contentResolver
+        val descriptorLength = resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        if (descriptorLength == 0L) {
+            error("저장된 파일 크기가 0바이트입니다.")
+        }
+        val readable = resolver.openInputStream(uri)?.use { it.read() >= 0 } ?: false
+        if (!readable) {
+            error("저장된 파일을 다시 읽을 수 없습니다.")
+        }
+        // Many document providers report UNKNOWN_LENGTH (-1). When a real length is
+        // available, require a non-empty target and catch obviously truncated copies.
+        if (sourceBytes > 0L && descriptorLength > 0L && descriptorLength < sourceBytes) {
+            error("저장된 파일이 완전하지 않습니다. (${descriptorLength}/${sourceBytes} bytes)")
+        }
+    }
+
+    private fun deleteSavedOutput(savedUri: String) {
+        val uri = savedUri.toUri()
+        val resolver = applicationContext.contentResolver
+        val deleted = runCatching { resolver.delete(uri, null, null) > 0 }.getOrDefault(false)
+        if (!deleted) runCatching { DocumentFile.fromSingleUri(applicationContext, uri)?.delete() }
+    }
+
+    private fun mimeTypeFor(extension: String): String = when (extension.lowercase()) {
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "aac" -> "audio/aac"
+        "m4a" -> "audio/mp4"
+        "webm" -> "video/webm"
+        "mkv" -> "video/x-matroska"
+        "mov" -> "video/quicktime"
+        "m4v" -> "video/x-m4v"
+        "ts" -> "video/mp2t"
+        "mp4" -> "video/mp4"
+        else -> "application/octet-stream"
     }
 
     private fun notificationInfo(progress: Int, detail: String): ForegroundInfo {
@@ -677,6 +736,7 @@ class DownloadWorker(
         const val KEY_PREFER_DIRECT = "prefer_direct"
         const val KEY_REFERER = "referer"
         const val KEY_FORMAT = "format"
+        const val KEY_OUTPUT_FORMAT = "output_format"
         const val KEY_TREE_URI = "tree_uri"
         const val KEY_CONCURRENCY = "concurrency"
         const val KEY_START = "start"
@@ -691,14 +751,13 @@ class DownloadWorker(
         const val FINISHING = "finishing"
         const val OUTPUT_NAME = "output_name"
         const val OUTPUT_URI = "output_uri"
+        const val OUTPUT_BYTES = "output_bytes"
         const val ERROR = "error"
         private const val FILE_MARKER = "__CLIPFLOW_FILE__"
         private const val CHANNEL_ID = "clipflow_downloads"
         private const val NOTIFICATION_ID_BASE = 21000
-        /** Match tools/downloader_engine.SIZE_UNIT_BASE on non-Windows. */
         private const val SIZE_UNIT_BASE = 1000.0
         private const val PROGRESS_LOG_TAG = "ClipFlowProgress"
-        /** Match tools/downloader_engine.YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS. */
-        private const val HLS_FRAGMENT_CONCURRENCY = 16
+        private val COMPLETED_VIDEO_EXTENSIONS = setOf("mp4", "mkv", "webm", "mov", "m4v", "ts")
     }
 }
