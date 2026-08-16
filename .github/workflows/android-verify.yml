@@ -1,0 +1,118 @@
+name: Android Verify
+
+on:
+  push:
+    branches:
+      - agent/android-download-parity-fixes
+    paths:
+      - "android/**"
+      - ".github/workflows/android-verify.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-verify.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Unit tests and debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipFlow-Android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  device-smoke:
+    needs: unit-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Enable KVM access
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Install emulator image
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "emulator" "platforms;android-36" "system-images;android-35;google_apis;x86_64"
+          echo "no" | avdmanager create avd --force --name clipflow-ci --package "system-images;android-35;google_apis;x86_64" --device "pixel_6"
+
+      - name: Boot emulator
+        shell: bash
+        run: |
+          nohup emulator -avd clipflow-ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          adb wait-for-device
+          for i in $(seq 1 120); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
+      - name: Real download and MediaStore smoke test
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew connectedDebugAndroidTest \
+            -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest \
+            --stacktrace
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          adb logcat -d -t 3000 > "$RUNNER_TEMP/clipflow-logcat.txt" || true
+          cp "$RUNNER_TEMP/emulator.log" "$RUNNER_TEMP/emulator-final.log" || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-smoke-diagnostics
+          path: |
+            ${{ runner.temp }}/clipflow-logcat.txt
+            ${{ runner.temp }}/emulator-final.log
+          if-no-files-found: ignore
