@@ -6,15 +6,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CookieFileStoreTest {
+    private fun cookieFixture(value: String): String = value.trimIndent().replace("\\t", "\t")
+
     @Test
     fun parsesNetscapeCookiesIncludingHttpOnlyRows() {
         val cookies = parseNetscapeCookies(
-            """
-            # Netscape HTTP Cookie File
-            .example.com\tTRUE\t/\tTRUE\t2000000000\tsession\tabc
-            #HttpOnly_.example.com\tTRUE\t/account\tFALSE\t0\tauth\tdef
-            invalid
-            """.trimIndent(),
+            cookieFixture(
+                """
+                # Netscape HTTP Cookie File
+                .example.com\tTRUE\t/\tTRUE\t2000000000\tsession\tabc
+                #HttpOnly_.example.com\tTRUE\t/account\tFALSE\t0\tauth\tdef
+                invalid
+                """,
+            ),
         )
 
         assertEquals(2, cookies.size)
@@ -27,13 +31,15 @@ class CookieFileStoreTest {
 
     @Test
     fun cookieHeaderMatchesDomainPathAndExpiry() {
-        val contents = """
+        val contents = cookieFixture(
+            """
             # Netscape HTTP Cookie File
             .example.com\tTRUE\t/\tFALSE\t2000000000\ta\t1
             .example.com\tTRUE\t/video\tTRUE\t2000000000\tb\t2
             other.com\tFALSE\t/\tFALSE\t2000000000\tc\t3
             .example.com\tTRUE\t/\tFALSE\t1\texpired\tx
-        """.trimIndent()
+            """,
+        )
         val cookies = parseNetscapeCookies(contents)
         assertEquals(4, cookies.size)
 
