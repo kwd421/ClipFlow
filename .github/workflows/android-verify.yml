@@ -65,61 +65,35 @@ jobs:
 
       - name: Enable KVM access
         run: |
-          if [ -e /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm
-          fi
-
-      - name: Install emulator image
-        shell: bash
-        run: |
-          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          AVDMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
-          test -x "$SDKMANAGER"
-          test -x "$AVDMANAGER"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/emulator" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "emulator" "platforms;android-36" "system-images;android-35;google_apis;x86_64"
-          echo "no" | "$AVDMANAGER" create avd --force --name clipflow-ci --package "system-images;android-35;google_apis;x86_64" --device "pixel_6"
-
-      - name: Boot emulator
-        shell: bash
-        run: |
-          nohup emulator -avd clipflow-ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
-          adb wait-for-device
-          for i in $(seq 1 120); do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-              break
-            fi
-            sleep 2
-          done
-          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - name: Real download and MediaStore smoke test
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew connectedDebugAndroidTest \
-            -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest \
-            --stacktrace
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-boot-timeout: 600
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            cd android
+            chmod +x gradlew
+            ./gradlew connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest \
+              --stacktrace
 
-      - name: Capture diagnostics on failure
+      - name: Capture logcat on failure
         if: failure()
-        run: |
-          adb logcat -d -t 3000 > "$RUNNER_TEMP/clipflow-logcat.txt" || true
-          cp "$RUNNER_TEMP/emulator.log" "$RUNNER_TEMP/emulator-final.log" || true
+        run: adb logcat -d -t 3000 > "$RUNNER_TEMP/clipflow-logcat.txt" || true
 
       - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: android-smoke-diagnostics
-          path: |
-            ${{ runner.temp }}/clipflow-logcat.txt
-            ${{ runner.temp }}/emulator-final.log
+          path: ${{ runner.temp }}/clipflow-logcat.txt
           if-no-files-found: ignore
