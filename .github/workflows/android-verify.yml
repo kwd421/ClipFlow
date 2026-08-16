@@ -79,19 +79,12 @@ jobs:
           emulator-boot-timeout: 600
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           disable-animations: true
-          script: |
-            set +e
-            cd android
-            chmod +x gradlew
-            ./gradlew connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest \
-              --stacktrace
-            status=$?
-            cd ..
-            if [ "$status" -ne 0 ]; then
-              adb logcat -d -t 4000 > "$RUNNER_TEMP/clipflow-logcat.txt" || true
-            fi
-            exit "$status"
+          working-directory: ./android
+          script: >-
+            bash -c 'set +e; chmod +x gradlew; ./gradlew connectedDebugAndroidTest
+            -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest
+            --stacktrace; status=$?; if [ "$status" -ne 0 ]; then adb logcat -d -t 4000 >
+            "$RUNNER_TEMP/clipflow-logcat.txt" || true; fi; exit "$status"'
 
       - name: Upload Android test diagnostics
         if: failure()
