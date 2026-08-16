@@ -1,12 +1,16 @@
 package app.clipflow.android.data
 
 import android.content.Context
+import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import app.clipflow.android.model.ClipRange
+import app.clipflow.android.model.DownloadPreferences
+import app.clipflow.android.model.SortState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -23,15 +27,15 @@ class DownloadWorkerSmokeTest {
     @After
     fun cleanup() {
         createdUris.forEach { uriText ->
-            runCatching { context.contentResolver.delete(android.net.Uri.parse(uriText), null, null) }
+            runCatching { context.contentResolver.delete(Uri.parse(uriText), null, null) }
         }
         createdUris.clear()
+        SessionStore(context).clear()
     }
 
     @Test
     fun directPublicMp4DownloadsAndIsReadableAfterMediaStoreSave() {
-        val mediaUrl = "https://media.w3.org/wai/perspective-videos/large-links-buttons-controls.mp4"
-        val taskKey = "instrumented-smoke-${System.currentTimeMillis()}"
+        val mediaUrl = PUBLIC_MP4
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
@@ -42,12 +46,60 @@ class DownloadWorkerSmokeTest {
                     DownloadWorker.KEY_FORMAT to "best",
                     DownloadWorker.KEY_OUTPUT_FORMAT to "mp4",
                     DownloadWorker.KEY_CONCURRENCY to 4,
-                    DownloadWorker.KEY_TASK_KEY to taskKey,
-                    DownloadWorker.KEY_TITLE to "clipflow-download-smoke",
+                    DownloadWorker.KEY_TASK_KEY to "direct-smoke-${System.currentTimeMillis()}",
+                    DownloadWorker.KEY_TITLE to "clipflow-direct-smoke",
                 ),
             )
             .build()
 
+        val info = runWork(request)
+        assertSavedOutput(info)
+    }
+
+    @Test
+    fun ytDlpPublicMp4DownloadsAndIsReadableAfterMediaStoreSave() {
+        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setInputData(
+                workDataOf(
+                    // Leave DIRECT_URL empty on purpose: exercise the same yt-dlp +
+                    // bundled FFmpeg path used by YouTube/generic desktop-parity downloads.
+                    DownloadWorker.KEY_URL to PUBLIC_MP4,
+                    DownloadWorker.KEY_PREFER_DIRECT to false,
+                    DownloadWorker.KEY_REFERER to "https://media.w3.org/",
+                    DownloadWorker.KEY_FORMAT to "best",
+                    DownloadWorker.KEY_OUTPUT_FORMAT to "mp4",
+                    DownloadWorker.KEY_CONCURRENCY to 4,
+                    DownloadWorker.KEY_TASK_KEY to "ytdlp-smoke-${System.currentTimeMillis()}",
+                    DownloadWorker.KEY_TITLE to "clipflow-ytdlp-smoke",
+                ),
+            )
+            .build()
+
+        val info = runWork(request)
+        assertSavedOutput(info)
+    }
+
+    @Test
+    fun persistedSessionDoesNotRestoreStaleInputUrl() {
+        val store = SessionStore(context)
+        store.clear()
+        store.save(
+            PersistedSession(
+                candidates = emptyList(),
+                qualityPool = emptyMap(),
+                tasks = emptyMap(),
+                preferences = DownloadPreferences(),
+                clipRange = ClipRange(),
+                sort = SortState(),
+                darkTheme = false,
+                selectedIds = emptySet(),
+                url = "https://example.com/old-video",
+            ),
+        )
+        assertEquals("", store.load()?.url)
+    }
+
+    private fun runWork(request: androidx.work.OneTimeWorkRequest): WorkInfo {
         val manager = WorkManager.getInstance(context)
         manager.enqueue(request)
 
@@ -62,19 +114,27 @@ class DownloadWorkerSmokeTest {
         assertNotNull("WorkManager never returned work info", info)
         val error = info?.outputData?.getString(DownloadWorker.ERROR).orEmpty()
         assertEquals("DownloadWorker failed: $error", WorkInfo.State.SUCCEEDED, info?.state)
+        return info!!
+    }
 
-        val outputUri = info?.outputData?.getString(DownloadWorker.OUTPUT_URI).orEmpty()
-        val outputBytes = info?.outputData?.getLong(DownloadWorker.OUTPUT_BYTES, 0L) ?: 0L
+    private fun assertSavedOutput(info: WorkInfo) {
+        val outputUri = info.outputData.getString(DownloadWorker.OUTPUT_URI).orEmpty()
+        val outputBytes = info.outputData.getLong(DownloadWorker.OUTPUT_BYTES, 0L)
         assertTrue("output URI is blank", outputUri.isNotBlank())
         assertTrue("reported output bytes must be positive", outputBytes > 0L)
         createdUris += outputUri
 
-        val uri = android.net.Uri.parse(outputUri)
+        val uri = Uri.parse(outputUri)
         val descriptorLength = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
         assertTrue("saved file reports zero bytes", descriptorLength != 0L)
         context.contentResolver.openInputStream(uri).use { input ->
             assertNotNull("saved MediaStore URI cannot be opened", input)
             assertTrue("saved file is empty", input!!.read() >= 0)
         }
+    }
+
+    companion object {
+        private const val PUBLIC_MP4 =
+            "https://media.w3.org/wai/perspective-videos/large-links-buttons-controls.mp4"
     }
 }
