@@ -73,9 +73,17 @@ jobs:
       - name: Install emulator image
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "emulator" "platforms;android-36" "system-images;android-35;google_apis;x86_64"
-          echo "no" | avdmanager create avd --force --name clipflow-ci --package "system-images;android-35;google_apis;x86_64" --device "pixel_6"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          AVDMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
+          test -x "$SDKMANAGER"
+          test -x "$AVDMANAGER"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "emulator" "platforms;android-36" "system-images;android-35;google_apis;x86_64"
+          echo "no" | "$AVDMANAGER" create avd --force --name clipflow-ci --package "system-images;android-35;google_apis;x86_64" --device "pixel_6"
 
       - name: Boot emulator
         shell: bash
