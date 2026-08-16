@@ -63,6 +63,21 @@ jobs:
             android/**/*.gradle*
             android/gradle/wrapper/gradle-wrapper.properties
 
+      - name: Prepare deterministic MP4 fixture
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          mkdir -p "$RUNNER_TEMP/clipflow-media"
+          ffmpeg -hide_banner -loglevel error \
+            -f lavfi -i color=c=black:s=160x90:d=1 \
+            -f lavfi -i anullsrc=r=44100:cl=stereo \
+            -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
+            "$RUNNER_TEMP/clipflow-media/sample.mp4"
+          test -s "$RUNNER_TEMP/clipflow-media/sample.mp4"
+
       - name: Enable KVM access
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -81,10 +96,13 @@ jobs:
           disable-animations: true
           working-directory: ./android
           script: >-
-            bash -c 'set +e; chmod +x gradlew; ./gradlew connectedDebugAndroidTest
+            bash -c 'set +e; python3 -m http.server 8765 --bind 0.0.0.0 --directory
+            "$RUNNER_TEMP/clipflow-media" > "$RUNNER_TEMP/clipflow-http.log" 2>&1 & server_pid=$!;
+            sleep 1; chmod +x gradlew; ./gradlew connectedDebugAndroidTest
             -Pandroid.testInstrumentationRunnerArguments.class=app.clipflow.android.data.DownloadWorkerSmokeTest
             --stacktrace; status=$?; if [ "$status" -ne 0 ]; then adb logcat -d -t 4000 >
-            "$RUNNER_TEMP/clipflow-logcat.txt" || true; fi; exit "$status"'
+            "$RUNNER_TEMP/clipflow-logcat.txt" || true; fi; kill "$server_pid" 2>/dev/null || true;
+            wait "$server_pid" 2>/dev/null || true; exit "$status"'
 
       - name: Upload Android test diagnostics
         if: failure()
@@ -93,6 +111,7 @@ jobs:
           name: android-smoke-diagnostics
           path: |
             ${{ runner.temp }}/clipflow-logcat.txt
+            ${{ runner.temp }}/clipflow-http.log
             android/app/build/outputs/androidTest-results/connected/**
             android/app/build/reports/androidTests/connected/**
           if-no-files-found: ignore
