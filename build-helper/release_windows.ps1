@@ -157,7 +157,8 @@ $env:CLIPFLOW_WINSPARKLE_FEED_URL = $FeedUrl
 $env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY = $publicKey
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "build_windows.ps1") -SkipTests
+    # A release artifact must pass the same unit suite as a normal Windows build.
+    & (Join-Path $PSScriptRoot "build_windows.ps1")
 }
 
 $artifactDir = Join-Path $repoRoot "dist"
