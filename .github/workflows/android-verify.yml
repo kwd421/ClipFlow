@@ -47,7 +47,6 @@ jobs:
           if-no-files-found: error
 
   device-smoke:
-    needs: unit-build
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
