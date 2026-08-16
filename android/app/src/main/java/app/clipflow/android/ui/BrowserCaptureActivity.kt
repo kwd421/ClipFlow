@@ -1,7 +1,6 @@
 package app.clipflow.android.ui
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -26,6 +25,7 @@ import app.clipflow.android.data.AnalysisResult
 import app.clipflow.android.data.BrowserMediaFallback
 import app.clipflow.android.data.CookieFileStore
 import app.clipflow.android.data.NetscapeCookie
+import app.clipflow.android.data.cookieDomainMatches
 import app.clipflow.android.data.parseNetscapeCookies
 import app.clipflow.android.model.MediaCandidate
 import java.net.URI
@@ -268,34 +268,30 @@ class BrowserCaptureActivity : ComponentActivity() {
     private fun injectCookies(url: String, cookieStore: CookieFileStore) {
         val manager = CookieManager.getInstance()
         manager.setAcceptCookie(true)
-        val host = runCatching { URI(url).host.orEmpty() }.getOrDefault("")
+        val host = runCatching { URI(url).host.orEmpty() }.getOrDefault("").lowercase()
         if (host.isBlank()) return
         val contents = cookieStore.activeFile()?.readText() ?: return
         val now = System.currentTimeMillis() / 1000
-        val origins = listOfNotNull(
-            "https://$host",
-            if (!host.startsWith("www.")) "https://www.$host" else null,
-            url,
-        )
         parseNetscapeCookies(contents)
             .filter { it.expiresAt <= 0 || it.expiresAt > now }
-            .filter { cookie ->
-                val domain = cookie.domain.removePrefix(".").lowercase()
-                host.equals(domain, true) || host.endsWith(".$domain")
-            }
-            .forEach { cookie -> setNetscapeCookie(manager, origins, cookie) }
+            .filter { cookieDomainMatches(it, host) }
+            .forEach { cookie -> setNetscapeCookie(manager, url, cookie) }
         manager.flush()
     }
 
-    private fun setNetscapeCookie(manager: CookieManager, origins: List<String>, cookie: NetscapeCookie) {
-        val domain = if (cookie.domain.startsWith(".")) cookie.domain else ".${cookie.domain}"
+    private fun setNetscapeCookie(manager: CookieManager, origin: String, cookie: NetscapeCookie) {
         val value = buildString {
             append(cookie.name).append('=').append(cookie.value)
-            append("; Domain=").append(domain)
+            // Host-only cookies must stay host-only. Adding Domain would widen them.
+            if (cookie.includeSubdomains) {
+                val domain = cookie.domain.removePrefix(".")
+                append("; Domain=.").append(domain)
+            }
             append("; Path=").append(cookie.path.ifBlank { "/" })
             if (cookie.secure) append("; Secure")
+            if (cookie.httpOnly) append("; HttpOnly")
         }
-        origins.forEach { manager.setCookie(it, value) }
+        manager.setCookie(origin, value)
     }
 
     companion object {
