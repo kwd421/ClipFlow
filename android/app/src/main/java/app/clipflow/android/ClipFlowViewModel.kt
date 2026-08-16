@@ -34,7 +34,6 @@ import app.clipflow.android.model.TaskStatus
 import app.clipflow.android.model.extractUrls
 import app.clipflow.android.model.preferredVisibleCandidate
 import app.clipflow.android.model.sortCandidates
-import app.clipflow.android.model.visibleCandidates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -201,7 +200,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     fun downloadSegment(candidate: MediaCandidate, clipRange: ClipRange) = enqueueDownload(candidate, clipRange)
 
     fun extractAudio(candidate: MediaCandidate, format: String) {
-        val normalizedFormat = format.lowercase().takeIf { it in setOf("wav", "mp3") } ?: return
+        val normalizedFormat = format.lowercase().takeIf { it in setOf("wav", "mp3", "aac") } ?: return
         val current = state.value
         val taskKey = hash("${candidate.sourceUrl}|audio|$normalizedFormat")
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
@@ -209,6 +208,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 workDataOf(
                     DownloadWorker.KEY_URL to candidate.sourceUrl,
                     DownloadWorker.KEY_FORMAT to "bestaudio/best",
+                    DownloadWorker.KEY_OUTPUT_FORMAT to normalizedFormat,
                     DownloadWorker.KEY_TREE_URI to current.outputTreeUri,
                     DownloadWorker.KEY_CONCURRENCY to current.preferences.concurrency,
                     DownloadWorker.KEY_START to -1,
@@ -340,9 +340,18 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun playOutput(candidateId: String) {
-        val uri = state.value.tasks[candidateId]?.outputUri?.takeIf(String::isNotBlank) ?: return
+        val task = state.value.tasks[candidateId] ?: return
+        val uri = task.outputUri.takeIf(String::isNotBlank)?.toUri() ?: return
+        val mimeType = when (task.outputName.substringAfterLast('.', "").lowercase()) {
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "aac" -> "audio/aac"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            else -> "video/mp4"
+        }
         val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri.toUri(), "video/mp4")
+            .setDataAndType(uri, mimeType)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
         runCatching { getApplication<Application>().startActivity(intent) }
             .onFailure { _state.update { it.copy(error = "재생할 앱을 찾을 수 없습니다.") } }
@@ -386,7 +395,6 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
             _state.update {
                 it.copy(error = "저장된 파일을 지우지 못했습니다. 폴더 권한을 확인하세요.")
             }
-            // Still clear task association so UI is not stuck on a missing file.
         }
         _state.update { current ->
             current.copy(
@@ -406,7 +414,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     private fun wipeWorkDir(candidate: MediaCandidate, knownTaskKey: String = "") {
         val keys = buildSet {
             if (knownTaskKey.isNotBlank()) add(knownTaskKey)
-            add(hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|${state.value.clipRange}"))
+            add(hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|${state.value.preferences.format}|${state.value.clipRange}"))
         }
         val root = File(getApplication<Application>().filesDir, "downloads")
         keys.forEach { key ->
@@ -585,8 +593,9 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     private fun enqueueDownloadNow(candidate: MediaCandidate, clipRange: ClipRange = state.value.clipRange) {
         val current = state.value
+        val outputFormat = current.preferences.format.lowercase().ifBlank { "mp4" }
         // Task key ignores volatile media tokens so resume reuses the same work folder.
-        val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|$clipRange")
+        val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|$outputFormat|$clipRange")
         // YouTube/ytdlp: always download from the page URL so yt-dlp merges video+audio.
         // Never feed a bare googlevideo progressive/audio URL as "direct".
         val useDirect = !candidate.isYoutubeSource && candidate.mediaUrl.isNotBlank() && (
@@ -604,6 +613,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                     DownloadWorker.KEY_PREFER_DIRECT to useDirect,
                     DownloadWorker.KEY_REFERER to candidate.sourceUrl,
                     DownloadWorker.KEY_FORMAT to candidate.formatSelector,
+                    DownloadWorker.KEY_OUTPUT_FORMAT to outputFormat,
                     DownloadWorker.KEY_TITLE to candidate.title,
                     DownloadWorker.KEY_EXPECTED_BYTES to candidate.sizeBytes,
                     DownloadWorker.KEY_TREE_URI to current.outputTreeUri,
@@ -633,10 +643,13 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         if (!observedWorks.add(workId)) return
         viewModelScope.launch {
             while (isActive) {
-                val info = withContext(Dispatchers.IO) { workManager.getWorkInfoById(workId).get() }
+                val info = withContext(Dispatchers.IO) { runCatching { workManager.getWorkInfoById(workId).get() }.getOrNull() }
                 if (info == null) {
-                    delay(100)
-                    continue
+                    updateTask(candidateId) { old ->
+                        old.copy(status = TaskStatus.Paused, detail = "작업 정보 없음 · 다시 시작 가능")
+                    }
+                    schedulePersist()
+                    break
                 }
                 val progress = info.progress.getInt(DownloadWorker.PROGRESS, 0)
                 val detail = info.progress.getString(DownloadWorker.DETAIL).orEmpty()
@@ -660,7 +673,8 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                         status = status,
                         progress = if (status == TaskStatus.Completed) 100 else progress,
                         detail = finalDetail,
-                        outputName = info.outputData.getString(DownloadWorker.OUTPUT_NAME).orEmpty(),
+                        outputName = info.outputData.getString(DownloadWorker.OUTPUT_NAME).orEmpty()
+                            .ifBlank { old.outputName },
                         outputUri = info.outputData.getString(DownloadWorker.OUTPUT_URI).orEmpty()
                             .ifBlank { old.outputUri },
                     )
@@ -671,14 +685,19 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 }
                 delay(300)
             }
+            observedWorks.remove(workId)
         }
     }
 
     private fun observeAuxiliaryWork(workId: UUID) {
         viewModelScope.launch {
             while (isActive) {
-                val info = withContext(Dispatchers.IO) { workManager.getWorkInfoById(workId).get() }
-                if (info == null || !info.state.isFinished) {
+                val info = withContext(Dispatchers.IO) { runCatching { workManager.getWorkInfoById(workId).get() }.getOrNull() }
+                if (info == null) {
+                    _state.update { it.copy(error = "음원 추출 작업 정보를 찾을 수 없습니다.") }
+                    return@launch
+                }
+                if (!info.state.isFinished) {
                     delay(250)
                     continue
                 }
@@ -729,16 +748,17 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     private fun restoreSession() {
         val session = sessionStore.load() ?: return
         allRows = session.candidates
-        session.candidates.forEach { qualityPool[it.id] = listOf(it) }
+        qualityPool.clear()
+        qualityPool.putAll(session.qualityPool.filterValues { it.isNotEmpty() })
+        // Backward compatibility with sessions written before qualityPool persistence.
+        session.candidates.forEach { candidate ->
+            if (qualityPool[candidate.id].isNullOrEmpty()) qualityPool[candidate.id] = listOf(candidate)
+        }
         _state.update {
             it.copy(
-                url = session.url,
-                tasks = session.tasks.mapValues { (_, task) ->
-                    // Active works may no longer exist after process death.
-                    if (task.status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)) {
-                        task.copy(status = TaskStatus.Paused, detail = "앱 재시작 · 다시 시작 가능")
-                    } else task
-                },
+                // URL input is deliberately ephemeral; restored cards are enough context.
+                url = "",
+                tasks = session.tasks,
                 preferences = session.preferences,
                 clipRange = session.clipRange,
                 sort = session.sort,
@@ -749,36 +769,36 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
             )
         }
         recomputeVisible(session.preferences)
-        // Re-attach observers for unfinished works if IDs still valid.
         session.tasks.forEach { (id, task) ->
-            task.workId.toUuidOrNull()?.let { uuid ->
-                if (task.status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing, TaskStatus.Paused)) {
-                    // Leave paused; user can resume.
-                } else if (task.status == TaskStatus.Completed) {
-                    // no-op
-                } else {
-                    observeWork(id, uuid)
+            val uuid = task.workId.toUuidOrNull()
+            when {
+                task.status in ACTIVE_TASK_STATUSES && uuid != null -> observeWork(id, uuid)
+                task.status in ACTIVE_TASK_STATUSES -> updateTask(id) {
+                    task.copy(status = TaskStatus.Paused, detail = "앱 재시작 · 다시 시작 가능")
                 }
+                else -> Unit
             }
         }
+        schedulePersist()
     }
 
     private fun schedulePersist() {
         persistJob?.cancel()
         persistJob = viewModelScope.launch {
             delay(250)
-            sessionStore.save(
-                PersistedSession(
-                    candidates = allRows,
-                    tasks = state.value.tasks,
-                    preferences = state.value.preferences,
-                    clipRange = state.value.clipRange,
-                    sort = state.value.sort,
-                    darkTheme = state.value.darkTheme,
-                    selectedIds = state.value.selectedIds,
-                    url = state.value.url,
-                ),
+            val snapshot = PersistedSession(
+                candidates = allRows,
+                qualityPool = qualityPool.mapValues { (_, values) -> values.toList() },
+                tasks = state.value.tasks,
+                preferences = state.value.preferences,
+                clipRange = state.value.clipRange,
+                sort = state.value.sort,
+                darkTheme = state.value.darkTheme,
+                selectedIds = state.value.selectedIds,
             )
+            withContext(Dispatchers.IO) {
+                sessionStore.save(snapshot)
+            }
         }
     }
 
@@ -813,5 +833,6 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     companion object {
         private const val DOWNLOAD_TAG = "clipflow-download"
         private const val LOG_TAG = "ClipFlowVM"
+        private val ACTIVE_TASK_STATUSES = setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)
     }
 }
