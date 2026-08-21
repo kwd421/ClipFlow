@@ -104,6 +104,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
@@ -792,13 +793,6 @@ private fun CandidateCard(
     val active = status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)
     val progress = (task?.progress ?: 0).coerceIn(0, 100)
     val detail = task?.detail.orEmpty()
-    val infinite = rememberInfiniteTransition(label = "finishing-border")
-    val hue by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Restart),
-        label = "hue",
-    )
     // Desktop clipflow_rows: fixed ~1.4dp stroke; progress is a partial perimeter path.
     val trackColor = when (status) {
         TaskStatus.Failed -> colors.danger
@@ -808,7 +802,7 @@ private fun CandidateCard(
         else -> colors.strongBorder
     }
     val progressColor = when (status) {
-        TaskStatus.Finishing -> Color.hsv(hue, 0.72f, 0.92f)
+        TaskStatus.Finishing -> colors.accent
         TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
         TaskStatus.Failed -> colors.danger
         TaskStatus.Completed -> colors.strongBorder
@@ -1006,6 +1000,7 @@ private fun CandidateCard(
                 trackColor = trackColor,
                 progressColor = progressColor,
                 indeterminate = indeterminateRing,
+                rainbow = status == TaskStatus.Finishing,
                 modifier = Modifier.matchParentSize(),
             )
         }
@@ -1025,18 +1020,26 @@ private fun CardProgressRing(
     trackColor: Color,
     progressColor: Color,
     indeterminate: Boolean = false,
+    rainbow: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val infinite = rememberInfiniteTransition(label = "ring-spin")
-    val spinPhase by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 4f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "ring-phase",
-    )
+    val indicatorPath = remember { Path() }
+    val rainbowBrush = remember { Brush.sweepGradient(finishingRingColors) }
+    val spinPhase = if (indeterminate) {
+        val infinite = rememberInfiniteTransition(label = "ring-spin")
+        val animatedPhase by infinite.animateFloat(
+            initialValue = 0f,
+            targetValue = 4f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 900, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "ring-phase",
+        )
+        animatedPhase
+    } else {
+        0f
+    }
     Canvas(modifier = modifier) {
         val stroke = 1.4.dp.toPx()
         val inset = stroke / 2f
@@ -1046,25 +1049,63 @@ private fun CardProgressRing(
         val bottom = size.height - inset
         val radius = minOf(8.dp.toPx(), (right - left) / 2f, (bottom - top) / 2f)
         val style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val full = desktopRingSegmentPath(left, top, right, bottom, radius, 0f, 4f)
-        drawPath(full, color = trackColor, style = style)
+        drawRoundRect(
+            color = trackColor,
+            topLeft = Offset(left, top),
+            size = Size(right - left, bottom - top),
+            cornerRadius = CornerRadius(radius, radius),
+            style = style,
+        )
         if (indeterminate) {
-            val dash = desktopRingSegmentPath(
-                left, top, right, bottom, radius,
-                startPhase = spinPhase,
-                lengthPhase = 0.46f,
+            if (rainbow) {
+                finishingRingColors.forEachIndexed { index, color ->
+                    drawCircle(
+                        color = color,
+                        radius = stroke * (1.9f - index * 0.14f),
+                        center = desktopRingPoint(
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            radius,
+                            spinPhase - index * 0.075f,
+                        ),
+                    )
+                }
+            } else {
+                drawCircle(
+                    color = progressColor,
+                    radius = stroke * 1.8f,
+                    center = desktopRingPoint(left, top, right, bottom, radius, spinPhase),
+                )
+            }
+            return@Canvas
+        }
+        if (rainbow) {
+            drawRoundRect(
+                brush = rainbowBrush,
+                topLeft = Offset(left, top),
+                size = Size(right - left, bottom - top),
+                cornerRadius = CornerRadius(radius, radius),
+                style = style,
             )
-            drawPath(dash, color = progressColor, style = style)
             return@Canvas
         }
         val bounded = progress.coerceIn(0, 100)
         if (bounded <= 0) return@Canvas
         if (bounded >= 100) {
-            drawPath(full, color = progressColor, style = style)
+            drawRoundRect(
+                color = progressColor,
+                topLeft = Offset(left, top),
+                size = Size(right - left, bottom - top),
+                cornerRadius = CornerRadius(radius, radius),
+                style = style,
+            )
             return@Canvas
         }
         // Desktop: partial = _ring_segment_path(rect, 3.82, 4.0 * progress / 100.0)
         val partial = desktopRingSegmentPath(
+            indicatorPath,
             left, top, right, bottom, radius,
             startPhase = 3.82f,
             lengthPhase = 4f * bounded / 100f,
@@ -1073,8 +1114,18 @@ private fun CardProgressRing(
     }
 }
 
+private val finishingRingColors = listOf(
+    Color(0xFFFF4D6D),
+    Color(0xFFFFA62B),
+    Color(0xFFFFE66D),
+    Color(0xFF43D17B),
+    Color(0xFF29B6F6),
+    Color(0xFF7C6CF2),
+)
+
 /** Port of clipflow_rows._ring_segment_path / _analysis_ring_point (phase 0..4). */
 private fun desktopRingSegmentPath(
+    path: Path,
     left: Float,
     top: Float,
     right: Float,
@@ -1083,91 +1134,73 @@ private fun desktopRingSegmentPath(
     startPhase: Float,
     lengthPhase: Float,
 ): Path {
-    val path = Path()
+    path.reset()
     val length = lengthPhase.coerceIn(0f, 4f)
     if (length <= 0f) return path
-    val straightFraction = 0.82f
-    val cornerSpan = 1f - straightFraction
-    fun point(phaseIn: Float): Offset {
-        val phase = ((phaseIn % 4f) + 4f) % 4f
-        val side = phase.toInt()
-        val t = phase - side
-        val cornerT = if (t < straightFraction) 0f else (t - straightFraction) / cornerSpan
-        return when (side) {
-            0 -> {
-                if (t < straightFraction) {
-                    val x = (left + radius) + (right - 2 * radius - left) * (t / straightFraction)
-                    Offset(x, top)
-                } else {
-                    val angle = Math.toRadians((-90.0 + 90.0 * cornerT))
-                    Offset(
-                        (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
-                        (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
-                    )
-                }
-            }
-            1 -> {
-                if (t < straightFraction) {
-                    val y = (top + radius) + (bottom - 2 * radius - top) * (t / straightFraction)
-                    Offset(right, y)
-                } else {
-                    val angle = Math.toRadians(90.0 * cornerT)
-                    Offset(
-                        (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
-                        (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
-                    )
-                }
-            }
-            2 -> {
-                if (t < straightFraction) {
-                    val x = (right - radius) - (right - 2 * radius - left) * (t / straightFraction)
-                    Offset(x, bottom)
-                } else {
-                    val angle = Math.toRadians(90.0 + 90.0 * cornerT)
-                    Offset(
-                        (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
-                        (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
-                    )
-                }
-            }
-            else -> {
-                if (t < straightFraction) {
-                    val y = (bottom - radius) - (bottom - 2 * radius - top) * (t / straightFraction)
-                    Offset(left, y)
-                } else {
-                    val angle = Math.toRadians(180.0 + 90.0 * cornerT)
-                    Offset(
-                        (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
-                        (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
-                    )
-                }
-            }
-        }
-    }
-
     val start = ((startPhase % 4f) + 4f) % 4f
-    val end = start + length
-    var phase = start
-    val first = point(start)
+    val first = desktopRingPoint(left, top, right, bottom, radius, start)
     path.moveTo(first.x, first.y)
-    while (phase < end - 1e-6f) {
-        val base = kotlin.math.floor(phase + 1e-9f)
-        val t = phase - base
-        val pieceEnd = if (t < straightFraction - 1e-9f) {
-            minOf(end, base + straightFraction)
-        } else {
-            minOf(end, base + 1f)
-        }
-        // Sample densely enough for smooth corners (desktop uses true arcs).
-        val steps = maxOf(2, ((pieceEnd - phase) * 24f).toInt())
-        for (i in 1..steps) {
-            val p = phase + (pieceEnd - phase) * (i / steps.toFloat())
-            val pt = point(p)
-            path.lineTo(pt.x, pt.y)
-        }
-        phase = pieceEnd
+    val steps = maxOf(2, kotlin.math.ceil(length * 32f).toInt())
+    for (i in 1..steps) {
+        val phase = start + length * (i / steps.toFloat())
+        val point = desktopRingPoint(left, top, right, bottom, radius, phase)
+        path.lineTo(point.x, point.y)
     }
     return path
+}
+
+private fun desktopRingPoint(
+    left: Float,
+    top: Float,
+    right: Float,
+    bottom: Float,
+    radius: Float,
+    phaseIn: Float,
+): Offset {
+    val straightFraction = 0.82f
+    val cornerSpan = 1f - straightFraction
+    val phase = ((phaseIn % 4f) + 4f) % 4f
+    val side = phase.toInt()
+    val t = phase - side
+    val cornerT = if (t < straightFraction) 0f else (t - straightFraction) / cornerSpan
+    return when (side) {
+        0 -> if (t < straightFraction) {
+            Offset((left + radius) + (right - 2 * radius - left) * (t / straightFraction), top)
+        } else {
+            val angle = Math.toRadians(-90.0 + 90.0 * cornerT)
+            Offset(
+                (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
+                (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
+            )
+        }
+        1 -> if (t < straightFraction) {
+            Offset(right, (top + radius) + (bottom - 2 * radius - top) * (t / straightFraction))
+        } else {
+            val angle = Math.toRadians(90.0 * cornerT)
+            Offset(
+                (right - radius + radius * kotlin.math.cos(angle)).toFloat(),
+                (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
+            )
+        }
+        2 -> if (t < straightFraction) {
+            Offset((right - radius) - (right - 2 * radius - left) * (t / straightFraction), bottom)
+        } else {
+            val angle = Math.toRadians(90.0 + 90.0 * cornerT)
+            Offset(
+                (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
+                (bottom - radius + radius * kotlin.math.sin(angle)).toFloat(),
+            )
+        }
+        else -> if (t < straightFraction) {
+            Offset(left, (bottom - radius) - (bottom - 2 * radius - top) * (t / straightFraction))
+        } else {
+            val angle = Math.toRadians(180.0 + 90.0 * cornerT)
+            Offset(
+                (left + radius + radius * kotlin.math.cos(angle)).toFloat(),
+                (top + radius + radius * kotlin.math.sin(angle)).toFloat(),
+            )
+        }
+    }
 }
 
 @Composable
