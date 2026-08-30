@@ -9,7 +9,7 @@ import java.net.URL
 import java.util.regex.Pattern
 
 /**
- * Desktop-parity site routes for Chzzk / SOOP / CIME / AniLife.
+ * Desktop-parity site routes for Chzzk / SOOP / CIME.
  * Uses public JSON endpoints when possible, then falls back to yt-dlp.
  */
 class SiteRouter(private val cookieStore: CookieFileStore) {
@@ -17,7 +17,6 @@ class SiteRouter(private val cookieStore: CookieFileStore) {
         return when {
             isChzzkClip(url) -> analyzeChzzkClip(url)
             isChzzkVideo(url) -> analyzeChzzkVideo(url)
-            isAniLife(url) -> analyzeAniLife(url)
             isSoop(url) -> analyzeSoop(url)
             isCime(url) -> analyzeCime(url)
             else -> null
@@ -26,7 +25,6 @@ class SiteRouter(private val cookieStore: CookieFileStore) {
 
     fun routeName(url: String): String = when {
         isChzzkClip(url) || isChzzkVideo(url) -> "chzzk"
-        isAniLife(url) -> "anilife"
         isSoop(url) -> "soop"
         isCime(url) -> "cime"
         else -> ""
@@ -132,184 +130,6 @@ class SiteRouter(private val cookieStore: CookieFileStore) {
     private fun analyzeCime(url: String): AnalysisResult? {
         // CIME HTML embeds vary; use yt-dlp + browser fallback.
         return null
-    }
-
-    /**
-     * AniLife watch pages do not work in Android WebView (TLS/CF close).
-     * Native path: api.anilife.app media envelope → decrypt → gcdn master.m3u8.
-     */
-    private fun analyzeAniLife(url: String): AnalysisResult {
-        val mediaId = ANILIFE_WATCH.matcher(url).let {
-            if (it.find()) it.group(1) else error("AniLife 영상 ID를 찾지 못했습니다.")
-        }
-        val pagePath = "/watch?id=$mediaId"
-        val cookie = cookieStore.cookieHeaderFor("https://anilife.app/")
-        val body = getRaw(
-            "https://api.anilife.app/v1/media/$mediaId",
-            mapOf(
-                "Accept" to "application/json, text/plain, */*",
-                "Referer" to "https://anilife.app/",
-                "Origin" to "https://anilife.app",
-                "x-client-id" to "web",
-                "x-build-id" to ANILIFE_BUILD_ID,
-                "x-anilife-referer" to java.net.URLEncoder.encode(pagePath, Charsets.UTF_8.name()),
-                "x-device-token" to AniLifeCodec.sha256Hex(mediaId).take(32),
-            ),
-            cookie,
-        )
-        val payload = AniLifeCodec.decryptMediaBody(body)
-        val episode = payload.optJSONObject("episode") ?: JSONObject()
-        val media = payload.optJSONObject("media") ?: JSONObject()
-        val access = payload.optString("access")
-        if (access.isBlank()) error("AniLife 스트림 토큰(access)을 찾지 못했습니다.")
-
-        val titleBase = media.optJSONObject("name")?.optString("kr")
-            ?.ifBlank { media.optJSONObject("name")?.optString("en").orEmpty() }
-            .orEmpty()
-            .ifBlank { media.optString("title") }
-            .ifBlank { "AniLife $mediaId" }
-        val epNum = episode.optString("episode_num").ifBlank { episode.opt("episode_num")?.toString().orEmpty() }
-        val subject = episode.optString("subject")
-        val title = buildString {
-            append(titleBase)
-            if (epNum.isNotBlank()) append(" - ").append(epNum).append("화")
-            if (subject.isNotBlank()) append(" ").append(subject)
-        }
-        val thumbnail = episode.optString("thumbnail")
-            .ifBlank { media.optString("image") }
-        val duration = parseAniLifeDuration(episode.optString("duration"))
-        val masterUrl = "https://api.gcdn.app/v1/manifest/a/$access/master.m3u8"
-        val pageUrl = "https://anilife.app$pagePath"
-        val gcdnHeaders = mapOf(
-            "Referer" to "https://anilife.app/",
-            "Origin" to "https://anilife.app",
-            "Accept" to "*/*",
-        )
-        val masterBody = runCatching { getRaw(masterUrl, gcdnHeaders, cookie) }.getOrDefault("")
-        val streamVariants = parseHlsMaster(masterBody)
-        val candidates = if (streamVariants.isNotEmpty()) {
-            streamVariants.mapIndexed { index, variant ->
-                MediaCandidate(
-                    id = "anilife-$mediaId-${variant.height}-$index",
-                    sourceUrl = pageUrl,
-                    mediaUrl = variant.url,
-                    title = title,
-                    uploader = "AniLife",
-                    thumbnailUrl = thumbnail,
-                    formatId = if (variant.height > 0) "anilife-${variant.height}" else "anilife-best",
-                    extension = "m3u8",
-                    width = variant.width,
-                    height = variant.height,
-                    fps = 0,
-                    videoCodec = "h264",
-                    audioCodec = "aac",
-                    dynamicRange = "",
-                    sizeBytes = if (variant.bandwidth > 0 && duration > 0) {
-                        variant.bandwidth.toLong() * duration / 8
-                    } else {
-                        0L
-                    },
-                    durationSeconds = duration,
-                    isManifest = true,
-                    route = "anilife",
-                )
-            }
-        } else {
-            // Fallback: master only (yt-dlp picks a variant).
-            listOf(
-                MediaCandidate(
-                    id = "anilife-$mediaId-master",
-                    sourceUrl = pageUrl,
-                    mediaUrl = masterUrl,
-                    title = title,
-                    uploader = "AniLife",
-                    thumbnailUrl = thumbnail,
-                    formatId = "anilife-best",
-                    extension = "m3u8",
-                    width = 0,
-                    height = 0,
-                    fps = 0,
-                    videoCodec = "h264",
-                    audioCodec = "aac",
-                    dynamicRange = "",
-                    sizeBytes = 0L,
-                    durationSeconds = duration,
-                    isManifest = true,
-                    route = "anilife",
-                ),
-            )
-        }
-        if (candidates.isEmpty()) error("AniLife 미디어 후보를 만들지 못했습니다.")
-        return AnalysisResult(title, candidates, route = "anilife")
-    }
-
-    private data class HlsVariant(
-        val url: String,
-        val width: Int,
-        val height: Int,
-        val bandwidth: Int,
-    )
-
-    private fun parseHlsMaster(body: String): List<HlsVariant> {
-        if (body.isBlank()) return emptyList()
-        val out = ArrayList<HlsVariant>()
-        val lines = body.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
-        var i = 0
-        while (i < lines.size) {
-            val line = lines[i]
-            if (line.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true)) {
-                val meta = line.substringAfter(':')
-                val bandwidth = Regex("""BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(meta)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-                val res = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(meta)
-                val width = res?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-                val height = res?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 0
-                val next = lines.getOrNull(i + 1).orEmpty()
-                if (next.startsWith("http", ignoreCase = true)) {
-                    out += HlsVariant(url = next, width = width, height = height, bandwidth = bandwidth)
-                    i += 2
-                    continue
-                }
-            }
-            i += 1
-        }
-        return out.sortedByDescending { it.height.takeIf { h -> h > 0 } ?: it.bandwidth }
-    }
-
-    private fun parseAniLifeDuration(raw: String): Int {
-        val text = raw.trim()
-        if (text.isEmpty()) return 0
-        // "24분", "1시간 30분", "90"
-        val hour = Regex("""(\d+)\s*시간""").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-        val min = Regex("""(\d+)\s*분""").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: text.toIntOrNull()
-            ?: 0
-        val sec = Regex("""(\d+)\s*초""").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-        return hour * 3600 + min * 60 + sec
-    }
-
-    private fun getRaw(url: String, headers: Map<String, String>, cookie: String): String {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 15_000
-            readTimeout = 15_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", YoutubeDlAnalyzer.BROWSER_USER_AGENT)
-            headers.forEach { (k, v) -> setRequestProperty(k, v) }
-            if (cookie.isNotBlank()) setRequestProperty("Cookie", cookie)
-        }
-        return try {
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            // Response is LZ-UTF16 text (content-type often text/html); read as UTF-8 string of code units.
-            val bytes = stream?.readBytes() ?: ByteArray(0)
-            val body = bytes.toString(Charsets.UTF_8)
-            if (code !in 200..299) error("HTTP $code: ${body.take(200)}")
-            body
-        } finally {
-            connection.disconnect()
-        }
     }
 
     private fun mediaToCandidates(
@@ -454,16 +274,8 @@ class SiteRouter(private val cookieStore: CookieFileStore) {
         private val CHZZK_VIDEO = Pattern.compile("https?://chzzk\\.naver\\.com/video/(\\d+)", Pattern.CASE_INSENSITIVE)
         private val SOOP = Pattern.compile("https?://(?:[\\w-]+\\.)?(?:sooplive|afreecatv)\\.com/player/\\d+", Pattern.CASE_INSENSITIVE)
         private val CIME = Pattern.compile("https?://(?:www\\.)?ci\\.me/", Pattern.CASE_INSENSITIVE)
-        private val ANILIFE_WATCH = Pattern.compile(
-            "https?://(?:www\\.)?anilife\\.app/watch\\?(?:[^#]*&)?id=([0-9a-fA-F-]{36})",
-            Pattern.CASE_INSENSITIVE,
-        )
-        // From Nuxt public.buildVersion; required by api.anilife.app client gate.
-        private const val ANILIFE_BUILD_ID = "a731ecce-1a3a-413d-ad56-e03461d1f951"
-
         fun isChzzkClip(url: String) = CHZZK_CLIP.matcher(url).find()
         fun isChzzkVideo(url: String) = CHZZK_VIDEO.matcher(url).find()
-        fun isAniLife(url: String) = ANILIFE_WATCH.matcher(url).find()
         fun isSoop(url: String) = SOOP.matcher(url).find()
         fun isCime(url: String): Boolean {
             if (!CIME.matcher(url).find()) return false

@@ -2,9 +2,15 @@ package app.clipflow.android
 
 import android.app.Application
 import android.app.DownloadManager
+import android.app.RecoverableSecurityException
+import android.content.ContentUris
 import android.content.Intent
+import android.content.IntentSender
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.edit
 import androidx.core.net.toUri
@@ -32,15 +38,19 @@ import app.clipflow.android.model.SortKey
 import app.clipflow.android.model.SortState
 import app.clipflow.android.model.TaskStatus
 import app.clipflow.android.model.extractUrls
+import app.clipflow.android.model.asClipDownload
 import app.clipflow.android.model.preferredVisibleCandidate
 import app.clipflow.android.model.sortCandidates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,6 +60,17 @@ import java.util.ArrayDeque
 import java.util.UUID
 
 class ClipFlowViewModel(application: Application) : AndroidViewModel(application) {
+    private data class PlaylistFolderDeleteResult(val success: Boolean, val removedFolder: Boolean)
+    private data class DeleteTarget(
+        val candidate: MediaCandidate,
+        val task: DownloadTaskState,
+        val failure: Throwable? = null,
+    )
+    private data class PendingDeleteApproval(
+        val rootCandidateId: String,
+        val targets: List<DeleteTarget>,
+    )
+
     private val analyzer = YoutubeDlAnalyzer(application)
     private val cookieStore = CookieFileStore(application)
     private val sessionStore = SessionStore(application)
@@ -73,14 +94,23 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         ),
     )
     val state: StateFlow<ClipFlowUiState> = _state.asStateFlow()
+    private val deleteApprovalChannel = Channel<IntentSender>(Channel.BUFFERED)
+    val deleteApprovalRequests = deleteApprovalChannel.receiveAsFlow()
 
     /** All analyzed rows including hidden playlist children and multi-quality pools. */
     private var allRows: List<MediaCandidate> = emptyList()
     private val qualityPool = mutableMapOf<String, List<MediaCandidate>>()
     private val observedWorks = mutableSetOf<UUID>()
-    private val analysisQueue = ArrayDeque<String>()
+    private data class AnalysisRequest(
+        val url: String,
+        val autoDownload: Boolean,
+        val clipRange: ClipRange,
+    )
+
+    private val analysisQueue = ArrayDeque<AnalysisRequest>()
     private var analysisJob: Job? = null
     private var persistJob: Job? = null
+    private var pendingDeleteApproval: PendingDeleteApproval? = null
     private var createdCounter = System.currentTimeMillis()
 
     init {
@@ -93,22 +123,27 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         schedulePersist()
     }
 
-    fun analyze() {
+    fun analyze() = startAnalysis(autoDownload = false)
+
+    fun analyzeAndDownload() = startAnalysis(autoDownload = true)
+
+    private fun startAnalysis(autoDownload: Boolean) {
         val urls = extractUrls(state.value.url)
-        Log.i(LOG_TAG, "analyze() urls=$urls")
+        Log.i(LOG_TAG, "analyze() urls=$urls autoDownload=$autoDownload")
         if (urls.isEmpty()) {
             _state.update { it.copy(error = "http 또는 https URL을 입력하세요. 여러 개는 줄바꿈으로 넣을 수 있습니다.") }
             return
         }
         analysisQueue.clear()
-        analysisQueue.addAll(urls)
+        val clipRange = state.value.clipRange
+        analysisQueue.addAll(urls.map { AnalysisRequest(it, autoDownload, clipRange) })
         _state.update {
             it.copy(
                 analyzing = true,
                 analysisMessage = if (urls.size > 1) {
                     "대기열 ${urls.size}개 분석 중"
                 } else {
-                    "영상 정보를 확인하는 중 · 필요 시 브라우저 폴백 화면이 열립니다"
+                    "분석 중"
                 },
                 analysisQueueRemaining = urls.size,
                 error = "",
@@ -166,10 +201,14 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         schedulePersist()
     }
 
+    fun clearSelection() {
+        _state.update { it.copy(selectedIds = emptySet()) }
+        schedulePersist()
+    }
+
     fun toggleSelectAll() {
         _state.update { current ->
             val all = current.candidates
-                .filter { it.kind != RowKind.Playlist }
                 .mapTo(mutableSetOf()) { it.id }
             current.copy(selectedIds = if (current.selectedIds.containsAll(all) && all.isNotEmpty()) emptySet() else all)
         }
@@ -187,22 +226,50 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     fun downloadSelected() {
         state.value.candidates
             .filter { it.id in state.value.selectedIds && it.kind != RowKind.Playlist && !it.childLoading }
-            .forEach(::enqueueDownload)
+            .forEach { candidate ->
+                enqueueDownload(candidate, candidate.clipRange.takeIf { it.isSet } ?: state.value.clipRange)
+            }
     }
 
-    fun downloadPlaylist(playlistId: String) {
-        allRows.filter { it.parentId == playlistId && it.kind == RowKind.PlaylistChild && !it.childLoading }
-            .forEach(::enqueueDownload)
+    fun resumePlaylist(playlistId: String) {
+        allRows.filter {
+            it.parentId == playlistId && it.kind == RowKind.PlaylistChild && !it.childLoading && !it.isDerivedDownload
+        }
+            .filter { it.analysisError.isBlank() && it.formatId != "failed" }
+            .filter { state.value.tasks[it.id]?.status != TaskStatus.Completed }
+            .forEach { enqueueDownload(it, ClipRange()) }
     }
 
-    fun download(candidate: MediaCandidate) = enqueueDownload(candidate)
+    fun pausePlaylist(playlistId: String) {
+        allRows.asSequence()
+            .filter { it.parentId == playlistId && it.kind == RowKind.PlaylistChild && !it.isDerivedDownload }
+            .map { it.id }
+            .filter { state.value.tasks[it]?.status in ACTIVE_TASK_STATUSES }
+            .toList()
+            .forEach(::pause)
+    }
 
-    fun downloadSegment(candidate: MediaCandidate, clipRange: ClipRange) = enqueueDownload(candidate, clipRange)
+    fun download(candidate: MediaCandidate) = enqueueDownload(candidate, state.value.clipRange)
+
+    fun downloadSegment(candidate: MediaCandidate, clipRange: ClipRange) {
+        if (!clipRange.isSet) return
+        val order = nextOrder()
+        val segment = candidate.asClipDownload(
+            range = clipRange,
+            newId = "${candidate.id}-clip-$order",
+            createdOrder = order,
+        ).copy(isDerivedDownload = true)
+        allRows = allRows + segment
+        qualityPool[segment.id] = listOf(segment)
+        recomputeVisible()
+        enqueueDownload(segment, segment.clipRange)
+        schedulePersist()
+    }
 
     fun extractAudio(candidate: MediaCandidate, format: String) {
         val normalizedFormat = format.lowercase().takeIf { it in setOf("wav", "mp3", "aac") } ?: return
         val current = state.value
-        val taskKey = hash("${candidate.sourceUrl}|audio|$normalizedFormat")
+        val taskKey = hash("${candidate.sourceUrl}|${candidate.playlistTitle}|audio|$normalizedFormat")
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(
                 workDataOf(
@@ -216,6 +283,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                     DownloadWorker.KEY_EXACT_CUT to false,
                     DownloadWorker.KEY_AUDIO_FORMAT to normalizedFormat,
                     DownloadWorker.KEY_TASK_KEY to taskKey,
+                    DownloadWorker.KEY_PLAYLIST_TITLE to candidate.playlistTitle,
                 ),
             )
             .addTag(DOWNLOAD_TAG)
@@ -231,7 +299,10 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         schedulePersist()
     }
 
-    fun resume(candidate: MediaCandidate) = enqueueDownload(candidate)
+    fun resume(candidate: MediaCandidate) = enqueueDownload(
+        candidate,
+        candidate.clipRange.takeIf { it.isSet } ?: ClipRange(),
+    )
 
     /**
      * List remove (desktop remove_row / paused "다운로드 삭제"):
@@ -327,7 +398,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     fun clearCookieFile() {
         cookieStore.clear()
-        _state.update { it.copy(cookieLabel = "쿠키 미사용", cookieEnabled = false) }
+        _state.update { it.copy(cookieLabel = "쿠키 자동", cookieEnabled = false) }
         schedulePersist()
     }
 
@@ -358,7 +429,15 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun openOutputFolder(candidateId: String) {
-        val task = state.value.tasks[candidateId] ?: return
+        val row = allRows.firstOrNull { it.id == candidateId }
+        val task = if (row?.kind == RowKind.Playlist) {
+            allRows.asSequence()
+                .filter { it.parentId == candidateId }
+                .mapNotNull { state.value.tasks[it.id] }
+                .firstOrNull { it.outputUri.isNotBlank() }
+        } else {
+            state.value.tasks[candidateId]
+        } ?: return
         val treeUri = state.value.outputTreeUri.takeIf(String::isNotBlank)
         val intent = if (treeUri != null && task.outputUri.contains("/tree/")) {
             Intent(Intent.ACTION_VIEW).setDataAndType(treeUri.toUri(), DocumentsContract.Document.MIME_TYPE_DIR)
@@ -370,45 +449,260 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
             .onFailure { _state.update { it.copy(error = "폴더를 열 수 없습니다.") } }
     }
 
-    /**
-     * Delete the saved output file (desktop delete_file_for_row).
-     * Row stays; task returns to Ready. Also clears the private work dir.
-     */
+    /** Delete saved output and remove its card, matching desktop delete_file_for_row. */
     fun deleteOutput(candidateId: String) {
-        val task = state.value.tasks[candidateId] ?: return
-        val uri = task.outputUri.takeIf(String::isNotBlank)?.toUri()
-        var deleted = false
-        if (uri != null) {
-            deleted = runCatching {
-                getApplication<Application>().contentResolver.delete(uri, null, null) > 0
-            }.getOrDefault(false)
-            if (!deleted) {
-                // Fallback: DocumentFile / path-style URIs.
-                deleted = runCatching {
-                    DocumentFile.fromSingleUri(getApplication(), uri)?.delete() == true
-                }.getOrDefault(false)
+        val row = allRows.firstOrNull { it.id == candidateId } ?: return
+        val targets = if (row.kind == RowKind.Playlist) {
+            allRows.filter { it.parentId == candidateId }
+        } else {
+            listOf(row)
+        }.mapNotNull { candidate ->
+            state.value.tasks[candidate.id]
+                ?.takeIf { it.outputUri.isNotBlank() }
+                ?.let { candidate to it }
+        }
+        if (targets.isEmpty() && row.kind != RowKind.Playlist) {
+            remove(row.id)
+            return
+        }
+
+        viewModelScope.launch {
+            val (deletedIds, blockedTargets) = withContext(Dispatchers.IO) {
+                val deleted = mutableSetOf<String>()
+                val blocked = mutableListOf<DeleteTarget>()
+                targets.forEach { (candidate, task) ->
+                    val uri = task.outputUri.toUri()
+                    val directDelete = runCatching {
+                        getApplication<Application>().contentResolver.delete(uri, null, null) > 0
+                    }
+                    val documentDeleted = if (directDelete.exceptionOrNull() is SecurityException) {
+                            false
+                        } else {
+                            runCatching {
+                                DocumentFile.fromSingleUri(getApplication(), uri)?.delete() == true
+                            }.getOrDefault(false)
+                        }
+                    val outputDeleted = directDelete.getOrDefault(false) || documentDeleted || !mediaUriExists(uri)
+                    if (outputDeleted) {
+                        deleted += candidate.id
+                    } else {
+                        blocked += DeleteTarget(candidate, task, directDelete.exceptionOrNull())
+                    }
+                }
+                deleted to blocked
+            }
+
+            if (deletedIds.isNotEmpty()) {
+                finishDeletedTargets(
+                    rootCandidateId = candidateId,
+                    targets = targets.map { DeleteTarget(it.first, it.second) },
+                    deletedIds = deletedIds,
+                    deletePlaylistFolder = blockedTargets.isEmpty(),
+                )
+            }
+
+            if (blockedTargets.isNotEmpty()) {
+                requestDeleteApproval(candidateId, blockedTargets)
+            } else if (deletedIds.size != targets.size) {
+                _state.update { it.copy(error = "저장 파일을 지우지 못했습니다.") }
             }
         }
-        allRows.firstOrNull { it.id == candidateId }?.let { wipeWorkDir(it, task.taskKey) }
-        task.workId.toUuidOrNull()?.let(workManager::cancelWorkById)
-        if (uri != null && !deleted) {
-            _state.update {
-                it.copy(error = "저장된 파일을 지우지 못했습니다. 폴더 권한을 확인하세요.")
-            }
+    }
+
+    fun completeDeleteApproval(approved: Boolean) {
+        val pending = pendingDeleteApproval ?: return
+        pendingDeleteApproval = null
+        if (!approved) {
+            _state.update { it.copy(error = "파일 삭제가 취소되었습니다.") }
+            return
         }
-        _state.update { current ->
-            current.copy(
-                tasks = current.tasks + (
-                    candidateId to DownloadTaskState(
-                        status = TaskStatus.Ready,
-                        detail = "",
-                        progress = 0,
-                        taskKey = task.taskKey,
-                    )
-                    ),
+
+        viewModelScope.launch {
+            val deletedIds = withContext(Dispatchers.IO) {
+                pending.targets.mapNotNull { target ->
+                    val uri = target.task.outputUri.toUri()
+                    val deleted = runCatching {
+                        getApplication<Application>().contentResolver.delete(uri, null, null) > 0
+                    }.getOrDefault(false) || !mediaUriExists(uri)
+                    target.candidate.id.takeIf { deleted }
+                }.toSet()
+            }
+            finishDeletedTargets(
+                rootCandidateId = pending.rootCandidateId,
+                targets = pending.targets,
+                deletedIds = deletedIds,
+                deletePlaylistFolder = deletedIds.size == pending.targets.size,
             )
+            if (deletedIds.size != pending.targets.size) {
+                _state.update { it.copy(error = "승인된 파일 일부를 지우지 못했습니다.") }
+            }
         }
+    }
+
+    private suspend fun requestDeleteApproval(rootCandidateId: String, targets: List<DeleteTarget>) {
+        val mediaTargets = targets.filter { it.task.outputUri.toUri().authority == MediaStore.AUTHORITY }
+        val senderResult = runCatching {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mediaTargets.isNotEmpty() -> {
+                    MediaStore.createDeleteRequest(
+                        getApplication<Application>().contentResolver,
+                        mediaTargets.map { target ->
+                            val storedUri = target.task.outputUri.toUri()
+                            val id = ContentUris.parseId(storedUri)
+                            when (target.task.outputName.substringAfterLast('.', "").lowercase()) {
+                                "mp3", "wav", "aac", "m4a" -> MediaStore.Audio.Media.getContentUri(
+                                    MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                                    id,
+                                )
+                                else -> MediaStore.Video.Media.getContentUri(
+                                    MediaStore.VOLUME_EXTERNAL_PRIMARY,
+                                    id,
+                                )
+                            }
+                        },
+                    ).intentSender
+                }
+                else -> mediaTargets.firstNotNullOfOrNull { target ->
+                    (target.failure as? RecoverableSecurityException)?.userAction?.actionIntent?.intentSender
+                }
+            }
+        }
+        senderResult.exceptionOrNull()?.let { error ->
+            Log.e(LOG_TAG, "Unable to create MediaStore delete approval for ${mediaTargets.map { it.task.outputUri }}", error)
+        }
+        val sender = senderResult.getOrNull()
+        if (sender == null || mediaTargets.size != targets.size) {
+            _state.update { it.copy(error = "저장 위치의 삭제 권한을 확인하세요.") }
+            return
+        }
+        pendingDeleteApproval = PendingDeleteApproval(rootCandidateId, mediaTargets)
+        deleteApprovalChannel.send(sender)
+    }
+
+    private suspend fun finishDeletedTargets(
+        rootCandidateId: String,
+        targets: List<DeleteTarget>,
+        deletedIds: Set<String>,
+        deletePlaylistFolder: Boolean,
+    ) {
+        if (deletedIds.isEmpty()) return
+        val root = allRows.firstOrNull { it.id == rootCandidateId }
+        targets.filter { it.candidate.id in deletedIds }.forEach { target ->
+            target.task.workId.toUuidOrNull()?.let(workManager::cancelWorkById)
+            wipeWorkDir(target.candidate, target.task.taskKey)
+        }
+        val folderResult = if (root?.kind == RowKind.Playlist && deletePlaylistFolder) {
+            withContext(Dispatchers.IO) { deletePlaylistOutputFolder(root.title) }
+        } else {
+            PlaylistFolderDeleteResult(success = true, removedFolder = false)
+        }
+
+        if (root?.kind == RowKind.Playlist && deletePlaylistFolder && deletedIds.size == targets.size) {
+            remove(root.id)
+        } else {
+            val parentIds = targets.asSequence()
+                .map { it.candidate }
+                .filter { it.id in deletedIds }
+                .map { it.parentId }
+                .filter(String::isNotBlank)
+                .toSet()
+            deletedIds.forEach(::remove)
+            parentIds.forEach(::refreshPlaylistParent)
+        }
+        if (!folderResult.success) {
+            _state.update { it.copy(error = "파일은 삭제했지만 재생목록 폴더를 지우지 못했습니다.") }
+        }
+    }
+
+    private fun mediaUriExists(uri: Uri): Boolean = runCatching {
+        getApplication<Application>().contentResolver.query(
+            uri,
+            arrayOf(MediaStore.MediaColumns._ID),
+            null,
+            null,
+            null,
+        )?.use { it.moveToFirst() } ?: false
+    }.getOrDefault(true)
+
+    private fun deletePlaylistOutputFolder(title: String): PlaylistFolderDeleteResult {
+        val folderName = title
+            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .trim()
+            .trimEnd('.')
+            .take(80)
+        if (folderName.isBlank()) return PlaylistFolderDeleteResult(success = true, removedFolder = false)
+
+        val application = getApplication<Application>()
+        val treeUri = state.value.outputTreeUri.takeIf(String::isNotBlank)
+        if (treeUri != null) {
+            val root = DocumentFile.fromTreeUri(application, treeUri.toUri())
+                ?: return PlaylistFolderDeleteResult(success = false, removedFolder = false)
+            if (root.name == folderName) {
+                return PlaylistFolderDeleteResult(success = true, removedFolder = false)
+            }
+            val playlistFolder = root.findFile(folderName)
+                ?: return PlaylistFolderDeleteResult(success = true, removedFolder = true)
+            val deleted = playlistFolder.isDirectory && playlistFolder.delete()
+            return PlaylistFolderDeleteResult(success = deleted, removedFolder = deleted)
+        }
+
+        val resolver = application.contentResolver
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/ClipFlow/$folderName/"
+        var mediaDeleted = true
+        runCatching {
+            resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                arrayOf(relativePath),
+                null,
+            )?.use { cursor ->
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val uris = buildList {
+                    while (cursor.moveToNext()) {
+                        add(ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cursor.getLong(idColumn)))
+                    }
+                }
+                uris.forEach { uri ->
+                    if (resolver.delete(uri, null, null) <= 0) mediaDeleted = false
+                }
+            }
+        }.onFailure { mediaDeleted = false }
+
+        val folder = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "ClipFlow/$folderName",
+        )
+        val directoryDeleted = !folder.exists() || folder.deleteRecursively()
+        val deleted = mediaDeleted && directoryDeleted
+        return PlaylistFolderDeleteResult(success = deleted, removedFolder = deleted)
+    }
+
+    private fun refreshPlaylistParent(parentId: String) {
+        val childCount = allRows.count {
+            it.parentId == parentId && it.kind == RowKind.PlaylistChild && !it.childLoading && !it.isDerivedDownload
+        }
+        allRows = fillMissingPlaylistThumbnails(allRows.map {
+            if (it.id == parentId && it.kind == RowKind.Playlist) it.copy(itemCount = childCount) else it
+        })
+        recomputeVisible()
         schedulePersist()
+    }
+
+    private fun fillMissingPlaylistThumbnails(rows: List<MediaCandidate>): List<MediaCandidate> {
+        val childThumbnails = rows.asSequence()
+            .filter { it.kind == RowKind.PlaylistChild && it.parentId.isNotBlank() && it.thumbnailUrl.isNotBlank() }
+            .groupBy { it.parentId }
+            .mapValues { (_, children) ->
+                children.minByOrNull { it.playlistIndex }?.thumbnailUrl.orEmpty()
+            }
+        return rows.map { row ->
+            if (row.kind == RowKind.Playlist && row.thumbnailUrl.isBlank()) {
+                row.copy(thumbnailUrl = childThumbnails[row.id].orEmpty())
+            } else {
+                row
+            }
+        }
     }
 
     private fun wipeWorkDir(candidate: MediaCandidate, knownTaskKey: String = "") {
@@ -425,17 +719,38 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
 
     private suspend fun drainAnalysisQueue() {
         while (analysisQueue.isNotEmpty()) {
-            val url = analysisQueue.removeFirst()
+            val request = analysisQueue.removeFirst()
+            val url = request.url
             val remaining = analysisQueue.size
             _state.update {
                 it.copy(
                     analyzing = true,
-                    analysisMessage = if (remaining > 0) "분석 중 · 남은 ${remaining + 1}개" else "영상 정보를 확인하는 중",
+                    analysisMessage = if (remaining > 0) "분석 중 · 남은 ${remaining + 1}개" else "분석 중",
                     analysisQueueRemaining = remaining + 1,
                 )
             }
-            runCatching { withContext(Dispatchers.IO) { analyzeOne(url) } }
-                .onSuccess { Log.i(LOG_TAG, "analyzeOne ok url=$url candidates=${state.value.candidates.size}") }
+            val analysis = runCatching {
+                withContext(Dispatchers.IO) {
+                    analyzeOne(url, request.clipRange) { child ->
+                        if (request.autoDownload) enqueueDownload(child, request.clipRange)
+                    }
+                }
+            }
+            analysis.exceptionOrNull()?.let { error ->
+                if (error is CancellationException) throw error
+            }
+            analysis
+                .onSuccess { analyzedPlaylist ->
+                    Log.i(LOG_TAG, "analyzeOne ok url=$url candidates=${state.value.candidates.size}")
+                    if (request.autoDownload && !analyzedPlaylist) {
+                        allRows.firstOrNull {
+                            it.sourceUrl == url &&
+                                it.kind != RowKind.Playlist &&
+                                !it.childLoading &&
+                                it.formatId !in setOf("loading", "failed")
+                        }?.let { enqueueDownload(it, request.clipRange) }
+                    }
+                }
                 .onFailure { error ->
                     Log.e(LOG_TAG, "analyzeOne failed url=$url: ${error.message}", error)
                     _state.update {
@@ -449,7 +764,11 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         schedulePersist()
     }
 
-    private fun analyzeOne(url: String) {
+    private fun analyzeOne(
+        url: String,
+        clipRange: ClipRange,
+        onPlaylistChildReady: (MediaCandidate) -> Unit,
+    ): Boolean {
         if (analyzer.looksLikePlaylist(url)) {
             val shell = analyzer.analyzePlaylistShell(url)
             val parent = shell.candidates.first().copy(createdOrder = nextOrder())
@@ -485,10 +804,13 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 allRows = allRows + loading
                 recomputeVisible()
                 runCatching {
+                    if (entry.url.isBlank()) {
+                        error("재생할 수 없는 재생목록 항목입니다.")
+                    }
                     val analyzed = analyzer.analyze(entry.url, allowBrowserFallback = true)
                     val preferred = preferredVisibleCandidate(analyzed.candidates, state.value.preferences)
                         ?: analyzed.candidates.first()
-                    val child = preferred.copy(
+                    val baseChild = preferred.copy(
                         id = "${parent.id}-child-${entry.index}-${preferred.formatId}",
                         title = preferred.title.ifBlank { entry.title },
                         kind = RowKind.PlaylistChild,
@@ -497,19 +819,41 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                         createdOrder = loading.createdOrder,
                         childLoading = false,
                         route = analyzed.route,
+                        playlistTitle = parent.title,
                     )
-                    qualityPool[child.id] = analyzed.candidates.map {
-                        it.copy(parentId = parent.id, kind = RowKind.PlaylistChild, playlistIndex = entry.index)
+                    val child = if (clipRange.isSet) {
+                        baseChild.asClipDownload(clipRange, baseChild.id, baseChild.createdOrder)
+                    } else {
+                        baseChild
                     }
-                    allRows = allRows.map { if (it.id == loadingId) child else it }
+                    qualityPool[child.id] = analyzed.candidates.map { quality ->
+                        val childQuality = quality.copy(
+                            parentId = parent.id,
+                            kind = RowKind.PlaylistChild,
+                            playlistIndex = entry.index,
+                            playlistTitle = parent.title,
+                        )
+                        if (clipRange.isSet) {
+                            childQuality.asClipDownload(clipRange, childQuality.id, childQuality.createdOrder)
+                        } else {
+                            childQuality
+                        }
+                    }
+                    allRows = fillMissingPlaylistThumbnails(
+                        allRows.map { if (it.id == loadingId) child else it },
+                    )
                     recomputeVisible()
-                }.onFailure {
+                    onPlaylistChildReady(child)
+                }.onFailure { error ->
                     allRows = allRows.map {
                         if (it.id == loadingId) {
                             it.copy(
                                 childLoading = false,
-                                title = "${entry.title} (실패)",
+                                title = entry.title,
+                                sourceUrl = entry.url.ifBlank { parent.sourceUrl },
                                 formatId = "failed",
+                                playlistTitle = parent.title,
+                                analysisError = error.message ?: "영상 분석에 실패했습니다.",
                             )
                         } else it
                     }
@@ -520,74 +864,39 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 if (it.id == parent.id) it.copy(itemCount = shell.playlistEntries.size) else it
             }
             recomputeVisible()
-            return
+            return true
         }
 
         val result = analyzer.analyze(url)
         val preferred = preferredVisibleCandidate(result.candidates, state.value.preferences)
             ?: result.candidates.first()
-        val row = preferred.copy(
+        val baseRow = preferred.copy(
             id = preferred.id.ifBlank { hash(url) },
             createdOrder = nextOrder(),
             route = result.route,
         )
-        qualityPool[row.id] = result.candidates
+        val row = if (clipRange.isSet) {
+            baseRow.asClipDownload(clipRange, baseRow.id, baseRow.createdOrder)
+        } else {
+            baseRow
+        }
+        qualityPool[row.id] = result.candidates.map { quality ->
+            if (clipRange.isSet) {
+                quality.asClipDownload(clipRange, quality.id, quality.createdOrder)
+            } else {
+                quality
+            }
+        }
         // Replace same source URL single row, otherwise prepend.
         allRows = listOf(row) + allRows.filterNot {
             it.kind != RowKind.PlaylistChild && it.sourceUrl == url
         }
         recomputeVisible(selectId = row.id)
+        return false
     }
 
     private fun enqueueDownload(candidate: MediaCandidate, clipRange: ClipRange = state.value.clipRange) {
         if (candidate.kind == RowKind.Playlist || candidate.childLoading) return
-        // AniLife gcdn tokens expire quickly; always mint a fresh master URL at download time.
-        if (candidate.route == "anilife" || candidate.sourceUrl.contains("anilife.app", ignoreCase = true)) {
-            updateTask(candidate.id) {
-                DownloadTaskState(status = TaskStatus.Queued, detail = "스트림 토큰 갱신 중")
-            }
-            viewModelScope.launch {
-                val refreshed = runCatching {
-                    withContext(Dispatchers.IO) {
-                        analyzer.analyze(candidate.sourceUrl, allowBrowserFallback = false)
-                    }
-                }.getOrElse { error ->
-                    updateTask(candidate.id) {
-                        DownloadTaskState(
-                            status = TaskStatus.Failed,
-                            detail = error.message ?: "AniLife 스트림 갱신 실패",
-                        )
-                    }
-                    schedulePersist()
-                    return@launch
-                }
-                val match = refreshed.candidates
-                    .firstOrNull { it.height == candidate.height && it.mediaUrl.isNotBlank() }
-                    ?: refreshed.candidates.firstOrNull { it.mediaUrl.isNotBlank() }
-                if (match == null) {
-                    updateTask(candidate.id) {
-                        DownloadTaskState(status = TaskStatus.Failed, detail = "AniLife 미디어 URL을 갱신하지 못했습니다.")
-                    }
-                    schedulePersist()
-                    return@launch
-                }
-                val updated = candidate.copy(
-                    mediaUrl = match.mediaUrl,
-                    title = match.title.ifBlank { candidate.title },
-                    thumbnailUrl = match.thumbnailUrl.ifBlank { candidate.thumbnailUrl },
-                    durationSeconds = match.durationSeconds.takeIf { it > 0 } ?: candidate.durationSeconds,
-                    width = match.width.takeIf { it > 0 } ?: candidate.width,
-                    height = match.height.takeIf { it > 0 } ?: candidate.height,
-                    route = "anilife",
-                    isManifest = true,
-                )
-                allRows = allRows.map { if (it.id == candidate.id) updated else it }
-                qualityPool[candidate.id] = refreshed.candidates
-                recomputeVisible(selectId = candidate.id)
-                enqueueDownloadNow(updated, clipRange)
-            }
-            return
-        }
         enqueueDownloadNow(candidate, clipRange)
     }
 
@@ -595,12 +904,12 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
         val current = state.value
         val outputFormat = current.preferences.format.lowercase().ifBlank { "mp4" }
         // Task key ignores volatile media tokens so resume reuses the same work folder.
-        val taskKey = hash("${candidate.sourceUrl}|${candidate.formatSelector}|${candidate.route}|$outputFormat|$clipRange")
+        val taskKey = hash("${candidate.sourceUrl}|${candidate.playlistTitle}|${candidate.formatSelector}|${candidate.route}|$outputFormat|$clipRange")
         // YouTube/ytdlp: always download from the page URL so yt-dlp merges video+audio.
         // Never feed a bare googlevideo progressive/audio URL as "direct".
         val useDirect = !candidate.isYoutubeSource && candidate.mediaUrl.isNotBlank() && (
             candidate.prefersDirectUrl ||
-                candidate.route in setOf("chzzk", "browser", "direct", "anilife") ||
+                candidate.route in setOf("chzzk", "browser", "direct") ||
                 candidate.isManifest
             )
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
@@ -622,6 +931,7 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                     DownloadWorker.KEY_END to (clipRange.endSeconds ?: -1),
                     DownloadWorker.KEY_EXACT_CUT to clipRange.exact,
                     DownloadWorker.KEY_TASK_KEY to taskKey,
+                    DownloadWorker.KEY_PLAYLIST_TITLE to candidate.playlistTitle,
                 ),
             )
             .addTag(DOWNLOAD_TAG)
@@ -679,6 +989,14 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                             .ifBlank { old.outputUri },
                     )
                 }
+                if (status == TaskStatus.Completed) {
+                    applyActualMediaMetadata(
+                        candidateId = candidateId,
+                        sizeBytes = info.outputData.getLong(DownloadWorker.OUTPUT_BYTES, 0L),
+                        durationSeconds = info.outputData.getInt(DownloadWorker.OUTPUT_DURATION_SECONDS, 0),
+                        formatSelector = info.outputData.getString(DownloadWorker.OUTPUT_FORMAT_SELECTOR).orEmpty(),
+                    )
+                }
                 if (info.state.isFinished) {
                     schedulePersist()
                     break
@@ -687,6 +1005,44 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
             }
             observedWorks.remove(workId)
         }
+    }
+
+    private fun applyActualMediaMetadata(
+        candidateId: String,
+        sizeBytes: Long,
+        durationSeconds: Int,
+        formatSelector: String,
+    ) {
+        if (sizeBytes <= 0L && durationSeconds <= 0) return
+        val row = allRows.firstOrNull { it.id == candidateId } ?: return
+        fun corrected(candidate: MediaCandidate): MediaCandidate = candidate.copy(
+            sizeBytes = sizeBytes.takeIf { it > 0 } ?: candidate.sizeBytes,
+            durationSeconds = durationSeconds.takeIf { it > 0 } ?: candidate.durationSeconds,
+        )
+
+        val pool = qualityPool[candidateId]
+        var correctedPoolCandidate = false
+        if (!pool.isNullOrEmpty()) {
+            qualityPool[candidateId] = pool.map { candidate ->
+                val matches = !correctedPoolCandidate && (
+                    candidate.formatSelector == formatSelector ||
+                        formatSelector.isBlank() && pool.size == 1
+                    )
+                if (matches) {
+                    correctedPoolCandidate = true
+                    corrected(candidate)
+                } else {
+                    candidate
+                }
+            }
+        }
+
+        if (row.formatSelector == formatSelector || !correctedPoolCandidate) {
+            allRows = allRows.map { candidate ->
+                if (candidate.id == candidateId) corrected(candidate) else candidate
+            }
+        }
+        recomputeVisible()
     }
 
     private fun observeAuxiliaryWork(workId: UUID) {
@@ -727,11 +1083,30 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                     createdOrder = row.createdOrder,
                     expanded = row.expanded,
                     itemCount = row.itemCount,
+                    playlistTitle = row.playlistTitle,
+                    analysisError = row.analysisError,
                 ) ?: row
             }
         }
-        val sorted = sortCandidates(displayRows, state.value.sort)
         _state.update { current ->
+            val rowsWithPlaylistTotals = displayRows.map { row ->
+                if (row.kind != RowKind.Playlist) return@map row
+                val children = displayRows.filter {
+                    it.parentId == row.id &&
+                        it.kind == RowKind.PlaylistChild &&
+                        !it.isDerivedDownload &&
+                        !it.childLoading &&
+                        it.analysisError.isBlank()
+                }
+                val allDownloaded = row.itemCount > 0 &&
+                    children.size == row.itemCount &&
+                    children.all { child ->
+                        current.tasks[child.id]?.status == TaskStatus.Completed && child.sizeBytes > 0L
+                    }
+                row.copy(sizeBytes = if (allDownloaded) children.sumOf { it.sizeBytes } else 0L)
+            }
+            val sorted = sortCandidates(rowsWithPlaylistTotals, current.sort)
+            val tasks = withPlaylistTaskAggregates(rowsWithPlaylistTotals, current.tasks)
             val selected = when {
                 // Auto-select only the newly analyzed card; never accumulate the whole list.
                 selectId != null -> setOf(selectId)
@@ -741,13 +1116,51 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
                 preferences = preferences,
                 candidates = sorted,
                 selectedIds = selected,
+                tasks = tasks,
             )
         }
     }
 
+    private fun withPlaylistTaskAggregates(
+        rows: List<MediaCandidate>,
+        tasks: Map<String, DownloadTaskState>,
+    ): Map<String, DownloadTaskState> {
+        var result = tasks
+        rows.filter { it.kind == RowKind.Playlist }.forEach { parent ->
+            val children = rows.filter {
+                it.parentId == parent.id && it.kind == RowKind.PlaylistChild && !it.isDerivedDownload &&
+                    !it.childLoading && it.analysisError.isBlank()
+            }
+            val childTasks = children.mapNotNull { tasks[it.id] }
+            val active = childTasks.filter { it.status in ACTIVE_TASK_STATUSES }
+            val completed = childTasks.count { it.status == TaskStatus.Completed }
+            val status = when {
+                active.any { it.status == TaskStatus.Finishing } -> TaskStatus.Finishing
+                active.any { it.status == TaskStatus.Downloading } -> TaskStatus.Downloading
+                active.isNotEmpty() -> TaskStatus.Queued
+                childTasks.any { it.status == TaskStatus.Paused } -> TaskStatus.Paused
+                children.isNotEmpty() && completed == children.size -> TaskStatus.Completed
+                childTasks.any { it.status == TaskStatus.Failed } -> TaskStatus.Failed
+                else -> TaskStatus.Ready
+            }
+            val progress = if (children.isEmpty()) 0 else {
+                children.sumOf { child -> tasks[child.id]?.progress ?: 0 } / children.size
+            }
+            result = result + (
+                parent.id to DownloadTaskState(
+                    status = status,
+                    progress = progress,
+                    detail = if (children.isNotEmpty()) "$completed/${children.size}" else "",
+                    outputUri = childTasks.firstOrNull { it.outputUri.isNotBlank() }?.outputUri.orEmpty(),
+                )
+                )
+        }
+        return result
+    }
+
     private fun restoreSession() {
         val session = sessionStore.load() ?: return
-        allRows = session.candidates
+        allRows = fillMissingPlaylistThumbnails(session.candidates)
         qualityPool.clear()
         qualityPool.putAll(session.qualityPool.filterValues { it.isNotEmpty() })
         // Backward compatibility with sessions written before qualityPool persistence.
@@ -814,7 +1227,8 @@ class ClipFlowViewModel(application: Application) : AndroidViewModel(application
     private fun updateTask(candidateId: String, transform: (DownloadTaskState) -> DownloadTaskState) {
         _state.update { current ->
             val previous = current.tasks[candidateId] ?: DownloadTaskState()
-            current.copy(tasks = current.tasks + (candidateId to transform(previous)))
+            val updated = current.tasks + (candidateId to transform(previous))
+            current.copy(tasks = withPlaylistTaskAggregates(allRows, updated))
         }
     }
 

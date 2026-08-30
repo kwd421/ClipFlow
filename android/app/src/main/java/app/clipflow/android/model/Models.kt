@@ -60,6 +60,10 @@ data class MediaCandidate(
     val childLoading: Boolean = false,
     val route: String = "ytdlp",
     val qualities: List<MediaCandidate> = emptyList(),
+    val playlistTitle: String = "",
+    val analysisError: String = "",
+    val clipRange: ClipRange = ClipRange(),
+    val isDerivedDownload: Boolean = false,
 ) {
     val hasAudio: Boolean get() = audioCodec.isNotBlank() && audioCodec != "none" &&
         !audioCodec.equals("null", true)
@@ -80,8 +84,7 @@ data class MediaCandidate(
             formatId in setOf("direct", "best", "playlist", "loading", "failed") ->
                 "bestvideo*+bestaudio/best/best"
             formatId.startsWith("chzzk") || formatId.startsWith("browser") ||
-                formatId.startsWith("soop") || formatId.startsWith("cime") ||
-                formatId.startsWith("anilife") -> "best"
+                formatId.startsWith("soop") || formatId.startsWith("cime") -> "best"
             // Site is YouTube (or generic ytdlp): merge video+audio when needed.
             isYoutubeSource || route == "ytdlp" -> when {
                 !hasVideo -> "bestvideo*+bestaudio/best/best"
@@ -101,7 +104,7 @@ data class MediaCandidate(
     val prefersDirectUrl: Boolean
         get() = mediaUrl.isNotBlank() && !isManifest && !isYoutubeSource && (
             formatId == "direct" ||
-                route in setOf("chzzk", "browser", "direct", "anilife")
+                route in setOf("chzzk", "browser", "direct")
             )
 }
 
@@ -140,7 +143,7 @@ data class ClipFlowUiState(
     val darkTheme: Boolean = false,
     val outputTreeUri: String = "",
     val outputLabel: String = "다운로드/ClipFlow",
-    val cookieLabel: String = "쿠키 미사용",
+    val cookieLabel: String = "쿠키 자동",
     val cookieEnabled: Boolean = false,
     val updateMessage: String = "",
     val updateUrl: String = "",

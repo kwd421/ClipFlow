@@ -123,6 +123,45 @@ fun formatDuration(seconds: Int): String {
     else "%02d:%02d".format(minutes, remain)
 }
 
+fun MediaCandidate.asClipDownload(range: ClipRange, newId: String, createdOrder: Long): MediaCandidate {
+    val start = (range.startSeconds ?: 0).coerceAtLeast(0)
+    val end = range.endSeconds?.let { requested ->
+        if (durationSeconds > 0) requested.coerceAtMost(durationSeconds) else requested
+    }
+    val normalized = range.copy(startSeconds = range.startSeconds?.coerceAtLeast(0), endSeconds = end)
+    val clipDuration = when {
+        end != null -> (end - start).coerceAtLeast(0)
+        durationSeconds > start -> durationSeconds - start
+        else -> 0
+    }
+    val estimatedSize = if (sizeBytes > 0L && durationSeconds > 0 && clipDuration > 0) {
+        (sizeBytes.toDouble() * clipDuration.coerceAtMost(durationSeconds) / durationSeconds)
+            .toLong()
+            .coerceAtLeast(1L)
+    } else {
+        0L
+    }
+    val endLabel = end?.let(::formatClipTime) ?: "end"
+    val suffix = "[${formatClipTime(start)}-$endLabel]"
+    return copy(
+        id = newId,
+        title = if (title.endsWith(suffix)) title else "$title $suffix".trim(),
+        sizeBytes = estimatedSize,
+        durationSeconds = clipDuration,
+        createdOrder = createdOrder,
+        clipRange = normalized,
+    )
+}
+
+private fun formatClipTime(seconds: Int): String {
+    val safe = seconds.coerceAtLeast(0)
+    val hours = safe / 3600
+    val minutes = safe % 3600 / 60
+    val remain = safe % 60
+    return if (hours > 0) "%02dh%02dm%02ds".format(hours, minutes, remain)
+    else "%02dm%02ds".format(minutes, remain)
+}
+
 fun parseTimecode(value: String): Int? {
     val text = value.trim()
     if (text.isBlank()) return null

@@ -11,7 +11,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import app.clipflow.android.model.MediaCandidate
+import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -28,7 +30,16 @@ class BrowserMediaFallback(
     private val context: Context,
     private val cookieStore: CookieFileStore,
 ) {
-    fun capture(url: String, timeoutSeconds: Long = 45): AnalysisResult {
+    fun capture(
+        url: String,
+        timeoutSeconds: Long = 45,
+        proxyUrl: String? = null,
+    ): AnalysisResult {
+        if (!proxyUrl.isNullOrBlank()) {
+            return WebViewProxyOverride.use(context, proxyUrl) {
+                capture(url, timeoutSeconds, proxyUrl = null)
+            }
+        }
         val mediaUrls = linkedSetOf<String>()
         val titleHolder = AtomicReference("브라우저 캡처")
         val htmlHolder = AtomicReference("")
@@ -168,8 +179,11 @@ class BrowserMediaFallback(
             .takeIf { it.isNotBlank() && it != "브라우저 캡처" }
             ?: titleFromHtml(html)
             ?: "브라우저 캡처"
+        val thumbnail = thumbnailFromHtml(html, url)
+        val pageDuration = durationFromHtml(html)
         val candidates = playable.mapIndexed { index, mediaUrl ->
-            val height = heightFromUrl(mediaUrl)
+            val probe = probeMedia(mediaUrl, url, pageDuration)
+            val height = probe.height.takeIf { it > 0 } ?: heightFromUrl(mediaUrl)
             val isMp4 = mediaUrl.contains(".mp4", ignoreCase = true) && !mediaUrl.contains(".m3u8", true)
             val isManifest = mediaUrl.contains(".m3u8", true) ||
                 mediaUrl.contains(".mpd", true) ||
@@ -180,7 +194,7 @@ class BrowserMediaFallback(
                 mediaUrl = mediaUrl,
                 title = title,
                 uploader = "",
-                thumbnailUrl = "",
+                thumbnailUrl = thumbnail,
                 formatId = "browser-$height",
                 extension = when {
                     isMp4 -> "mp4"
@@ -189,19 +203,47 @@ class BrowserMediaFallback(
                     mediaUrl.contains(".webm", true) -> "webm"
                     else -> "mp4"
                 },
-                width = 0,
+                width = probe.width,
                 height = height,
                 fps = 0,
                 videoCodec = "unknown",
                 audioCodec = "unknown",
                 dynamicRange = "",
-                sizeBytes = 0,
-                durationSeconds = durationFromHtml(html),
+                sizeBytes = probe.sizeBytes,
+                durationSeconds = probe.durationSeconds,
                 isManifest = isManifest,
                 route = "browser",
             )
         }.sortedByDescending { it.height }
         return AnalysisResult(title, candidates, route = "browser")
+    }
+
+    private fun probeMedia(mediaUrl: String, referer: String, pageDuration: Int): MediaProbe {
+        if (!mediaUrl.contains(".m3u8", ignoreCase = true) &&
+            !mediaUrl.contains("/media/hls", ignoreCase = true)
+        ) {
+            return MediaProbe(durationSeconds = pageDuration)
+        }
+        return runCatching {
+            val connection = URL(mediaUrl).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 8_000
+                connection.readTimeout = 8_000
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("User-Agent", DESKTOP_CHROME_UA)
+                connection.setRequestProperty("Referer", referer)
+                connection.setRequestProperty("Accept", "application/vnd.apple.mpegurl, application/x-mpegURL, */*")
+                CookieManager.getInstance().getCookie(mediaUrl)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { connection.setRequestProperty("Cookie", it) }
+                val code = connection.responseCode
+                check(code in 200..299) { "HLS metadata HTTP $code" }
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                hlsProbeFromPlaylist(body, pageDuration)
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrDefault(MediaProbe(durationSeconds = pageDuration))
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -238,6 +280,14 @@ class BrowserMediaFallback(
     }
 
     companion object {
+        data class MediaProbe(
+            val width: Int = 0,
+            val height: Int = 0,
+            val bandwidth: Long = 0L,
+            val sizeBytes: Long = 0L,
+            val durationSeconds: Int = 0,
+        )
+
         // Match desktop Chrome fallback UA — Cloudflare / anime CDNs often reject mobile tokens.
         const val DESKTOP_CHROME_UA =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -309,6 +359,92 @@ class BrowserMediaFallback(
                 }
             }
             return found.toList()
+        }
+
+        fun thumbnailFromHtml(html: String, baseUrl: String): String {
+            if (html.isBlank()) return ""
+            val metaTags = Regex("""<meta\b[^>]*>""", RegexOption.IGNORE_CASE).findAll(html)
+            for (match in metaTags) {
+                val attributes = htmlAttributes(match.value)
+                val key = attributes["property"] ?: attributes["name"] ?: attributes["itemprop"]
+                if (key?.lowercase() in setOf("og:image", "og:image:url", "twitter:image", "twitter:image:src", "thumbnailurl", "thumbnail")) {
+                    resolvePageUrl(baseUrl, attributes["content"].orEmpty()).takeIf { it.isNotBlank() }?.let { return it }
+                }
+            }
+            Regex("""<video\b[^>]*>""", RegexOption.IGNORE_CASE).findAll(html).forEach { match ->
+                resolvePageUrl(baseUrl, htmlAttributes(match.value)["poster"].orEmpty())
+                    .takeIf { it.isNotBlank() }
+                    ?.let { return it }
+            }
+            val jsonImage = Regex(
+                """["'](?:thumbnailUrl|thumbnail_url|poster|image)["']\s*:\s*["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE,
+            ).find(html)?.groupValues?.getOrNull(1).orEmpty()
+            return resolvePageUrl(baseUrl, jsonImage)
+        }
+
+        fun hlsProbeFromPlaylist(body: String, fallbackDurationSeconds: Int): MediaProbe {
+            if (body.isBlank()) return MediaProbe(durationSeconds = fallbackDurationSeconds)
+            val streamLines = body.lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true) }
+                .toList()
+            val best = streamLines.map { line ->
+                val meta = line.substringAfter(':')
+                val averageBandwidth = Regex("""(?:^|,)AVERAGE-BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(meta)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+                val peakBandwidth = Regex("""(?:^|,)BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(meta)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+                val resolution = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE).find(meta)
+                MediaProbe(
+                    width = resolution?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0,
+                    height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 0,
+                    bandwidth = averageBandwidth.takeIf { it > 0 } ?: peakBandwidth,
+                )
+            }.maxByOrNull { probe -> probe.height.toLong() * 10_000_000L + probe.bandwidth }
+
+            val playlistDuration = body.lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("#EXTINF:", ignoreCase = true) }
+                .sumOf { line -> line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0 }
+                .toInt()
+            val duration = fallbackDurationSeconds.takeIf { it > 0 } ?: playlistDuration
+            val byteRangeSize = body.lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("#EXT-X-BYTERANGE:", ignoreCase = true) }
+                .sumOf { line -> line.substringAfter(':').substringBefore('@').toLongOrNull() ?: 0L }
+            val bandwidth = best?.bandwidth ?: 0L
+            val size = when {
+                byteRangeSize > 0L -> byteRangeSize
+                bandwidth > 0L && duration > 0 -> bandwidth * duration / 8L
+                else -> 0L
+            }
+            return MediaProbe(
+                width = best?.width ?: 0,
+                height = best?.height ?: 0,
+                bandwidth = bandwidth,
+                sizeBytes = size,
+                durationSeconds = duration,
+            )
+        }
+
+        private fun htmlAttributes(tag: String): Map<String, String> {
+            return Regex("""([\w:-]+)\s*=\s*(["'])(.*?)\2""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                .findAll(tag)
+                .associate { match ->
+                    match.groupValues[1].lowercase() to html_unescape(match.groupValues[3]).replace("\\/", "/")
+                }
+        }
+
+        private fun resolvePageUrl(baseUrl: String, rawUrl: String): String {
+            val cleaned = html_unescape(rawUrl).replace("\\/", "/").trim()
+            if (cleaned.isBlank() || cleaned.startsWith("data:", ignoreCase = true)) return ""
+            return runCatching {
+                when {
+                    cleaned.startsWith("//") -> "${URI(baseUrl).scheme}:$cleaned"
+                    else -> URI(baseUrl).resolve(cleaned).toString()
+                }
+            }.getOrDefault(cleaned.takeIf { it.startsWith("http") }.orEmpty())
         }
 
         private fun titleFromHtml(html: String): String? {

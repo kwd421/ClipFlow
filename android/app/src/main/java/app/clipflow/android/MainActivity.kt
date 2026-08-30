@@ -1,6 +1,7 @@
 package app.clipflow.android
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -10,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.viewModels
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,6 +36,11 @@ class MainActivity : ComponentActivity() {
                 val notificationPermission = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission(),
                 ) {}
+                val deleteApproval = rememberLauncherForActivityResult(
+                    ActivityResultContracts.StartIntentSenderForResult(),
+                ) { result ->
+                    viewModel.completeDeleteApproval(result.resultCode == Activity.RESULT_OK)
+                }
 
                 LaunchedEffect(Unit) {
                     handleIncomingIntent(intent, viewModel)
@@ -47,14 +54,20 @@ class MainActivity : ComponentActivity() {
                         notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
+                LaunchedEffect(viewModel) {
+                    viewModel.deleteApprovalRequests.collect { sender ->
+                        deleteApproval.launch(IntentSenderRequest.Builder(sender).build())
+                    }
+                }
 
                 ClipFlowScreen(
                     state = state,
                     onUrlChanged = viewModel::setUrl,
-                    onAnalyze = viewModel::analyze,
+                    onAnalyze = viewModel::analyzeAndDownload,
                     onToggleSelected = viewModel::toggleSelected,
                     onSelectOnly = viewModel::selectOnly,
                     onToggleSelectAll = viewModel::toggleSelectAll,
+                    onClearSelection = viewModel::clearSelection,
                     onDownloadSelected = viewModel::downloadSelected,
                     onDownloadSegment = viewModel::downloadSegment,
                     onExtractAudio = viewModel::extractAudio,
@@ -74,7 +87,8 @@ class MainActivity : ComponentActivity() {
                     onToggleSort = viewModel::toggleSort,
                     onToggleDarkTheme = viewModel::setDarkTheme,
                     onTogglePlaylist = viewModel::togglePlaylistExpanded,
-                    onDownloadPlaylist = viewModel::downloadPlaylist,
+                    onResumePlaylist = viewModel::resumePlaylist,
+                    onPausePlaylist = viewModel::pausePlaylist,
                     onDismissUpdate = viewModel::dismissUpdate,
                 )
             }

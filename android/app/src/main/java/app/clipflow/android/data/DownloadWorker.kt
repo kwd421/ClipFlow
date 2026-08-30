@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.MediaMetadataRetriever
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
@@ -27,6 +28,8 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -51,6 +54,7 @@ class DownloadWorker(
         val formatSelector = inputData.getString(KEY_FORMAT).orEmpty().ifBlank { "best" }
         val outputFormat = inputData.getString(KEY_OUTPUT_FORMAT).orEmpty().lowercase().ifBlank { "mp4" }
         val treeUri = inputData.getString(KEY_TREE_URI).orEmpty()
+        val playlistTitle = inputData.getString(KEY_PLAYLIST_TITLE).orEmpty()
         val audioFormat = inputData.getString(KEY_AUDIO_FORMAT).orEmpty().lowercase()
         val concurrency = inputData.getInt(KEY_CONCURRENCY, 16).coerceIn(1, 16)
         if (sourceUrl.isBlank()) return Result.failure(errorData("URL이 비어 있습니다."))
@@ -66,10 +70,19 @@ class DownloadWorker(
             val output = if (
                 audioFormat.isBlank() &&
                 directUrl.isNotBlank() &&
-                clipSection() == null &&
                 (preferDirect || isManifest)
             ) {
                 if (isManifest) {
+                    downloadWithYoutubeDl(
+                        directUrl,
+                        "best",
+                        concurrency,
+                        workDir,
+                        audioFormat,
+                        outputFormat,
+                        referer = referer,
+                    )
+                } else if (clipSection() != null) {
                     downloadWithYoutubeDl(
                         directUrl,
                         "best",
@@ -136,20 +149,24 @@ class DownloadWorker(
             }
             setProgressAsync(workDataOf(PROGRESS to 100, DETAIL to "파일 저장 중", FINISHING to true)).get()
             val sourceBytes = output.length()
-            val (savedName, savedUri) = saveOutput(output, treeUri)
-            try {
+            val sourceDurationSeconds = readDurationSeconds(output)
+            val (savedName, savedUri) = saveOutput(output, treeUri, playlistTitle)
+            val savedBytes = try {
                 verifySavedOutput(savedUri, sourceBytes)
             } catch (error: Throwable) {
                 deleteSavedOutput(savedUri)
                 throw error
             }
+            val durationSeconds = readDurationSeconds(savedUri).takeIf { it > 0 } ?: sourceDurationSeconds
             output.delete()
             runCatching { workDir.deleteRecursively() }
             Result.success(
                 workDataOf(
                     OUTPUT_NAME to savedName,
                     OUTPUT_URI to savedUri,
-                    OUTPUT_BYTES to sourceBytes,
+                    OUTPUT_BYTES to savedBytes,
+                    OUTPUT_DURATION_SECONDS to durationSeconds,
+                    OUTPUT_FORMAT_SELECTOR to formatSelector,
                 ),
             )
         } catch (error: Throwable) {
@@ -191,7 +208,7 @@ class DownloadWorker(
     ): File {
         (applicationContext as ClipFlowApplication).ensureEngine()
         val isHls = looksLikeManifest(sourceUrl)
-        val request = YoutubeDLRequest(sourceUrl).apply {
+        fun buildRequest(proxyUrl: String?): YoutubeDLRequest = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--continue")
@@ -204,7 +221,8 @@ class DownloadWorker(
             // cannot prevent an otherwise valid yt-dlp download.
             addOption("--concurrent-fragments", concurrency.coerceIn(1, 16))
             addOption("--http-chunk-size", "10485760")
-            cookieStore.activeFile()?.let { addOption("--cookies", it.absolutePath) }
+            cookieStore.ytDlpCookieFileFor(sourceUrl)?.let { addOption("--cookies", it.absolutePath) }
+            proxyUrl?.let { addOption("--proxy", it) }
             addOption("--user-agent", BrowserMediaFallback.DESKTOP_CHROME_UA)
             if (referer.isNotBlank()) {
                 addOption("--referer", referer)
@@ -254,10 +272,10 @@ class DownloadWorker(
         val stopTicker = AtomicBoolean(false)
         val ticker = startProgressTicker(workDir, expectedBytes, stopTicker)
         try {
-            val response = YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
+            val callback = { progress: Float, etaInSeconds: Long, line: String ->
                 val parsed = parseProgress(line, progress, expectedBytes, workDir)
                 val percent = maxOf(parsed.percent, progressPercent.get()).coerceIn(0, 100)
-                val etaText = if (etaInSeconds > 0) formatEta(etaInSeconds.toLong()) else parsed.eta
+                val etaText = if (etaInSeconds > 0) formatEta(etaInSeconds) else parsed.eta
                 val detail = progressText(
                     percent = percent,
                     speedText = parsed.speed,
@@ -267,14 +285,32 @@ class DownloadWorker(
                 )
                 publishProgress(percent, detail, percent >= 100 || parsed.finishing)
             }
+            val response = try {
+                YoutubeDL.getInstance().execute(buildRequest(null), processId, callback)
+            } catch (initial: Throwable) {
+                if (!TlsFragmentingProxy.isConnectionTermination(initial)) throw initial
+                publishProgress(progressPercent.get(), "보호 연결로 다시 시도 중", false)
+                try {
+                    YoutubeDL.getInstance().execute(
+                        buildRequest(TlsFragmentingProxy.endpoint(applicationContext)),
+                        processId,
+                        callback,
+                    )
+                } catch (retry: Throwable) {
+                    retry.addSuppressed(initial)
+                    throw retry
+                }
+            }
             val marked = response.out.lineSequence()
                 .lastOrNull { it.startsWith(FILE_MARKER) }
                 ?.removePrefix(FILE_MARKER)
                 ?.trim()
                 ?.let(::File)
                 ?.takeIf { it.isFile && it.length() > 0 }
-            if (marked != null) return marked
-            findFinishedMedia(workDir, audioFormat)?.let { return it }
+            val completed = marked ?: findFinishedMedia(workDir, audioFormat)
+            if (completed != null) {
+                return remuxHlsToMp4IfNeeded(completed, isHls, outputFormat, audioFormat)
+            }
             val errTail = response.out.lineSequence()
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
@@ -296,6 +332,72 @@ class DownloadWorker(
             ticker.interrupt()
             runCatching { ticker.join(800) }
         }
+    }
+
+    private fun remuxHlsToMp4IfNeeded(
+        source: File,
+        isHls: Boolean,
+        outputFormat: String,
+        audioFormat: String,
+    ): File {
+        if (!isHls || outputFormat != "mp4" || audioFormat.isNotBlank()) return source
+
+        publishProgress(100, "MP4 마무리 중", true)
+        val nativeDir = applicationContext.applicationInfo.nativeLibraryDir
+        val packages = File(applicationContext.noBackupFilesDir, "youtubedl-android/packages")
+        val pythonLib = File(packages, "python/usr/lib")
+        val ffmpegLib = File(packages, "ffmpeg/usr/lib")
+        val ffmpeg = File(nativeDir, "libffmpeg.so")
+        check(ffmpeg.isFile) { "번들 FFmpeg를 찾지 못했습니다." }
+
+        val target = File(source.parentFile, "${source.nameWithoutExtension}.mp4")
+        val temporary = File(source.parentFile, ".${source.nameWithoutExtension}.remux.mp4")
+        temporary.delete()
+        val process = ProcessBuilder(
+            ffmpeg.absolutePath,
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            source.absolutePath,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            temporary.absolutePath,
+        ).redirectErrorStream(true).apply {
+            environment()["LD_LIBRARY_PATH"] = listOf(pythonLib, ffmpegLib)
+                .joinToString(":") { it.absolutePath }
+        }.start()
+        val log = StringBuilder()
+        val reader = thread(name = "clipflow-ffmpeg-log", isDaemon = true) {
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (log.length < 8_192) log.appendLine(line)
+                }
+            }
+        }
+        while (process.isAlive) {
+            if (isStopped) {
+                process.destroyForcibly()
+                reader.join(1_000)
+                temporary.delete()
+                error("일시정지됨")
+            }
+            Thread.sleep(100)
+        }
+        reader.join(1_000)
+        check(process.exitValue() == 0 && temporary.isFile && temporary.length() > 0L) {
+            log.toString().trim().ifBlank { "MP4 컨테이너 변환에 실패했습니다." }
+        }
+        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        if (source.absolutePath != target.absolutePath) source.delete()
+        return target
     }
 
     private fun startProgressTicker(
@@ -466,7 +568,7 @@ class DownloadWorker(
         val part = File(workDir, "$stem.$sourceExtension.part")
         val output = File(workDir, "$stem.$sourceExtension")
         val existing = part.length()
-        val connection = (url.openConnection() as HttpURLConnection).apply {
+        fun configure(connection: HttpURLConnection) = connection.apply {
             instanceFollowRedirects = true
             connectTimeout = 15_000
             readTimeout = 30_000
@@ -492,7 +594,21 @@ class DownloadWorker(
                 setRequestProperty("Cookie", it)
             }
             if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
-            connect()
+        }
+        var regular: HttpURLConnection? = null
+        val connection = try {
+            (url.openConnection() as HttpURLConnection).also {
+                regular = it
+                configure(it).connect()
+                it.responseCode
+            }
+        } catch (initial: Throwable) {
+            regular?.disconnect()
+            if (!TlsFragmentingProxy.isConnectionTermination(initial) || !mediaUrl.startsWith("https://")) {
+                throw initial
+            }
+            publishProgress(progressPercent.get(), "보호 연결로 다시 시도 중", false)
+            HttpsHostRouting.connect(mediaUrl) { configure(it) }
         }
         if (connection.responseCode !in 200..299) {
             val code = connection.responseCode
@@ -603,6 +719,7 @@ class DownloadWorker(
     }
 
     private fun publishProgress(percent: Int, detail: String, finishing: Boolean) {
+        if (!finishing && progressFinishing.get()) return
         val next = percent.coerceIn(0, 100)
         val merged = if (finishing) next else maxOf(next, progressPercent.get())
         progressPercent.set(merged)
@@ -613,14 +730,22 @@ class DownloadWorker(
         setForegroundAsync(notificationInfo(merged, detail))
     }
 
-    private fun saveOutput(source: File, treeUri: String): Pair<String, String> {
+    private fun saveOutput(source: File, treeUri: String, playlistTitle: String): Pair<String, String> {
         val extension = source.extension.lowercase().ifBlank { "mp4" }
         val mimeType = mimeTypeFor(extension)
         val displayName = source.nameWithoutExtension + ".$extension"
+        val playlistFolder = safeFolderName(playlistTitle)
         if (treeUri.isNotBlank()) {
             val root = DocumentFile.fromTreeUri(applicationContext, treeUri.toUri())
                 ?: error("선택한 저장 폴더를 열 수 없습니다.")
-            val target = root.createFile(mimeType, displayName)
+            val outputDir = if (playlistFolder.isBlank() || root.name == playlistFolder) {
+                root
+            } else {
+                root.findFile(playlistFolder)?.takeIf { it.isDirectory }
+                    ?: root.createDirectory(playlistFolder)
+                    ?: error("재생목록 폴더를 만들 수 없습니다.")
+            }
+            val target = outputDir.createFile(mimeType, displayName)
                 ?: error("선택한 폴더에 파일을 만들 수 없습니다.")
             val stream = applicationContext.contentResolver.openOutputStream(target.uri, "w")
                 ?: error("선택한 폴더의 출력 스트림을 열 수 없습니다.")
@@ -633,7 +758,11 @@ class DownloadWorker(
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ClipFlow")
+            put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + "/ClipFlow" +
+                    (if (playlistFolder.isNotBlank()) "/$playlistFolder" else ""),
+            )
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val resolver = applicationContext.contentResolver
@@ -657,7 +786,13 @@ class DownloadWorker(
         return displayName to uri.toString()
     }
 
-    private fun verifySavedOutput(savedUri: String, sourceBytes: Long) {
+    private fun safeFolderName(value: String): String = value
+        .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        .trim()
+        .trimEnd('.')
+        .take(80)
+
+    private fun verifySavedOutput(savedUri: String, sourceBytes: Long): Long {
         val uri = savedUri.toUri()
         val resolver = applicationContext.contentResolver
         val descriptorLength = resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
@@ -673,6 +808,7 @@ class DownloadWorker(
         if (sourceBytes > 0L && descriptorLength > 0L && descriptorLength < sourceBytes) {
             error("저장된 파일이 완전하지 않습니다. (${descriptorLength}/${sourceBytes} bytes)")
         }
+        return descriptorLength.takeIf { it > 0L } ?: sourceBytes
     }
 
     private fun deleteSavedOutput(savedUri: String) {
@@ -725,6 +861,36 @@ class DownloadWorker(
 
     private fun errorData(message: String): Data = workDataOf(ERROR to message.take(500))
 
+    private fun readDurationSeconds(file: File): Int {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: return 0
+            ((durationMs + 500L) / 1000L).toInt().coerceAtLeast(0)
+        } catch (_: Throwable) {
+            0
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun readDurationSeconds(uriText: String): Int {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(applicationContext, uriText.toUri())
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: return 0
+            ((durationMs + 500L) / 1000L).toInt().coerceAtLeast(0)
+        } catch (_: Throwable) {
+            0
+        } finally {
+            retriever.release()
+        }
+    }
+
     private fun hash(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
@@ -745,6 +911,7 @@ class DownloadWorker(
         const val KEY_AUDIO_FORMAT = "audio_format"
         const val KEY_TASK_KEY = "task_key"
         const val KEY_TITLE = "title"
+        const val KEY_PLAYLIST_TITLE = "playlist_title"
         const val KEY_EXPECTED_BYTES = "expected_bytes"
         const val PROGRESS = "progress"
         const val DETAIL = "detail"
@@ -752,6 +919,8 @@ class DownloadWorker(
         const val OUTPUT_NAME = "output_name"
         const val OUTPUT_URI = "output_uri"
         const val OUTPUT_BYTES = "output_bytes"
+        const val OUTPUT_DURATION_SECONDS = "output_duration_seconds"
+        const val OUTPUT_FORMAT_SELECTOR = "output_format_selector"
         const val ERROR = "error"
         private const val FILE_MARKER = "__CLIPFLOW_FILE__"
         private const val CHANNEL_ID = "clipflow_downloads"

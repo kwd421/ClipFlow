@@ -75,11 +75,57 @@ class CookieFileStoreTest {
     }
 
     @Test
+    fun automaticCookiesOverrideImportedCookiesByName() {
+        assertEquals(
+            "session=new; preference=compact; challenge=passed",
+            mergeCookieHeaders(
+                "session=old; preference=compact",
+                "session=new; challenge=passed",
+            ),
+        )
+    }
+
+    @Test
+    fun netscapeSerializationRoundTripsCookieValues() {
+        val cookies = listOf(
+            NetscapeCookie("example.com", false, "/", true, 0, "session", "a=b=c"),
+            NetscapeCookie(".example.com", true, "/video", false, 2_000_000_000, "quality", "high", true),
+        )
+
+        assertEquals(cookies, parseNetscapeCookies(serializeNetscapeCookies(cookies)))
+    }
+
+    @Test
     fun browserMediaHeightParsing() {
         assertEquals(1080, BrowserMediaFallback.heightFromUrl("https://cdn.example/hls/1080p/index.m3u8"))
         assertEquals(720, BrowserMediaFallback.heightFromUrl("https://cdn.example/720/master.m3u8"))
         assertTrue(BrowserMediaFallback.looksLikeMedia("https://x/a.mp4"))
         assertTrue(!BrowserMediaFallback.looksLikeMedia("https://x/page.html"))
+    }
+
+    @Test
+    fun browserFallbackExtractsThumbnailAndHlsEstimate() {
+        val html = """
+            <meta content="//cdn.example/thumb.jpg" property="og:image">
+            <video poster="/fallback.jpg"></video>
+        """.trimIndent()
+        assertEquals(
+            "https://cdn.example/thumb.jpg",
+            BrowserMediaFallback.thumbnailFromHtml(html, "https://www.example.com/watch/1"),
+        )
+
+        val probe = BrowserMediaFallback.hlsProbeFromPlaylist(
+            """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=3858705,RESOLUTION=1920x1080
+            index.m3u8
+            """.trimIndent(),
+            fallbackDurationSeconds = 850,
+        )
+        assertEquals(1920, probe.width)
+        assertEquals(1080, probe.height)
+        assertEquals(409_987_406L, probe.sizeBytes)
+        assertEquals(850, probe.durationSeconds)
     }
 
     @Test

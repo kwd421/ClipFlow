@@ -100,6 +100,26 @@ class CandidateSelectorTest {
     }
 
     @Test
+    fun clipDownloadKeepsSourceCardMetadataSeparate() {
+        val source = candidate("source", 1080, size = 1_200, title = "Video")
+            .copy(durationSeconds = 120)
+
+        val clip = source.asClipDownload(
+            range = ClipRange(startSeconds = 10, endSeconds = 20, exact = true),
+            newId = "clip",
+            createdOrder = 2,
+        )
+
+        assertEquals("source", source.id)
+        assertEquals("Video", source.title)
+        assertEquals("clip", clip.id)
+        assertEquals("Video [00m10s-00m20s]", clip.title)
+        assertEquals(10, clip.durationSeconds)
+        assertEquals(100, clip.sizeBytes)
+        assertEquals(ClipRange(10, 20, exact = true), clip.clipRange)
+    }
+
+    @Test
     fun nameSortIsAlphabeticalNotJustReversed() {
         val rows = listOf(
             candidate("a", 720, title = "Charlie", createdOrder = 1),

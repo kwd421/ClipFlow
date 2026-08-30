@@ -41,11 +41,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
@@ -68,7 +70,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -90,11 +91,14 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -143,9 +147,9 @@ import coil3.request.crossfade
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.foundation.layout.offset
 import android.content.Intent
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -156,6 +160,7 @@ fun ClipFlowScreen(
     onToggleSelected: (String) -> Unit,
     onSelectOnly: (String) -> Unit,
     onToggleSelectAll: () -> Unit,
+    onClearSelection: () -> Unit,
     onDownloadSelected: () -> Unit,
     onDownloadSegment: (MediaCandidate, ClipRange) -> Unit,
     onExtractAudio: (MediaCandidate, String) -> Unit,
@@ -175,12 +180,14 @@ fun ClipFlowScreen(
     onToggleSort: () -> Unit,
     onToggleDarkTheme: (Boolean) -> Unit,
     onTogglePlaylist: (String) -> Unit,
-    onDownloadPlaylist: (String) -> Unit,
+    onResumePlaylist: (String) -> Unit,
+    onPausePlaylist: (String) -> Unit,
     onDismissUpdate: () -> Unit,
 ) {
     var showOptions by remember { mutableStateOf(false) }
     var showClipRange by remember { mutableStateOf(false) }
     var showDeleteSelectedConfirmation by remember { mutableStateOf(false) }
+    var pendingRemoveSelectedIds by remember { mutableStateOf<List<String>>(emptyList()) }
     var deleteCandidateId by remember { mutableStateOf<String?>(null) }
     var segmentExtractCandidate by remember { mutableStateOf<MediaCandidate?>(null) }
     var actionCandidate by remember { mutableStateOf<MediaCandidate?>(null) }
@@ -202,6 +209,7 @@ fun ClipFlowScreen(
     }
     BackHandler(enabled = selectionMode && !searchExpanded) {
         selectionMode = false
+        onClearSelection()
     }
 
     if (state.error.isNotBlank()) {
@@ -212,10 +220,42 @@ fun ClipFlowScreen(
             text = { Text(state.error) },
         )
     }
-    val selectedOutputIds = state.selectedIds.filter { candidateId ->
+    val candidatesById = state.candidates.associateBy { it.id }
+    val selectedActionIds = state.selectedIds.filter { candidateId ->
+        val parentId = candidatesById[candidateId]?.parentId.orEmpty()
+        parentId.isBlank() || parentId !in state.selectedIds
+    }
+    val selectedOutputIds = selectedActionIds.filter { candidateId ->
         state.tasks[candidateId]?.let { task ->
             task.status == TaskStatus.Completed && task.outputUri.isNotBlank()
         } == true
+    }
+    if (pendingRemoveSelectedIds.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { pendingRemoveSelectedIds = emptyList() },
+            title = { Text("목록에서 제거", color = colors.ink, fontWeight = FontWeight.Bold) },
+            text = { Text("선택한 ${pendingRemoveSelectedIds.size}개 항목을 목록에서 제거하시겠습니까?\n저장된 파일은 삭제되지 않습니다.") },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { pendingRemoveSelectedIds = emptyList() },
+                    border = BorderStroke(1.5.dp, colors.strongBorder),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("취소", color = colors.ink) }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingRemoveSelectedIds.forEach(onRemove)
+                        pendingRemoveSelectedIds = emptyList()
+                        selectionMode = false
+                        onClearSelection()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("제거") }
+            },
+            containerColor = colors.raised,
+        )
     }
     if (showDeleteSelectedConfirmation) {
         AlertDialog(
@@ -234,6 +274,8 @@ fun ClipFlowScreen(
                     onClick = {
                         selectedOutputIds.forEach(onDeleteFile)
                         showDeleteSelectedConfirmation = false
+                        selectionMode = false
+                        onClearSelection()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = colors.danger),
                     shape = RoundedCornerShape(8.dp),
@@ -243,10 +285,16 @@ fun ClipFlowScreen(
         )
     }
     deleteCandidateId?.let { candidateId ->
+        val deletingPlaylist = state.candidates.firstOrNull { it.id == candidateId }?.kind == RowKind.Playlist
         AlertDialog(
             onDismissRequest = { deleteCandidateId = null },
             title = { Text("파일 삭제", color = colors.ink, fontWeight = FontWeight.Bold) },
-            text = { Text("다운로드된 파일을 삭제하시겠습니까?") },
+            text = {
+                Text(
+                    if (deletingPlaylist) "재생목록의 다운로드된 파일을 모두 삭제하시겠습니까?"
+                    else "다운로드된 파일을 삭제하시겠습니까?",
+                )
+            },
             dismissButton = {
                 OutlinedButton(
                     onClick = { deleteCandidateId = null },
@@ -407,10 +455,11 @@ fun ClipFlowScreen(
                 searchExpanded = searchExpanded,
                 searchQuery = searchQuery,
                 onToggleSelectAll = onToggleSelectAll,
-                onExitSelectionMode = { selectionMode = false },
-                onRemoveSelected = {
-                    state.selectedIds.toList().forEach(onRemove)
+                onExitSelectionMode = {
+                    selectionMode = false
+                    onClearSelection()
                 },
+                onRemoveSelected = { pendingRemoveSelectedIds = selectedActionIds },
                 canDeleteSelectedFiles = selectedOutputIds.isNotEmpty(),
                 onDeleteSelectedFiles = { showDeleteSelectedConfirmation = true },
                 onSearchExpanded = { searchExpanded = it },
@@ -422,60 +471,90 @@ fun ClipFlowScreen(
 
             val rows = state.candidates
                 .filter { searchQuery.isBlank() || it.title.contains(searchQuery, ignoreCase = true) }
-            Box(Modifier.weight(1f)) {
+            val listState = rememberLazyListState()
+            val listScope = rememberCoroutineScope()
+            val stickyPlaylist by remember(rows) {
+                derivedStateOf {
+                    val visibleKeys = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }
+                    val visibleRows = visibleKeys.mapNotNull { key -> rows.firstOrNull { it.id == key } }
+                    val firstVisibleRow = visibleRows.firstOrNull()
+                    val parentId = firstVisibleRow
+                        ?.takeIf { it.kind == RowKind.PlaylistChild }
+                        ?.parentId
+                        .orEmpty()
+                    rows.firstOrNull {
+                        parentId.isNotBlank() &&
+                            it.id == parentId &&
+                            it.kind == RowKind.Playlist &&
+                            it.expanded &&
+                            it.id !in visibleKeys
+                    }
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(rows, key = MediaCandidate::id) { candidate ->
+                    if (state.analyzing) {
+                        item(key = "__analyzing__") {
+                            AnalysisLoadingCard(
+                                url = state.url.lineSequence().firstOrNull { it.trim().startsWith("http") }.orEmpty(),
+                                message = state.analysisMessage.ifBlank { "분석 중" },
+                            )
+                        }
+                    }
+                    itemsIndexed(rows, key = { _, candidate -> candidate.id }) { _, candidate ->
                         CandidateCard(
                             candidate = candidate,
                             selectionMode = selectionMode,
                             selected = candidate.id in state.selectedIds,
                             task = state.tasks[candidate.id],
                             onToggleSelected = { onToggleSelected(candidate.id) },
+                            onShowActions = { actionCandidate = candidate },
+                            onEnterSelection = {
+                                selectionMode = true
+                                onSelectOnly(candidate.id)
+                            },
                             onPause = { onPause(candidate.id) },
                             onResume = { onResume(candidate) },
                             onRemove = { onRemove(candidate.id) },
                             onDeleteFile = { deleteCandidateId = candidate.id },
-                            onLongPress = { actionCandidate = candidate },
                             onTogglePlaylist = { onTogglePlaylist(candidate.id) },
-                            onDownloadPlaylist = { onDownloadPlaylist(candidate.id) },
+                            onResumePlaylist = { onResumePlaylist(candidate.id) },
+                            onPausePlaylist = { onPausePlaylist(candidate.id) },
                         )
                     }
                 }
-                if (state.analyzing) {
-                    // Desktop-style analyzing card: track + rotating dash ring (not a dead border).
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                            .height(72.dp),
-                    ) {
-                        Surface(
-                            color = colors.raised,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.4.dp, colors.strongBorder.copy(alpha = 0.28f)),
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    state.analysisMessage.ifBlank { "영상 정보를 확인하는 중" },
-                                    color = colors.muted,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 13.sp,
-                                )
+                stickyPlaylist?.let { playlist ->
+                    val playlistIndex = rows.indexOfFirst { it.id == playlist.id }
+                    val analyzingOffset = if (state.analyzing) 1 else 0
+                    OutlinedButton(
+                        onClick = {
+                            onTogglePlaylist(playlist.id)
+                            if (playlistIndex >= 0) {
+                                listScope.launch {
+                                    // Wait for the collapsed list to replace its child rows.
+                                    withFrameNanos { }
+                                    withFrameNanos { }
+                                    listState.animateScrollToItem(playlistIndex + analyzingOffset)
+                                }
                             }
-                        }
-                        CardProgressRing(
-                            progress = 0,
-                            trackColor = colors.accentTint,
-                            progressColor = colors.accent,
-                            indeterminate = true,
-                            modifier = Modifier.matchParentSize(),
-                        )
+                        },
+                        border = BorderStroke(1.5.dp, colors.strongBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = colors.raised),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(horizontal = 12.dp)
+                            .fillMaxWidth()
+                            .height(48.dp),
+                    ) {
+                        Icon(Icons.Default.ExpandLess, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("재생목록 접기", color = colors.ink, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -511,6 +590,7 @@ private fun TooltipIconButton(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun InputPanel(
     state: ClipFlowUiState,
@@ -578,14 +658,10 @@ private fun InputPanel(
                 colors = ButtonDefaults.buttonColors(containerColor = colors.ink),
                 modifier = Modifier.size(56.dp),
             ) {
-                if (state.analyzing) {
-                    CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-                } else {
-                    Icon(
-                        Icons.Default.Download,
-                        contentDescription = if (showingCurrentAnalysis) "다운로드" else "분석",
-                    )
-                }
+                Icon(
+                    Icons.Default.Download,
+                    contentDescription = if (showingCurrentAnalysis) "다운로드" else "분석 후 다운로드",
+                )
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -629,45 +705,29 @@ private fun InputPanel(
                     }
                 }
             }
-        }
-        Surface(
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.5.dp, if (state.cookieEnabled) colors.accent else colors.strongBorder),
-            color = colors.raised,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-        ) {
-            Row(
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.5.dp, if (state.cookieEnabled) colors.accent else colors.strongBorder),
+                color = colors.raised,
                 modifier = Modifier
-                    .fillMaxHeight()
-                    .padding(start = 12.dp)
-                    .clickable(onClick = onCookieFile),
-                verticalAlignment = Alignment.CenterVertically,
+                    .size(48.dp)
+                    .combinedClickable(
+                        onClick = onCookieFile,
+                        onLongClick = onClearCookieFile.takeIf { state.cookieEnabled },
+                        onLongClickLabel = "자동 쿠키 사용",
+                    ),
             ) {
-                Icon(
-                    Icons.Default.Cookie,
-                    contentDescription = null,
-                    tint = if (state.cookieEnabled) colors.accent else colors.ink,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    state.cookieLabel,
-                    color = if (state.cookieEnabled) colors.ink else colors.muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (state.cookieEnabled) {
-                    TooltipIconButton(
-                        Icons.Default.Clear,
-                        "쿠키 사용 해제",
-                        iconSize = 18.dp,
-                        onClick = onClearCookieFile,
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Default.Cookie,
+                        contentDescription = if (state.cookieEnabled) {
+                            "${state.cookieLabel} 사용 중"
+                        } else {
+                            "쿠키 파일 선택"
+                        },
+                        tint = if (state.cookieEnabled) colors.accent else colors.ink,
+                        modifier = Modifier.size(20.dp),
                     )
-                } else {
-                    Spacer(Modifier.width(12.dp))
                 }
             }
         }
@@ -708,7 +768,7 @@ private fun ListToolbar(
     ) {
         if (selectionMode) {
             TooltipIconButton(
-                icon = Icons.Default.Clear,
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
                 label = "선택 모드 종료",
                 onClick = onExitSelectionMode,
             )
@@ -772,6 +832,67 @@ private fun ListToolbar(
     }
 }
 
+@Composable
+private fun AnalysisLoadingCard(url: String, message: String) {
+    val colors = clipPalette()
+    Box(Modifier.fillMaxWidth()) {
+        Surface(
+            color = colors.raised,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.4.dp, colors.strongBorder.copy(alpha = 0.28f)),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 96.dp, height = 54.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(colors.thumbPlaceholder),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = url,
+                        color = colors.ink,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        lineHeight = 18.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        MetaIconText(Icons.Default.AccessTime, "--:--", colors.muted)
+                        MetaIconText(Icons.Default.Download, "0.0 MB", colors.muted)
+                    }
+                    Text(
+                        text = message,
+                        color = colors.accent,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        CardProgressRing(
+            progress = 0,
+            trackColor = colors.accentTint,
+            progressColor = colors.accent,
+            indeterminate = true,
+            modifier = Modifier.matchParentSize(),
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CandidateCard(
@@ -780,55 +901,70 @@ private fun CandidateCard(
     selected: Boolean,
     task: DownloadTaskState?,
     onToggleSelected: () -> Unit,
+    onShowActions: () -> Unit,
+    onEnterSelection: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onRemove: () -> Unit,
     onDeleteFile: () -> Unit,
-    onLongPress: () -> Unit,
     onTogglePlaylist: () -> Unit,
-    onDownloadPlaylist: () -> Unit,
+    onResumePlaylist: () -> Unit,
+    onPausePlaylist: () -> Unit,
 ) {
     val colors = clipPalette()
     val status = task?.status ?: TaskStatus.Ready
+    val analysisFailed = candidate.formatId == "failed"
     val active = status in setOf(TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing)
     val progress = (task?.progress ?: 0).coerceIn(0, 100)
     val detail = task?.detail.orEmpty()
     // Desktop clipflow_rows: fixed ~1.4dp stroke; progress is a partial perimeter path.
-    val trackColor = when (status) {
-        TaskStatus.Failed -> colors.danger
-        TaskStatus.Completed -> colors.strongBorder
-        TaskStatus.Paused -> colors.muted
-        TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing -> colors.accentTint
-        else -> colors.strongBorder
+    val trackColor = when {
+        analysisFailed -> colors.danger
+        else -> when (status) {
+            TaskStatus.Failed -> colors.danger
+            TaskStatus.Completed -> colors.strongBorder
+            TaskStatus.Paused -> colors.muted
+            TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing -> colors.accentTint
+            else -> colors.strongBorder
+        }
     }
-    val progressColor = when (status) {
-        TaskStatus.Finishing -> colors.accent
-        TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
-        TaskStatus.Failed -> colors.danger
-        TaskStatus.Completed -> colors.strongBorder
-        else -> colors.accent
+    val progressColor = when {
+        analysisFailed -> colors.danger
+        else -> when (status) {
+            TaskStatus.Finishing -> colors.accent
+            TaskStatus.Downloading, TaskStatus.Queued -> colors.accent
+            TaskStatus.Failed -> colors.danger
+            TaskStatus.Completed -> colors.strongBorder
+            else -> colors.accent
+        }
     }
-    val ringProgress = when (status) {
-        TaskStatus.Completed, TaskStatus.Failed -> 100
-        TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing, TaskStatus.Paused -> progress
-        else -> 0
+    val ringProgress = when {
+        analysisFailed -> 100
+        else -> when (status) {
+            TaskStatus.Completed, TaskStatus.Failed -> 100
+            TaskStatus.Downloading, TaskStatus.Queued, TaskStatus.Finishing, TaskStatus.Paused -> progress
+            else -> 0
+        }
     }
     // Desktop: indeterminate dash ring while analyzing/starting/finishing;
     // determinate perimeter fill while downloading; full graphite when completed.
-    val showRing = status != TaskStatus.Ready || active
+    val showRing = analysisFailed || status != TaskStatus.Ready || active
     val indeterminateRing = status == TaskStatus.Queued || status == TaskStatus.Finishing
 
-    val statusLine = when (status) {
-        TaskStatus.Failed -> detail.takeIf { it.isNotBlank() && it != "다운로드 실패" } ?: "실패"
-        TaskStatus.Paused -> "일시정지"
-        TaskStatus.Finishing -> detail.ifBlank { "마무리 중" }
-        TaskStatus.Downloading -> when {
-            detail.isNotBlank() && detail != "대기 중" -> detail
-            progress > 0 -> "$progress%"
-            else -> "다운로드 중"
+    val statusLine = when {
+        analysisFailed -> candidate.analysisError.ifBlank { "분석 실패" }
+        else -> when (status) {
+            TaskStatus.Failed -> detail.takeIf { it.isNotBlank() && it != "다운로드 실패" } ?: "실패"
+            TaskStatus.Paused -> "일시정지"
+            TaskStatus.Finishing -> detail.ifBlank { "마무리 중" }
+            TaskStatus.Downloading -> when {
+                detail.isNotBlank() && detail != "대기 중" -> detail
+                progress > 0 -> "$progress%"
+                else -> "다운로드 중"
+            }
+            TaskStatus.Queued -> detail.ifBlank { "대기 중" }
+            else -> ""
         }
-        TaskStatus.Queued -> detail.ifBlank { "대기 중" }
-        else -> ""
     }
     val showStatusLine = statusLine.isNotBlank()
     val context = LocalContext.current
@@ -840,7 +976,7 @@ private fun CandidateCard(
             val referer = runCatching {
                 val uri = Uri.parse(candidate.sourceUrl)
                 "${uri.scheme}://${uri.host}/"
-            }.getOrDefault("https://anilife.app/")
+            }.getOrDefault(candidate.sourceUrl)
             ImageRequest.Builder(context)
                 .data(thumb)
                 .crossfade(true)
@@ -859,10 +995,23 @@ private fun CandidateCard(
 
     Box(
         modifier = Modifier
+            .padding(start = if (candidate.kind == RowKind.PlaylistChild) 16.dp else 0.dp)
             .fillMaxWidth()
             .combinedClickable(
-                onClick = { if (selectionMode) onToggleSelected() },
-                onLongClick = onLongPress,
+                onClick = {
+                    when {
+                        selectionMode -> onToggleSelected()
+                        candidate.kind == RowKind.Playlist -> onTogglePlaylist()
+                        else -> onShowActions()
+                    }
+                },
+                onLongClick = {
+                    when {
+                        candidate.kind == RowKind.Playlist -> onShowActions()
+                        selectionMode -> onToggleSelected()
+                        else -> onEnterSelection()
+                    }
+                },
             ),
     ) {
         Surface(
@@ -953,7 +1102,7 @@ private fun CandidateCard(
                     if (showStatusLine) {
                         Text(
                             statusLine,
-                            color = if (status == TaskStatus.Failed) colors.danger else colors.accent,
+                            color = if (analysisFailed || status == TaskStatus.Failed) colors.danger else colors.accent,
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -967,16 +1116,25 @@ private fun CandidateCard(
                         iconSize = 20.dp,
                         onClick = onTogglePlaylist,
                     )
-                    TooltipIconButton(
-                        Icons.Default.PlaylistPlay,
-                        "재생목록 일괄 다운로드",
-                        iconSize = 20.dp,
-                        onClick = onDownloadPlaylist,
-                    )
+                    if (active) {
+                        TooltipIconButton(
+                            Icons.Default.Pause,
+                            "일괄 일시정지",
+                            iconSize = 20.dp,
+                            onClick = onPausePlaylist,
+                        )
+                    } else if (status == TaskStatus.Paused || status == TaskStatus.Failed) {
+                        TooltipIconButton(
+                            Icons.Default.PlayArrow,
+                            "재생목록 이어받기",
+                            iconSize = 20.dp,
+                            onClick = onResumePlaylist,
+                        )
+                    }
                 }
                 // Desktop clipflow_rows._refresh_actions:
                 // downloading → pause only; paused/failed → resume + remove/delete.
-                when (status) {
+                if (candidate.kind != RowKind.Playlist) when (status) {
                     TaskStatus.Queued, TaskStatus.Downloading, TaskStatus.Finishing -> {
                         TooltipIconButton(Icons.Default.Pause, "일시정지", iconSize = 20.dp, onClick = onPause)
                     }
@@ -1031,7 +1189,7 @@ private fun CardProgressRing(
             initialValue = 0f,
             targetValue = 4f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 900, easing = LinearEasing),
+                animation = tween(durationMillis = 2_200, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart,
             ),
             label = "ring-phase",
@@ -1073,11 +1231,13 @@ private fun CardProgressRing(
                     )
                 }
             } else {
-                drawCircle(
-                    color = progressColor,
-                    radius = stroke * 1.8f,
-                    center = desktopRingPoint(left, top, right, bottom, radius, spinPhase),
+                val dash = desktopRingSegmentPath(
+                    indicatorPath,
+                    left, top, right, bottom, radius,
+                    startPhase = spinPhase,
+                    lengthPhase = 0.46f,
                 )
+                drawPath(dash, color = progressColor, style = style)
             }
             return@Canvas
         }
@@ -1268,12 +1428,38 @@ private fun CandidateActionsDialog(
                     label = if (selected) "선택 해제" else "선택",
                     onClick = if (selected) onUnselect else onSelect,
                 )
-                CandidateActionButton(
-                    icon = Icons.Default.OpenInBrowser,
-                    label = "사이트 열기",
-                    onClick = onOpenSource,
-                )
-                when (status) {
+                if (candidate.kind == RowKind.Playlist) {
+                    if (hasOutput) {
+                        CandidateActionButton(Icons.Default.Folder, "폴더 열기", onClick = onOpenFolder)
+                    }
+                    CandidateActionButton(
+                        Icons.Default.Clear,
+                        "목록에서 제거",
+                        onClick = onRemove,
+                    )
+                    if (hasOutput) {
+                        CandidateActionButton(
+                            Icons.Default.Delete,
+                            "파일 삭제",
+                            tint = colors.danger,
+                            onClick = onDeleteFile,
+                        )
+                    }
+                    if (status == TaskStatus.Completed) {
+                        CandidateActionButton(Icons.Default.MusicNote, "음원 추출 (WAV)") {
+                            onExtractAudio("WAV")
+                        }
+                        CandidateActionButton(Icons.Default.MusicNote, "음원 추출 (MP3)") {
+                            onExtractAudio("MP3")
+                        }
+                    }
+                } else {
+                    CandidateActionButton(
+                        icon = Icons.Default.OpenInBrowser,
+                        label = "사이트 열기",
+                        onClick = onOpenSource,
+                    )
+                    when (status) {
                     TaskStatus.Ready -> {
                         CandidateActionButton(Icons.Default.Clear, "목록에서 삭제", onClick = onRemove)
                     }
@@ -1299,6 +1485,7 @@ private fun CandidateActionsDialog(
                     }
                     else -> {
                         CandidateActionButton(Icons.Default.Clear, "목록에서 삭제", onClick = onRemove)
+                    }
                     }
                 }
             }

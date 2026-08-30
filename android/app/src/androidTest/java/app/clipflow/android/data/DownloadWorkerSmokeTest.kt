@@ -79,6 +79,30 @@ class DownloadWorkerSmokeTest {
     }
 
     @Test
+    fun directMediaClipDownloadsFromResolvedMediaUrl() {
+        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setInputData(
+                workDataOf(
+                    DownloadWorker.KEY_URL to "https://example.invalid/watch/fixture",
+                    DownloadWorker.KEY_DIRECT_URL to TEST_MP4,
+                    DownloadWorker.KEY_PREFER_DIRECT to true,
+                    DownloadWorker.KEY_REFERER to TEST_ORIGIN,
+                    DownloadWorker.KEY_FORMAT to "best",
+                    DownloadWorker.KEY_OUTPUT_FORMAT to "mp4",
+                    DownloadWorker.KEY_CONCURRENCY to 4,
+                    DownloadWorker.KEY_START to 0,
+                    DownloadWorker.KEY_END to 1,
+                    DownloadWorker.KEY_TASK_KEY to "direct-clip-smoke-${System.currentTimeMillis()}",
+                    DownloadWorker.KEY_TITLE to "clipflow-direct-clip-smoke",
+                ),
+            )
+            .build()
+
+        val info = runWork(request)
+        assertSavedOutput(info)
+    }
+
+    @Test
     fun persistedSessionDoesNotRestoreStaleInputUrl() {
         val store = SessionStore(context)
         store.clear()
@@ -119,8 +143,10 @@ class DownloadWorkerSmokeTest {
     private fun assertSavedOutput(info: WorkInfo) {
         val outputUri = info.outputData.getString(DownloadWorker.OUTPUT_URI).orEmpty()
         val outputBytes = info.outputData.getLong(DownloadWorker.OUTPUT_BYTES, 0L)
+        val outputDuration = info.outputData.getInt(DownloadWorker.OUTPUT_DURATION_SECONDS, 0)
         assertTrue("output URI is blank", outputUri.isNotBlank())
         assertTrue("reported output bytes must be positive", outputBytes > 0L)
+        assertTrue("reported output duration must be positive", outputDuration > 0)
         createdUris += outputUri
 
         val uri = Uri.parse(outputUri)

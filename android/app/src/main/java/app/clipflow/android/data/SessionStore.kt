@@ -167,6 +167,10 @@ class SessionStore(context: Context) {
         createdOrder = optLong("createdOrder", System.currentTimeMillis()),
         childLoading = optBoolean("childLoading"),
         route = optString("route", "ytdlp"),
+        playlistTitle = optString("playlistTitle"),
+        analysisError = optString("analysisError"),
+        clipRange = optJSONObject("clipRange")?.toClipRange() ?: ClipRange(),
+        isDerivedDownload = optBoolean("isDerivedDownload", false),
     )
 
     private fun DownloadPreferences.toJson() = JSONObject()
@@ -220,4 +224,8 @@ class SessionStore(context: Context) {
         .put("createdOrder", createdOrder)
         .put("childLoading", childLoading)
         .put("route", route)
+        .put("playlistTitle", playlistTitle)
+        .put("analysisError", analysisError)
+        .put("clipRange", clipRange.toJson())
+        .put("isDerivedDownload", isDerivedDownload)
 }
