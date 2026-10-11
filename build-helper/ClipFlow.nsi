@@ -35,6 +35,8 @@ Var Mutex
 
 Function .onInit
     SetShellVarContext current
+    ; Relaunch as a fresh onefile app, not a worker using the exiting app's temp directory.
+    System::Call 'kernel32::SetEnvironmentVariableW(w "PYINSTALLER_RESET_ENVIRONMENT", w "1")'
     System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Local\${PRODUCT_NAME}-Installer") p.r0 ?e'
     Pop $1
     StrCpy $Mutex $0

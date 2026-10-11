@@ -43,7 +43,8 @@ def main():
             source.write_text(
                 'class Probe { static void Main() { System.IO.File.WriteAllText('
                 'System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory, "started.txt"), '
-                f'"{version}"); }} }}', encoding="utf-8")
+                f'"{version}|" + System.Environment.GetEnvironmentVariable('
+                '"PYINSTALLER_RESET_ENVIRONMENT")); } }', encoding="utf-8")
             run(compiler, "/nologo", "/target:winexe", f"/out:{payload}", source)
             installer = root / f"install-{version}.exe"
             run(args.makensis, "/V2", f"/DPRODUCT_NAME={product}", f"/DAPP_VERSION={version}",
@@ -83,7 +84,7 @@ def main():
             deadline = time.monotonic() + 10
             while not started.exists() and time.monotonic() < deadline:
                 time.sleep(0.1)
-            assert started.read_text() == "1.0.1"
+            assert started.read_text() == "1.0.1|1"
             assert installed.read_bytes() == payload.read_bytes()
             assert not (target / "ClipFlow.previous").exists()
             assert user_video.read_bytes() == b"user data must survive"
