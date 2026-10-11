@@ -525,9 +525,10 @@ class DownloaderEngineTests(unittest.TestCase):
 
         self.assertNotIn("external_downloader", options)
         self.assertNotIn("postprocessors", options)
-        self.assertEqual(options.get("fixup"), "never")
+        self.assertNotEqual(options.get("fixup"), "never")
+        self.assertFalse(options["skip_unavailable_fragments"])
 
-    def test_download_options_disable_hls_fixup_for_m3u8_url_even_with_https_protocol(self):
+    def test_download_options_allow_hls_fixup_for_m3u8_url_even_with_https_protocol(self):
         options = engine.build_download_options(
             {
                 "format_selector": "hls-1080",
@@ -538,7 +539,7 @@ class DownloaderEngineTests(unittest.TestCase):
             "C:/Temp",
         )
 
-        self.assertEqual(options.get("fixup"), "never")
+        self.assertNotEqual(options.get("fixup"), "never")
 
     def test_download_options_use_parallel_fragment_downloads(self):
         options = engine.build_download_options(

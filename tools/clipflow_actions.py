@@ -116,7 +116,8 @@ class ActionMixin:
                 pass
         if sys.platform.startswith("win") and path.exists():
             try:
-                subprocess.Popen(["explorer.exe", f"/select,{path.resolve()}"])
+                # Explorer requires /select, outside the quoted file path.
+                subprocess.Popen(f'explorer.exe /select,"{path.resolve()}"')
                 return
             except Exception:
                 pass

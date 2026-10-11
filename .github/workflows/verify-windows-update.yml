@@ -1,0 +1,75 @@
+name: Verify Windows Update
+on:
+  push:
+    branches: [codex/update-verification-20261011]
+permissions:
+  contents: read
+jobs:
+  signed-test-update:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CLIPFLOW_VERSION: '1.1.1'
+      CLIPFLOW_BUILD_NUMBER: '10101'
+      CLIPFLOW_WINSPARKLE_FEED_URL: https://kwd421.github.io/ClipFlow/appcast-windows.xml
+      CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY: 8NnoSrVpPvJgVY+3f/QPho2TczOMxX4i3g45/PbOCg4=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependencies failed' }
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS install failed' }
+      - name: Verify focused regressions
+        shell: pwsh
+        env:
+          PYTHONPATH: 'test;.'
+          PYTHONUTF8: '1'
+        run: |
+          python -m unittest test_clipflow_updater test_original_audio test_youtube_live test_clipflow_qt.ClipFlowQtTests.test_clipflow_qt_submission_waits_for_analysis_finished_cleanup test_clipflow_qt.ClipFlowQtTests.test_clipflow_qt_download_button_queues_url_while_analysis_is_running
+          if ($LASTEXITCODE -ne 0) { throw 'Regression verification failed' }
+          python build-helper/verify_installer_windows.py
+          if ($LASTEXITCODE -ne 0) { throw 'Installer verification failed' }
+      - name: Build application and installer
+        shell: pwsh
+        run: |
+          python -m PyInstaller build-helper/ClipFlow.spec --noconfirm
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+          & build-helper/build_installer_windows.ps1 -Version $env:CLIPFLOW_VERSION
+      - name: Sign with existing Windows key
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.CLIPFLOW_WINSPARKLE_PRIVATE_KEY }}
+          LEGACY_SIGNING_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          $key = Join-Path $env:RUNNER_TEMP 'verify-winsparkle.key'
+          try {
+            $material = $env:SIGNING_KEY
+            if (-not $material) { $material = $env:LEGACY_SIGNING_KEY }
+            if (-not $material) { throw 'Missing signing key' }
+            Set-Content -LiteralPath $key -Value $material -NoNewline -Encoding utf8
+            $tool = 'build-helper/third_party/winsparkle/WinSparkle-0.9.3/bin/winsparkle-tool.exe'
+            $publicOutput = & $tool public-key --private-key-file $key
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot derive public key' }
+            $public = (($publicOutput | Where-Object { $_ -match '^Public key:\s+(\S+)' }) -replace '^Public key:\s+', '').Trim()
+            if ($public -ne $env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY) { throw 'Key does not match installed 1.1.0; refusing to sign' }
+            $exe = "dist/ClipFlow-$env:CLIPFLOW_VERSION.exe"
+            $signed = (& $tool sign --verbose --private-key-file $key $exe) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $signed -notmatch 'sparkle:edSignature="([^"]+)"\s+length="(\d+)"') { throw 'Signing failed' }
+            @{ version=$env:CLIPFLOW_VERSION; build=$env:CLIPFLOW_BUILD_NUMBER; signature=$Matches[1]; length=$Matches[2]; public_key=$public; sha256=(Get-FileHash $exe).Hash; app_sha256=(Get-FileHash dist/ClipFlow.exe).Hash } | ConvertTo-Json | Set-Content dist/update-verification.json -Encoding utf8
+          } finally {
+            if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-update-verification
+          retention-days: 3
+          path: |
+            dist/ClipFlow-1.1.1.exe
+            dist/update-verification.json

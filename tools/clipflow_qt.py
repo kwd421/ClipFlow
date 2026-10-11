@@ -989,13 +989,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if current_url:
             row_index = self._first_visible_analyzed_row_index_for_url(current_url)
             if row_index >= 0 and self._row_should_reanalyze_on_submit(self.rows[row_index]):
-                if self.analysis_thread and self.analysis_thread.isRunning():
+                if self.analysis_thread is not None:
                     self._queue_analysis_download(current_url)
                 else:
                     self._start_analysis(auto_download=True)
                 return
             if row_index < 0:
-                if self.analysis_thread and self.analysis_thread.isRunning():
+                if self.analysis_thread is not None:
                     self._queue_analysis_download(current_url)
                 else:
                     self._start_analysis(auto_download=True)
@@ -1027,20 +1027,23 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             return
         if any(item.get("url") == url for item in self._queued_analysis_downloads):
             return
-        self._queued_analysis_downloads.append({"url": url, "auto_download": True})
+        self._queued_analysis_downloads.append({
+            "url": url, "auto_download": True,
+            "clip_range": self.current_clip_range(),
+            "clip_cut_mode": self.clip_cut_mode(),
+        })
         self._set_status("Queued for analysis")
         self._refresh_primary_action()
 
     def _start_next_queued_analysis(self):
-        if self.analysis_thread and self.analysis_thread.isRunning():
+        if self.analysis_thread is not None:
             return
         while self._queued_analysis_downloads:
             item = self._queued_analysis_downloads.pop(0)
             url = str(item.get("url") or "").strip()
             if not url:
                 continue
-            self.url_input.setText(url)
-            self._start_analysis(auto_download=bool(item.get("auto_download")))
+            self._start_analysis(auto_download=bool(item.get("auto_download")), queued_request=item)
             return
 
     def _remember_download_infos(self, analysis):
@@ -1554,7 +1557,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         """Continue playlist analysis from entries not yet analyzed."""
         if not parent or parent.get("kind") != "playlist":
             return False
-        if self.analysis_thread and self.analysis_thread.isRunning():
+        if self.analysis_thread is not None:
             # Previous pause is still winding down; retry shortly.
             QTimer.singleShot(300, lambda p=parent: self._resume_playlist_analysis(p))
             return True
@@ -1606,12 +1609,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis_thread.start()
         return True
 
-    def _start_analysis(self, auto_download=False):
-        if self.analysis_thread and self.analysis_thread.isRunning():
+    def _start_analysis(self, auto_download=False, queued_request=None):
+        # The finished signal must clear shared analysis state before another job starts.
+        if self.analysis_thread is not None:
             return
 
         self._analysis_discard_result = False
-        url = self.url_input.text().strip()
+        url = str(queued_request.get("url") or "").strip() if queued_request is not None else self.url_input.text().strip()
         if not url:
             return
         url = self._resolve_playlist_choice_url(url)
@@ -1625,10 +1629,14 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         # Freeze clip intent at click time so later UI clip edits don't rewrite this download.
         if auto_download:
             try:
-                self._analysis_download_clip_range = self.current_clip_range()
+                self._analysis_download_clip_range = (
+                    queued_request.get("clip_range") if queued_request is not None else self.current_clip_range()
+                )
             except ValueError:
                 self._analysis_download_clip_range = None
-            self._analysis_download_clip_cut_mode = self.clip_cut_mode() if self._analysis_download_clip_range else None
+            self._analysis_download_clip_cut_mode = (
+                queued_request.get("clip_cut_mode") if queued_request is not None else self.clip_cut_mode()
+            ) if self._analysis_download_clip_range else None
             self._analysis_download_clip_frozen = True
         else:
             self._analysis_download_clip_range = None
@@ -2203,6 +2211,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _progress_text(self, percent, event):
         if isinstance(event, dict):
             message = str(event.get("message") or "").strip()
+            if event.get("is_live"):
+                return message or "라이브 녹화 중"
             if "/s" in message:
                 return self._progress_text_from_message(percent, message, event.get("eta_text") or "")
             speed = str(event.get("speed_text") or "").strip()

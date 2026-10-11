@@ -96,7 +96,7 @@ function New-WindowsAppcastItem {
             <sparkle:shortVersionString>$VersionValue</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
             <sparkle:releaseNotesLink>$releaseNotes</sparkle:releaseNotesLink>
-            <enclosure url="$downloadUrl" length="$Length" type="application/octet-stream" sparkle:edSignature="$Signature"/>
+            <enclosure url="$downloadUrl" length="$Length" type="application/octet-stream" sparkle:edSignature="$Signature" sparkle:installerArguments="/UPDATE"/>
         </item>
 "@
 }
@@ -168,7 +168,12 @@ if (-not (Test-Path $builtExe)) {
 }
 
 $releaseExe = Join-Path $artifactDir "ClipFlow-$Version.exe"
-Copy-Item -Force $builtExe $releaseExe
+& (Join-Path $PSScriptRoot "build_installer_windows.ps1") -Version $Version -AppExe $builtExe -OutputFile $releaseExe
+
+& python (Join-Path $PSScriptRoot "verify_installer_windows.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "Installer replacement verification failed; release will not be signed or uploaded."
+}
 
 $signed = Get-WinSparkleSignature -ToolPath $winSparkleTool -KeyPath $PrivateKeyFile -ArtifactPath $releaseExe
 $itemXml = New-WindowsAppcastItem `

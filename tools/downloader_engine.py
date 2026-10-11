@@ -3500,6 +3500,7 @@ def best_audio_format(formats):
     return sorted(
         audio,
         key=lambda fmt: (
+            safe_int(fmt.get("language_preference")),
             1 if str(fmt.get("ext") or "").lower() == "m4a" else 0,
             safe_int(fmt.get("filesize") or fmt.get("filesize_approx")),
             safe_int(fmt.get("abr")),
@@ -3687,12 +3688,24 @@ def candidates_from_info(info, output_ext=None):
     candidates = []
     seen = set()
     for video_info in iter_video_infos(info):
+        candidate_start = len(candidates)
         title = clean_video_title(video_info.get("title") or info.get("title")) or "video"
         display_title = display_title_for(video_info, info)
         page_url = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
         thumbnail = resolve_analysis_thumbnail(page_url, video_info) or thumbnail_from_info(info)
         duration = safe_int(video_info.get("duration") or info.get("duration"))
         formats = video_info.get("formats") or []
+        # YouTube marks original audio with language_preference=10; defaults
+        # may instead be a localized dub. Keep video-only formats for merging.
+        original_audio = is_youtube_url(page_url) and any(
+            safe_int(fmt.get("language_preference")) >= 10
+            and str(fmt.get("acodec") or "none").lower() != "none"
+            for fmt in formats
+        )
+        if original_audio:
+            formats = [fmt for fmt in formats if
+                       str(fmt.get("acodec") or "none").lower() == "none"
+                       or safe_int(fmt.get("language_preference")) >= 10]
         audio = best_audio_format(formats)
         for fmt in formats:
             format_id = str(fmt.get("format_id") or "")
@@ -3758,7 +3771,10 @@ def candidates_from_info(info, output_ext=None):
             filesize, filesize_approx = candidate_filesize_fields(fmt, sort_bytes, size_source)
             selector = format_id or "best"
             if acodec.lower() == "none":
-                selector = f"{selector}+bestaudio[ext=m4a]/bestaudio/best"
+                if original_audio and audio and audio.get("format_id"):
+                    selector = f"{selector}+{audio['format_id']}"
+                else:
+                    selector = f"{selector}+bestaudio[ext=m4a]/bestaudio/best"
                 acodec = "bestaudio"
 
             source = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
@@ -3841,6 +3857,21 @@ def candidates_from_info(info, output_ext=None):
                     "note": "direct",
                 }
             )
+        if original_audio:
+            for candidate in candidates[candidate_start:]:
+                candidate["original_audio"] = True
+                candidate["format_selector"] += "[language_preference>=10]"
+        if video_info.get("is_live") and is_youtube_url(page_url):
+            for candidate in candidates[candidate_start:]:
+                candidate.update({
+                    "is_live": True,
+                    "live_from_start": True,
+                    "duration": 0,
+                    "filesize": 0,
+                    "filesize_approx": 0,
+                    "sort_bytes": 0,
+                    "size_source": "unknown",
+                })
     return sort_candidates(candidates)
 
 
@@ -3901,6 +3932,12 @@ def download_info_reuse_supported(candidate):
         if is_chzzk_page_url(value):
             return False
     return True
+
+
+def is_youtube_live_candidate(candidate):
+    return bool(candidate.get("is_live") and any(
+        is_youtube_url(candidate.get(key)) for key in ("source", "webpage_url", "url")
+    ) and not clip_range_from_candidate(candidate))
 
 
 def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_url=None, impersonate=False, allow_playlist=False):
@@ -3966,6 +4003,7 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             "continuedl": True,
             "retries": 10,
             "fragment_retries": 10,
+            "skip_unavailable_fragments": False,
             "concurrent_fragment_downloads": YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS,
             "http_chunk_size": YTDLP_HTTP_CHUNK_SIZE,
             "progress_hooks": [progress_hook(on_event)],
@@ -3989,9 +4027,17 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
         )
         if output_ext != "mp4":
             options["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": output_ext}]
-        elif is_hls_manifest_format(candidate):
-            options["fixup"] = "never"
     clip_range = clip_range_from_candidate(candidate)
+    if any(is_youtube_url(candidate.get(key)) for key in ("source", "webpage_url", "url")):
+        options["live_from_start"] = not bool(clip_range)
+        if is_youtube_live_candidate(candidate):
+            # yt-dlp's parallel map exhausts the live generator before appending.
+            # Sequential fragments still catch up without real-time throttling.
+            options["concurrent_fragment_downloads"] = 1
+            options["skip_unavailable_fragments"] = False
+            options["overwrites"] = False
+            options["socket_timeout"] = 30
+            options["retry_sleep_functions"] = {"fragment": lambda attempt: min(attempt, 5)}
     if clip_range:
         ffmpeg_exe = ffmpeg_path() or shutil.which("ffmpeg")
         if not ffmpeg_exe:
@@ -4014,6 +4060,9 @@ def progress_hook(on_event=None):
         if status == "downloading":
             downloaded = data.get("downloaded_bytes") or 0
             total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+            is_live = bool((data.get("info_dict") or {}).get("is_live"))
+            if is_live:
+                total = 0
             percent = max(0, min(100, downloaded * 100 / total)) if total else 0
             # Throttle to ~4 events/sec. yt-dlp fires this callback dozens of
             # times per second; with concurrent downloads the cross-thread signal
@@ -4039,7 +4088,13 @@ def progress_hook(on_event=None):
                 )
                 unknown_total_reported[0] = False
             else:
-                if not unknown_total_reported[0]:
+                emit_event(
+                    on_event, "progress", percent=0, downloaded=downloaded,
+                    total=0, speed=data.get("speed") or 0, eta=None, is_live=is_live,
+                    speed_text=(data.get("_speed_str") or "").strip(),
+                    message=f"{'라이브 녹화 · ' if is_live else ''}{downloaded / (1024 * 1024):.2f} MiB · {(data.get('_speed_str') or '').strip()}",
+                )
+                if not is_live and not unknown_total_reported[0]:
                     emit_event(on_event, "status", message="Downloading")
                     unknown_total_reported[0] = True
         elif status == "finished":
@@ -5476,6 +5531,8 @@ def analyze_url(
             allow_playlist=allow_playlist,
         )
         options.update({"simulate": True, "skip_download": True, "check_formats": False})
+        if is_youtube_url(analysis_url):
+            options["live_from_start"] = True
         emit_event(on_event, "status", message="URL 분석 중")
         with ydl_factory(options) as ydl:
             return ydl.extract_info(analysis_url, download=False)
@@ -8295,7 +8352,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         }
     remove_too_small_existing_output(candidate, output_dir, on_event=on_event)
     output_target = final_output_path_for_candidate(candidate, output_dir)
-    if output_target:
+    if output_target and not is_youtube_live_candidate(candidate):
         cleanup_partial_output_files(output_target, on_event=on_event)
 
     chzzk_result = download_chzzk_candidate(
@@ -8372,7 +8429,7 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
                 return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
             except Exception as no_cookie_exc:
                 exc = no_cookie_exc
-        if not should_retry_progressive_mp4(candidate, exc):
+        if is_youtube_live_candidate(candidate) or not should_retry_progressive_mp4(candidate, exc):
             raise
         fallback_candidate = dict(candidate)
         fallback_candidate["format_selector"] = "18/best[ext=mp4]/best"
@@ -9155,6 +9212,8 @@ def download_candidate_in_subprocess(
 
 
 def should_retry_progressive_mp4(candidate, exc, allow_progressive=False):
+    if (candidate or {}).get("original_audio"):
+        return False
     output_ext = normalized_output_ext((candidate or {}).get("output_ext"))
     if output_ext in AUDIO_OUTPUT_EXTENSIONS:
         return False

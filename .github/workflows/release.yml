@@ -54,6 +54,12 @@ jobs:
           Set-Content -Path $keyPath -Value $keyMaterial -NoNewline -Encoding utf8
           "CLIPFLOW_WINSPARKLE_PRIVATE_KEY_FILE=$keyPath" >> $env:GITHUB_ENV
 
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
+
       - name: Build, sign, and update appcast
         shell: pwsh
         env:

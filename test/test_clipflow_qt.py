@@ -3844,6 +3844,8 @@ from tools.clipflow_qt import ClipFlowWindow
 app = QApplication([])
 window = ClipFlowWindow()
 print(window._progress_text(12, {"speed_text": "4.0 MB/s", "eta_text": "1:23"}))
+live_text = "라이브 녹화 · 25.59 MiB · 4.0 MB/s"
+assert window._progress_text(0, {"is_live": True, "message": live_text}) == live_text
 '''
         result = run_qt_script(script)
 
@@ -5691,7 +5693,7 @@ app = QApplication([])
 analyzed = []
 downloaded = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, **kwargs):
     analyzed.append(url)
     time.sleep(0.15)
     return {
@@ -5715,6 +5717,7 @@ window.url_input.setText("https://media.test/two")
 window._refresh_primary_action()
 print(window.primary_button.isEnabled())
 window._handle_primary_action()
+window._clear_url()
 
 def drive():
     if window.analysis_thread or window.download_thread or window.active_downloads or window.queued_download_rows:
@@ -5723,6 +5726,7 @@ def drive():
         return
     print(analyzed)
     print(downloaded)
+    assert window.url_input.text() == "", window.url_input.text()
     app.quit()
 
 timer = QTimer()
@@ -5742,6 +5746,37 @@ app.exec()
                 "['https://media.test/one', 'https://media.test/two']",
             ],
         )
+
+    def test_clipflow_qt_submission_waits_for_analysis_finished_cleanup(self):
+        script = r'''
+from PySide6.QtCore import QThread
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+finished_thread = QThread(window)
+window.analysis_thread = finished_thread
+window._analysis_url = "https://media.test/previous"
+window._analysis_auto_download = True
+window.url_input.setText("https://media.test/next")
+assert not finished_thread.isRunning()
+window._handle_primary_action()
+assert len(window._queued_analysis_downloads) == 1
+window._start_next_queued_analysis()
+window._start_analysis(auto_download=True)
+assert window.analysis_thread is finished_thread
+assert window._analysis_url == "https://media.test/previous"
+assert window._analysis_auto_download
+assert len(window._queued_analysis_downloads) == 1
+window._queued_analysis_downloads.clear()
+window._analysis_thread_finished()
+assert window.analysis_thread is None
+print("ok")
+'''
+        result = run_qt_script(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok")
 
     def test_clipflow_qt_attaches_cached_analysis_info_only_to_download_candidate(self):
         script = r'''

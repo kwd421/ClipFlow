@@ -32,6 +32,22 @@ ClipFlow는 영상 링크를 붙여넣고 품질을 고른 뒤 바로 저장할 
 
 ## 개발용 실행
 
+### Windows 설치형 배포
+
+Windows 릴리즈 스크립트는 NSIS가 필요합니다. `CLIPFLOW_MAKENSIS`로
+`makensis.exe` 경로를 지정할 수 있습니다. `dist/ClipFlow.exe`는 단독 실행용이고,
+서명 및 appcast 배포 대상인 `dist/ClipFlow-<version>.exe`는 설치 프로그램입니다.
+
+기본 설치 위치는 `%LOCALAPPDATA%\Programs\ClipFlow`이며 업데이트는 기존 설치 경로를
+유지합니다. 이전 단독 EXE 배포본 사용자는 설치형으로 한 번 전환한 뒤 시작 메뉴의
+ClipFlow를 사용해야 합니다. 예전 EXE를 계속 실행하면 예전 버전이 실행됩니다.
+설치와 제거는 다운로드 영상 및 앱 설정/히스토리를 삭제하지 않습니다.
+
+릴리즈 전에 `build-helper/verify_installer_windows.py`가 임시 경로에서 설치, 잠금 실패,
+버전 교체, 재실행, 사용자 파일 보존을 검사합니다. 공개 배포는 별도의 릴리즈가 필요합니다.
+
+### 소스 실행
+
 ```powershell
 python tools/clipflow_qt.py
 ```
