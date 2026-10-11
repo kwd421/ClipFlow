@@ -32,13 +32,15 @@ function Get-WinSparklePublicKey {
         [string]$KeyPath
     )
     $existing = if ($env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY) { $env:CLIPFLOW_WINSPARKLE_PUBLIC_ED_KEY.Trim() } else { "" }
-    if ($existing) {
-        return $existing
-    }
     $output = & $ToolPath public-key --private-key-file $KeyPath
+    if ($LASTEXITCODE -ne 0) { throw "Could not derive WinSparkle public key" }
     foreach ($line in $output) {
         if ($line -match '^Public key:\s+(\S+)\s*$') {
-            return $Matches[1]
+            $derived = $Matches[1]
+            if ($existing -and $existing -ne $derived) {
+                throw "Configured WinSparkle public key does not match the signing key"
+            }
+            return $derived
         }
     }
     throw "Could not read WinSparkle public key from $KeyPath"

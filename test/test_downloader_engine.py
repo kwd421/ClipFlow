@@ -938,7 +938,8 @@ for line in sys.stdin:
         self.assertNotEqual(results[0]["pid"], results[1]["pid"])
 
     def test_analysis_process_run_request_emits_events_before_finished_result(self):
-        def fake_analyze(url, cookie_source=None, output_ext=None, proxy_url=None, on_event=None):
+        def fake_analyze(url, cookie_source=None, output_ext=None, proxy_url=None, on_event=None,
+                         skip_urls=None, resume_from_index=1):
             on_event({"type": "status", "message": "URL 분석 중"})
             return {
                 "webpage_url": url,

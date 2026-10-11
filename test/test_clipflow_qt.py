@@ -250,6 +250,8 @@ class FakeWidget:
 
     def set_finishing(self, *args):
         self.finishing_calls.append(args)
+        row["progress"] = 100
+        row["progress_text"] = args[0]
 
 widget = FakeWidget()
 row = {"status": DOWNLOAD_STATUS, "widget": widget}
@@ -563,7 +565,7 @@ downloaded = []
 analyze_exts = []
 started_download = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     analyze_exts.append(output_ext)
     return {
         "webpage_url": url,
@@ -870,7 +872,7 @@ url = "https://media.test/watch/1"
 output = Path(download_dir.name) / "Saved.mp4"
 output.write_bytes(b"mp4")
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -1047,7 +1049,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     time.sleep(0.25)
     return {
         "webpage_url": url,
@@ -1129,7 +1131,7 @@ print(hasattr(clipflow_theme, "FONT_FALLBACKS"))
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     title = url.rsplit("/", 1)[-1]
     return {
         "webpage_url": url,
@@ -1166,7 +1168,7 @@ print(window.count_label.text())
 window._analysis_finished(fake_analyze("https://media.test/two"))
 print("|".join(row_titles()))
 print(window.count_label.text())
-window.rows[0]["widget"].set_status("완료")
+window._set_row_status(window.rows[0], "완료")
 window._analysis_finished(fake_analyze("https://media.test/three"))
 print("|".join(row_titles()))
 print("|".join(row["status"] for row in window.rows))
@@ -1192,7 +1194,7 @@ from tools.clipflow_qt import ClipFlowWindow, SETTINGS_APP, SETTINGS_ORG
 downloaded = []
 started_download = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -1305,7 +1307,7 @@ from tools.clipflow_qt import ClipFlowWindow
 downloaded = []
 started_download = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -1366,7 +1368,7 @@ from tools.clipflow_qt import ClipFlowWindow
 
 url = "https://media.test/video"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -1385,7 +1387,7 @@ print(hasattr(row_widget, "status_check_label"))
 row_widget.set_status("완료")
 print(hasattr(row_widget, "status_label"))
 print(row_widget.progress_text.isHidden())
-row_widget.set_status("오류", "network problem")
+window._set_row_status(window.rows[0], "오류", "network problem")
 row_widget.set_progress(0, "")
 print(row_widget.row_quality_label.isHidden())
 print(row_widget.row_quality_label.text())
@@ -1407,7 +1409,7 @@ from tools.clipflow_qt import ClipFlowWindow
 opened = []
 url = "https://media.test/video"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -1530,7 +1532,7 @@ print(actions.y() + actions.height() < meta_top)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["28", "28 18", "True", "True"])
 
-    def test_clipflow_qt_row_title_has_no_hover_tooltip_but_action_icons_do(self):
+    def test_clipflow_qt_row_title_and_action_icons_have_tooltips(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
@@ -1557,7 +1559,7 @@ print(row_widget.more_button.toolTip())
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["", "폴더 열기", "더보기"])
+        self.assertEqual(result.stdout.splitlines(), ["Video", "폴더 열기", "더보기"])
 
     def test_clipflow_qt_row_meta_text_uses_icon_height_for_vertical_centering(self):
         script = r'''
@@ -1800,7 +1802,7 @@ from tools.clipflow_qt import ClipFlowWindow
 
 url = "https://media.test/video"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -2487,7 +2489,7 @@ confirmed = []
 started_download = []
 tempdir = tempfile.TemporaryDirectory()
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -2685,7 +2687,7 @@ from tools.clipflow_qt import ClipFlowWindow
 
 opened = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -2731,7 +2733,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -2785,7 +2787,7 @@ from tools.clipflow_qt import ClipFlowWindow
 url = "https://media.test/watch/paste"
 analyzed = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     analyzed.append(url)
     return {
         "webpage_url": url,
@@ -2900,7 +2902,7 @@ url = "https://media.test/watch/download"
 analyzed = []
 downloaded = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     analyzed.append(url)
     return {
         "webpage_url": url,
@@ -2959,7 +2961,7 @@ from tools.clipflow_qt import ClipFlowWindow
 analyzed = []
 downloaded = []
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     analyzed.append(url)
     return {
         "webpage_url": url,
@@ -3047,7 +3049,7 @@ from tools.clipflow_widgets import PrimaryActionButton
 
 url = "https://media.test/video"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -3065,7 +3067,7 @@ button._advance()
 window = ClipFlowWindow(analyze_func=fake_analyze)
 window._analysis_finished(fake_analyze(url))
 row_widget = window.rows[0]["widget"]
-row_widget.set_status(DOWNLOAD_STATUS)
+window._set_row_status(window.rows[0], DOWNLOAD_STATUS)
 row_widget.set_progress(42, "42% · 7.0 MB/s")
 
 print(button._angle == 332)
@@ -3095,7 +3097,7 @@ window._analysis_finished({
     "warnings": [],
 })
 row_widget = window.rows[0]["widget"]
-row_widget.set_status(ANALYZING_STATUS)
+window._set_row_status(window.rows[0], ANALYZING_STATUS)
 row_widget.set_progress(0, "")
 print(row_widget.property("analyzing"))
 print(row_widget._analysis_ring_timer.isActive())
@@ -3136,7 +3138,7 @@ window._analysis_finished({
 row = window.rows[0]
 widget = row["widget"]
 row["download_starting"] = True
-widget.set_status(DOWNLOAD_STATUS)
+window._set_row_status(row, DOWNLOAD_STATUS)
 widget.set_progress(0, "다운로드 준비 중")
 print(widget.spinner.isHidden())
 print(not widget.spinner._timer.isActive())
@@ -3155,7 +3157,7 @@ from tools.clipflow_qt import ClipFlowWindow
 
 url = "https://media.test/watch/loading-button"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     time.sleep(0.2)
     return {"webpage_url": url, "url": url, "title": "Video", "candidates": [], "warnings": []}
 
@@ -3189,7 +3191,7 @@ window._analysis_finished({
     "warnings": [],
 })
 row_widget = window.rows[0]["widget"]
-row_widget.set_status(DOWNLOAD_STATUS)
+window._set_row_status(window.rows[0], DOWNLOAD_STATUS)
 row_widget.set_progress(0, "0%")
 print(row_widget.property("progressActive"))
 print(row_widget.property("progressValue"))
@@ -3817,14 +3819,14 @@ window._analysis_finished({
 })
 row = window.rows[0]
 widget = row["widget"]
-widget.set_status(DOWNLOAD_STATUS)
+window._set_row_status(row, DOWNLOAD_STATUS)
 widget._set_hovered(True)
 app.processEvents()
 print(not widget.pause_download_button.isHidden())
 print(not widget.resume_download_button.isHidden())
 print(not widget.delete_file_button.isHidden())
 
-widget.set_status(PAUSED_STATUS)
+window._set_row_status(row, PAUSED_STATUS)
 widget._set_hovered(True)
 app.processEvents()
 print(not widget.pause_download_button.isHidden())
@@ -4551,7 +4553,7 @@ window._analysis_finished({
 row = window.rows[0]
 row["status"] = "오류"
 row["output_path"] = str(partial)
-def begin(row, candidate=None):
+def begin(row, candidate=None, prepared=False):
     started.append(candidate.get("id"))
     row["status"] = "다운로드 중"
 window._begin_download = begin
@@ -4643,7 +4645,7 @@ row = {
 playlist_folder = Path(tempdir.name) / "Road Mix"
 playlist_folder.mkdir()
 window.open_folder_for_row(row)
-print(opened[0] == playlist_folder)
+print(opened[0].resolve() == playlist_folder.resolve())
 tempdir.cleanup()
 '''
         result = run_qt_script(script)
@@ -5098,7 +5100,7 @@ from tools.clipflow_qt import ClipFlowWindow
 
 url = "https://media.test/playlist/loading"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     time.sleep(0.25)
     return {
         "webpage_url": url,
@@ -5172,7 +5174,7 @@ window = ClipFlowWindow()
 window.url_input.setText(url)
 window._analysis_finished(fake_analysis())
 
-def begin(row, candidate=None):
+def begin(row, candidate=None, prepared=False):
     candidate = candidate or window.selected_candidate_for_row_ref(row)
     downloaded.append([row.get("source_url"), candidate.get("id"), candidate.get("media_type", "video")])
 
@@ -5217,7 +5219,7 @@ window = ClipFlowWindow()
 window.url_input.setText(url)
 window._analysis_finished(fake_analysis())
 
-def begin(row, candidate=None):
+def begin(row, candidate=None, prepared=False):
     candidate = candidate or window.selected_candidate_for_row_ref(row)
     started.append([row.get("id"), row.get("parent_playlist_id"), candidate.get("id"), candidate.get("media_type", "video")])
 
@@ -5290,6 +5292,7 @@ url = "https://media.test/playlist/progressive"
 
 app = QApplication([])
 window = ClipFlowWindow()
+window.rows = [window._playlist_parent_loading_row(url)]
 window._handle_analysis_event({"type": "playlist_parent", "title": "Progressive Mix", "count": 8, "source_url": url})
 parent = window.rows[0]
 parent["analysis_loading"] = True
@@ -5470,7 +5473,7 @@ calls = []
 events = []
 original = clipflow_qt.engine.analyze_url_in_subprocess
 
-def fake_process(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+def fake_process(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None, skip_urls=None, resume_from_index=1):
     calls.append([url, cookie_source, output_ext, proxy_url])
     if on_event:
         on_event({"type": "status", "message": "URL 분석 중"})
@@ -5548,7 +5551,7 @@ original = clipflow_qt.engine.analyze_url_in_subprocess
 def forbidden_process(*_args, **_kwargs):
     raise AssertionError("default analysis subprocess should not be used")
 
-def fake_analyze(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+def fake_analyze(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None, skip_urls=None, resume_from_index=1):
     calls.append([url, cookie_source, output_ext, proxy_url])
     return {"webpage_url": url, "url": url, "candidates": [], "warnings": []}
 
@@ -5639,7 +5642,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, on_event=
     download_calls.append([page_url, candidate.get("id")])
     return {"ok": True, "output_dir": output_dir, "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -5790,7 +5793,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     download_infos.append(candidate.get("_download_info"))
     return {"ok": True, "output_dir": output_dir, "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -5983,7 +5986,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     calls.append(candidate)
     return {"ok": True, "output_dir": output_dir, "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6027,7 +6030,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     calls.append(candidate)
     return {"ok": True, "output_dir": output_dir, "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6067,7 +6070,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     calls.append(candidate)
     return {"ok": True, "output_dir": output_dir, "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6108,7 +6111,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
     downloads.append(candidate)
     return {"ok": True, "output_dir": output_dir, "output_path": output_dir + "/Video [12m12s-12m15s].mp4", "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6164,7 +6167,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
         on_event({"type": "file", "path": str(output)})
     return {"ok": True, "output_dir": output_dir, "output_path": str(output), "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6222,7 +6225,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
         on_event({"type": "file", "path": str(output)})
     return {"ok": True, "output_dir": output_dir, "output_path": str(output), "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6375,7 +6378,7 @@ def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url
         on_event({"type": "file", "path": output_dir + "/Video [00m10s-00m20s].mp4"})
     return {"ok": True, "output_dir": output_dir, "output_path": output_dir + "/Video [00m10s-00m20s].mp4", "target_url": page_url}
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -6810,6 +6813,7 @@ app = QApplication([])
 window = ClipFlowWindow()
 source_url = "https://media.test/playlist/events"
 window.url_input.setText(source_url)
+window.rows = [window._playlist_parent_loading_row(source_url)]
 window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 2, "source_url": source_url})
 window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "source_url": source_url})
 parent = window.rows[0]
@@ -7229,6 +7233,7 @@ window = ClipFlowWindow()
 window.url_input.setText("https://media.test/playlist/events")
 window._start_analysis = lambda *args, **kwargs: None
 source_url = "https://media.test/playlist/events"
+window.rows = [window._playlist_parent_loading_row(source_url)]
 window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 3, "source_url": source_url})
 window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "title": "Video 1", "source_url": source_url})
 window._handle_analysis_event({
@@ -7303,6 +7308,7 @@ started = []
 window.start_download_for_row = lambda row: started.append(row.get("candidate", {}).get("display_title"))
 window._analysis_auto_download = True
 source_url = "https://media.test/playlist/events"
+window.rows = [window._playlist_parent_loading_row(source_url)]
 window._handle_analysis_event({"type": "playlist_parent", "title": "Events", "count": 2, "source_url": source_url})
 window._handle_analysis_event({"type": "playlist_entry_loading", "index": 1, "title": "Video 1", "source_url": "https://media.test/watch/1"})
 window._handle_analysis_event({
@@ -7713,7 +7719,7 @@ from tools.clipflow_qt import ClipFlowWindow
 url = "https://media.test/video"
 long_title = "This is a very long video title that should scroll horizontally when it does not fit"
 
-def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None, skip_urls=None, resume_from_index=1):
     return {
         "webpage_url": url,
         "url": url,
@@ -7767,7 +7773,8 @@ tooltip.render(pixmap)
 bubble = tooltip.bubble_geometry()
 print("QToolTip" in APP_STYLE)
 print(position.y() < global_top)
-print("background: #FFFFFF" in tooltip.styleSheet())
+from tools import clipflow_theme as theme
+print(f"background: {theme.SURFACE}" in tooltip.styleSheet())
 print(tooltip.windowFlags() & Qt.NoDropShadowWindowHint == Qt.NoDropShadowWindowHint)
 print(not bool(tooltip.windowFlags() & Qt.WindowStaysOnTopHint))
 print(tooltip.graphicsEffect() is None)
