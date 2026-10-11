@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build or retry
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -16,9 +22,14 @@ permissions:
 jobs:
   release-windows:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+      CLIPFLOW_RELEASE_REF: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Checkout tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,7 +41,7 @@ jobs:
       - name: Parse release version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:CLIPFLOW_RELEASE_REF
           if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
             throw "Release tag must look like v1.2.3, got: $tag"
           }
@@ -74,7 +85,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.CLIPFLOW_RELEASE_TAG }}
           name: ClipFlow ${{ env.CLIPFLOW_VERSION }}
           body_path: docs/ClipFlow-${{ env.CLIPFLOW_VERSION }}.md
           files: dist/ClipFlow-${{ env.CLIPFLOW_VERSION }}.exe
