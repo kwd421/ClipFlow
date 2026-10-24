@@ -1,4 +1,3 @@
-import gc
 import tempfile
 import threading
 import unittest
@@ -10,7 +9,6 @@ from urllib.parse import parse_qs, urlparse
 from yt_dlp import YoutubeDL
 from yt_dlp.downloader.dash import DashSegmentsFD
 from yt_dlp.extractor.youtube import YoutubeIE
-from yt_dlp.utils import DownloadError
 
 from tools import downloader_engine as engine
 
@@ -35,7 +33,8 @@ class YoutubeLiveTests(unittest.TestCase):
                 options = engine.build_download_options(candidate, folder)
                 self.assertTrue(options["live_from_start"])
                 self.assertEqual(options["concurrent_fragment_downloads"], 1)
-                self.assertFalse(options["skip_unavailable_fragments"])
+                self.assertTrue(options["skip_unavailable_fragments"])
+                self.assertNotIn("http_chunk_size", options)
                 self.assertNotIn("download_ranges", options)
                 self.assertNotIn("external_downloader", options)
 
@@ -116,8 +115,9 @@ class YoutubeLiveTransferTests(unittest.TestCase):
             for index in range(1, 4):
                 # The previous fragment must be on disk before asking for the next.
                 if index > 1:
+                    skipped = self.fail_at is not None and self.fail_at < index
                     self.assertGreaterEqual(
-                        Path(str(self.output) + ".part").stat().st_size, (index - 1) * 8192)
+                        Path(str(self.output) + ".part").stat().st_size, (index - 1 - skipped) * 8192)
                 yield {"url": f"http://127.0.0.1:{self.server.server_port}/{index}"}
 
         options = engine.build_download_options(self.candidate, self.folder.name)
@@ -136,19 +136,12 @@ class YoutubeLiveTransferTests(unittest.TestCase):
         self.assertFalse(Path(str(self.output) + ".part").exists())
         self.assertFalse(Path(str(self.output) + ".ytdl").exists())
 
-    def test_failed_fragment_is_not_skipped_and_resume_keeps_earlier_bytes(self):
+    def test_unavailable_fragment_does_not_abort_live_capture(self):
+        # YouTube live streams have fragments that stay 403 forever; the capture
+        # must reach the end instead of dying on them.
         self.fail_at = 2
-        with self.assertRaises(DownloadError):
-            self.transfer()
-        # Release yt-dlp's exception cycles before reopening the file on Windows.
-        gc.collect()
-        self.assertFalse(self.output.exists())
-        self.assertEqual(Path(str(self.output) + ".part").stat().st_size, 8192)
-        self.fail_at = None
-        self.requests.clear()
         self.transfer()
-        self.assertEqual(self.requests, [2, 3])
-        self.assertEqual(self.output.read_bytes(), b"".join(bytes([i]) * 8192 for i in range(1, 4)))
+        self.assertEqual(self.output.read_bytes(), b"".join(bytes([i]) * 8192 for i in (1, 3)))
 
     def test_engine_keeps_live_partial_files_on_restart(self):
         with patch.object(engine, "cleanup_partial_output_files") as cleanup, \

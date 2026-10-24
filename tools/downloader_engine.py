@@ -4034,10 +4034,15 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             # yt-dlp's parallel map exhausts the live generator before appending.
             # Sequential fragments still catch up without real-time throttling.
             options["concurrent_fragment_downloads"] = 1
-            options["skip_unavailable_fragments"] = False
+            # Range-chunked requests stall live fragments (0 bytes in 60s).
+            options.pop("http_chunk_size")
+            # YouTube live streams have permanently missing fragments (HTTP 403);
+            # aborting on one loses the capture, and so does the end of the stream.
+            options["skip_unavailable_fragments"] = True
+            options["fragment_retries"] = 5
             options["overwrites"] = False
             options["socket_timeout"] = 30
-            options["retry_sleep_functions"] = {"fragment": lambda attempt: min(attempt, 5)}
+            options["retry_sleep_functions"] = {"fragment": lambda n: min(n, 2)}
     if clip_range:
         ffmpeg_exe = ffmpeg_path() or shutil.which("ffmpeg")
         if not ffmpeg_exe:
