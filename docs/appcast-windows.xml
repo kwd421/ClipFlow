@@ -3,6 +3,16 @@
     <channel>
         <title>ClipFlow</title>
         <item>
+            <title>1.1.2</title>
+            <pubDate>Sat, 24 Oct 2026 06:14:23 +0000</pubDate>
+            <link>https://github.com/kwd421/ClipFlow</link>
+            <sparkle:version>10102</sparkle:version>
+            <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://kwd421.github.io/ClipFlow/ClipFlow-1.1.2.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/kwd421/ClipFlow/releases/download/v1.1.2/ClipFlow-1.1.2.exe" length="88491183" type="application/octet-stream" sparkle:edSignature="Fz606RCXWEn4kitR/bu72FVM62jTjXoUPANTTdM/8JdtvoOYrgiPlErm5HwuZ31iFkHJelc8twwDZjYsrKAyBw==" sparkle:installerArguments="/UPDATE"/>
+        </item>
+        <item>
             <title>1.1.1</title>
             <pubDate>Sun, 11 Oct 2026 08:48:34 +0000</pubDate>
             <link>https://github.com/kwd421/ClipFlow</link>
