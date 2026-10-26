@@ -239,6 +239,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis_thread = None
         self.analysis_worker = None
         self._analysis_discard_result = False
+        self._upcoming_live_urls = set()
         self.download_thread = None
         self.download_worker = None
         self.active_download_row = None
@@ -1762,6 +1763,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._analysis_discard_result = False
             return
         self.analysis = analysis
+        self._upcoming_live_urls.discard(self._analysis_url)
         self._remember_download_infos(analysis)
         grouped = presenter.group_candidates(analysis.get("candidates") or [])
         source_url = analysis.get("webpage_url") or analysis.get("url") or self.url_input.text().strip()
@@ -1793,6 +1795,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             return
         message = engine.strip_ansi(message)
         detail = self._analysis_error_detail(message)
+        live_wait = engine.upcoming_live_wait(message)
+        if not live_wait and self._analysis_url in self._upcoming_live_urls and "needs to be reloaded" in message.lower():
+            # YouTube returns this transient error while the waiting live is going on air.
+            live_wait = (15, "시작 확인 중")
+        if live_wait:
+            self._upcoming_live_urls.add(self._analysis_url)
+            detail = f"라이브 시작 대기 중 · {live_wait[1]}"
+            self._schedule_upcoming_live_retry(self._analysis_url, live_wait[0])
+        else:
+            self._upcoming_live_urls.discard(self._analysis_url)
         self._analysis_auto_download = False
         changed = False
         for row in self.rows:
@@ -1806,12 +1818,38 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             row["status_detail"] = detail
             row["progress"] = 0
             row["progress_text"] = detail
+            row["_upcoming_live_wait"] = bool(live_wait)
             row.setdefault("messages", []).append(message)
             changed = True
         if changed:
             self._render_rows()
-        self._set_status(f"{engine.classify_error(message)}: {message}")
+        self._set_status(detail if live_wait else f"{engine.classify_error(message)}: {message}")
         self._maybe_prompt_macos_cookie_permission(message)
+
+    def _schedule_upcoming_live_retry(self, url, seconds):
+        # Analysis must stay short so other analyses are not blocked; re-analyze on a timer
+        # and let the normal auto-download path start the capture once the live begins.
+        request = {
+            "url": url,
+            "clip_range": getattr(self, "_analysis_download_clip_range", None),
+            "clip_cut_mode": getattr(self, "_analysis_download_clip_cut_mode", None),
+        }
+        auto_download = bool(self._analysis_auto_download)
+        QTimer.singleShot(
+            int(seconds * 1000),
+            lambda: self._retry_upcoming_live(url, request, auto_download, seconds),
+        )
+
+    def _retry_upcoming_live(self, url, request, auto_download, seconds):
+        waiting = any(
+            row.get("_upcoming_live_wait") and self._row_matches_url(row, url) for row in self.rows
+        )
+        if not waiting:
+            return  # the user removed the waiting row
+        if self.analysis_thread is not None:
+            QTimer.singleShot(5000, lambda: self._retry_upcoming_live(url, request, auto_download, seconds))
+            return
+        self._start_analysis(auto_download=auto_download, queued_request=request)
 
     def _maybe_prompt_macos_cookie_permission(self, message):
         """On macOS, if a browser-cookie read failed (typically because the app

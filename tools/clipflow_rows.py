@@ -980,7 +980,9 @@ class DownloadRowWidget(QFrame):
         status = (self.row.get("status") or "준비") if status is None else status
         detail = (self.row.get("status_detail") or "") if detail is None else detail
         self.setProperty("completed", "true" if status == COMPLETED_STATUS else "false")
-        self.setProperty("errored", "true" if status == ERROR_STATUS else "false")
+        # A live that has not started yet is waiting, not failed: keep the error styling off.
+        errored = status == ERROR_STATUS and not self.row.get("_upcoming_live_wait")
+        self.setProperty("errored", "true" if errored else "false")
         analyzing = status == ANALYZING_STATUS or (
             bool(self.row.get("analysis_loading"))
             and status not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}

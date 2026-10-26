@@ -555,6 +555,8 @@ def browser_cookie_error(exc):
         or "could not copy chrome cookie database" in text
         or "could not find" in text and "cookies database" in text
         or "browser cookies" in text and "decrypt" in text
+        # YouTube rejects a just-started live when browser cookies are sent; it works without them.
+        or "the page needs to be reloaded" in text
     )
 
 
@@ -741,6 +743,27 @@ def effective_proxy_url(explicit_proxy=None, environ=None, windows_proxy_fetcher
         return normalize_proxy_url(windows_proxy_fetcher())
     except Exception:
         return None
+
+
+UPCOMING_LIVE_UNITS = {
+    "second": "초", "minute": "분", "hour": "시간", "day": "일", "week": "주", "month": "개월", "year": "년",
+}
+
+
+def upcoming_live_wait(message):
+    """(retry_seconds, 한글 남은 시간) when yt-dlp says a live/premiere has not started yet, else None."""
+    text = str(message or "")
+    lower = text.lower()
+    if "live event will begin" not in lower and "premieres in" not in lower:
+        return None
+    match = re.search(r"\bin (\d+|an?) (second|minute|hour|day|week|month|year)s?\b", lower)
+    if not match:
+        return 60, "곧 시작 예정"
+    count = 1 if match[1] in ("a", "an") else int(match[1])
+    unit = match[2]
+    # A from-start capture loses nothing by starting late, so slow polling is fine for far-off events.
+    retry_seconds = 300 if unit in ("day", "week", "month", "year") else 60
+    return retry_seconds, f"{count}{UPCOMING_LIVE_UNITS[unit]} 후 시작 예정"
 
 
 def classify_error(message):
@@ -4056,9 +4079,28 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
     return options
 
 
+def format_clock(seconds):
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
+
+
 def progress_hook(on_event=None):
     last_emit = [0.0]
     unknown_total_reported = [False]
+    fragments_by_format = {}
+
+    def live_clock_text(data):
+        # Video and audio report separately; the slower one limits what is playable.
+        info = data.get("info_dict") or {}
+        fragment_seconds = info.get("target_duration")
+        if not fragment_seconds or data.get("fragment_index") is None:
+            return ""
+        fragments_by_format[info.get("format_id")] = data["fragment_index"]
+        text = format_clock(min(fragments_by_format.values()) * fragment_seconds)
+        if data.get("fragment_count"):
+            text += f" / {format_clock(data['fragment_count'] * fragment_seconds)}"
+        return text + " · "
 
     def hook(data):
         status = data.get("status")
@@ -4097,7 +4139,7 @@ def progress_hook(on_event=None):
                     on_event, "progress", percent=0, downloaded=downloaded,
                     total=0, speed=data.get("speed") or 0, eta=None, is_live=is_live,
                     speed_text=(data.get("_speed_str") or "").strip(),
-                    message=f"{'라이브 녹화 · ' if is_live else ''}{downloaded / (1024 * 1024):.2f} MiB · {(data.get('_speed_str') or '').strip()}",
+                    message=f"{'라이브 녹화 · ' + live_clock_text(data) if is_live else ''}{downloaded / (1024 * 1024):.2f} MiB · {(data.get('_speed_str') or '').strip()}",
                 )
                 if not is_live and not unknown_total_reported[0]:
                     emit_event(on_event, "status", message="Downloading")
@@ -5659,7 +5701,10 @@ def analyze_url(
                         pending_error = impersonate_exc
 
     if info is None:
-        if pending_error and not browser_dom_attempted and should_try_browser_dom_fallback(str(pending_error)):
+        # Live-start errors are transient YouTube states; the browser fallback only adds ~50s per retry.
+        if (pending_error and not browser_dom_attempted and not upcoming_live_wait(str(pending_error))
+                and "needs to be reloaded" not in str(pending_error)
+                and should_try_browser_dom_fallback(str(pending_error))):
             result = try_browser_dom_fallback(pending_error)
             if result:
                 return result
@@ -8340,6 +8385,158 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     }
 
 
+def is_bilibili_url(url):
+    host = (urllib.parse.urlparse(str(url or "")).hostname or "").lower()
+    return host == "b23.tv" or host == "bilibili.com" or host.endswith(".bilibili.com")
+
+
+def download_bilibili_stream(filename, info, ydl, on_event=None, workers=8, chunk_size=1024 * 1024):
+    from yt_dlp.networking import Request
+
+    output = Path(filename)
+    urls = list(dict.fromkeys(info.get("_clipflow_bilibili_urls") or [info["url"]]))
+    headers = dict(info.get("http_headers") or {})
+    # Use only mirrors returned by the extractor, never synthesize signed URLs.
+    urls.sort(key=lambda url: not (urllib.parse.urlparse(url).hostname or "").endswith(".bilivideo.com"))
+
+    def read_range(url, start, end, total=None):
+        with ydl.urlopen(Request(url, headers={**headers, "Range": f"bytes={start}-{end}"})) as response:
+            content_range = response.headers.get("Content-Range", "")
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
+            if (response.status != 206 or not match
+                    or int(match[1]) != start or int(match[2]) != end or int(match[3]) <= end
+                    or (total is not None and int(match[3]) != total)):
+                raise RuntimeError("Bilibili returned an incorrect byte range")
+            data = response.read(end - start + 2)
+            if len(data) != end - start + 1:
+                raise RuntimeError("Bilibili returned an incomplete byte range")
+            return data, int(match[3])
+
+    last_error = None
+    for url in urls:
+        try:
+            _, total = read_range(url, 0, 0)
+            break
+        except Exception as exc:
+            last_error = exc
+    else:
+        raise RuntimeError("Bilibili range preflight failed") from last_error
+
+    parts = output.with_name(output.name + ".bili-parts")
+    parts.mkdir(parents=True, exist_ok=True)
+    manifest = parts / "manifest.json"
+    identity = {"path": urllib.parse.urlparse(info["url"]).path,
+                "format": info.get("format_id"), "total": total, "chunk_size": chunk_size}
+    if manifest.exists():
+        if json.loads(manifest.read_text(encoding="utf-8")) != identity:
+            raise RuntimeError("Bilibili source changed; existing partial download cannot be reused")
+    else:
+        pending = parts / "manifest.tmp"
+        pending.write_text(json.dumps(identity), encoding="utf-8")
+        pending.replace(manifest)
+
+    ranges = [(index, start, min(start + chunk_size, total) - 1)
+              for index, start in enumerate(range(0, total, chunk_size))]
+    completed_bytes = sum(end - start + 1 for index, start, end in ranges
+                          if (parts / f"{index:08d}.bin").exists()
+                          and (parts / f"{index:08d}.bin").stat().st_size == end - start + 1)
+    downloaded = completed_bytes
+    started_at = time.monotonic()
+    last_emit = started_at
+    stop = threading.Event()
+
+    def fetch(item):
+        index, start, end = item
+        segment = parts / f"{index:08d}.bin"
+        expected = end - start + 1
+        if segment.exists() and segment.stat().st_size == expected:
+            return 0
+        error = None
+        for attempt in range(4):
+            if stop.is_set():
+                raise RuntimeError("Bilibili download stopped")
+            try:
+                data, _ = read_range(urls[attempt % len(urls)], start, end, total)
+                pending = segment.with_suffix(".tmp")
+                pending.write_bytes(data)
+                pending.replace(segment)
+                return expected
+            except Exception as exc:
+                error = exc
+                if attempt < 3:
+                    stop.wait(min(attempt + 1, 3))
+        raise RuntimeError(f"Bilibili range {start}-{end} failed after retries") from error
+
+    emit_event(on_event, "status", message="빌리빌리 병렬 다운로드")
+    emit_byte_download_progress(on_event, downloaded, total, 0)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(fetch, item) for item in ranges]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                downloaded += future.result()
+                now = time.monotonic()
+                if now - last_emit >= 0.25 or downloaded == total:
+                    speed = (downloaded - completed_bytes) / max(0.001, now - started_at)
+                    emit_byte_download_progress(on_event, downloaded, total, speed)
+                    last_emit = now
+        except BaseException:
+            stop.set()
+            for future in futures:
+                future.cancel()
+            raise
+
+    # Only fully validated chunks are committed; a killed worker never marks a
+    # partially written chunk complete, and another downloader's .part is ignored.
+    pending = output.with_name(output.name + ".bili-joining")
+    with pending.open("wb") as target:
+        for index, start, end in ranges:
+            segment = parts / f"{index:08d}.bin"
+            if segment.stat().st_size != end - start + 1:
+                raise RuntimeError("Bilibili partial file changed during assembly")
+            with segment.open("rb") as source:
+                shutil.copyfileobj(source, target)
+    if pending.stat().st_size != total:
+        raise RuntimeError("Bilibili final file size mismatch")
+    pending.replace(output)
+    for index, _start, _end in ranges:
+        (parts / f"{index:08d}.bin").unlink()
+    manifest.unlink()
+    parts.rmdir()
+    return True, True
+
+
+def bilibili_download_factory(base_factory, on_event=None):
+    from yt_dlp.extractor.bilibili import BiliBiliIE as BaseBiliBiliIE
+
+    class BiliBiliIE(BaseBiliBiliIE):
+        def extract_formats(self, play_info):
+            formats = super().extract_formats(play_info)
+            mirrors = {}
+            dash = play_info.get("dash") or {}
+            for stream in (dash.get("video") or []) + (dash.get("audio") or []):
+                base = stream.get("baseUrl") or stream.get("base_url")
+                mirrors[base] = [base] + (stream.get("backupUrl") or stream.get("backup_url") or [])
+            for fmt in formats:
+                if fmt["url"] in mirrors:
+                    fmt["_clipflow_bilibili_urls"] = mirrors[fmt["url"]]
+            return formats
+
+    class BilibiliYoutubeDL(base_factory):
+        def __init__(self, params):
+            super().__init__(params)
+            self.add_info_extractor(BiliBiliIE())
+
+        def dl(self, name, info, subtitle=False, test=False):
+            if (not subtitle and not test and name != "-"
+                    and info.get("_clipflow_bilibili_urls")
+                    and not self.params.get("download_ranges")
+                    and not info.get("requested_formats")):
+                return download_bilibili_stream(name, info, self, on_event=on_event)
+            return super().dl(name, info, subtitle=subtitle, test=test)
+
+    return BilibiliYoutubeDL
+
+
 def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
     try:
         output_dir = ensure_output_directory(output_dir_for_candidate(candidate, output_dir))
@@ -8402,13 +8599,18 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
 
     if ydl_factory is None:
         ydl_factory = youtube_dl_factory()
+        if is_bilibili_url(target_url):
+            ydl_factory = bilibili_download_factory(ydl_factory, on_event=on_event)
     options = build_download_options(candidate, output_dir, cookie_source=cookie_source, on_event=on_event, proxy_url=proxy_url)
+    if is_bilibili_url(target_url):
+        options["socket_timeout"] = 15
 
     def run_ydl_download(run_options, run_candidate):
         with yt_dlp_ffmpeg_path_context(run_options):
             with ydl_factory(run_options) as ydl:
                 download_info = run_candidate.get("_download_info") if isinstance(run_candidate, dict) else None
-                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(run_candidate):
+                if (isinstance(download_info, dict) and download_info
+                        and download_info_reuse_supported(run_candidate) and not is_bilibili_url(target_url)):
                     ydl.process_video_result(json_ready_download_info(download_info), download=True)
                 else:
                     ydl.download([target_url])
