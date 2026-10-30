@@ -86,6 +86,14 @@ __all__ = [
 
 
 EVENT_MESSAGE_LIMIT = 500
+EVENT_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _is_download_progress_line(message):
+    # yt-dlp prints these several times a second; a live capture would flood the log.
+    text = str(message or "")
+    # Parallel streams prefix their lines with an index ("2: [download] ...").
+    return "[download]" in text[:16] and ("(frag " in text or "%" in text)
 _QT_WARNING_FILTER_INSTALLED = False
 
 
@@ -2446,6 +2454,25 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if self.event_messages and self.event_messages[-1] == message:
             return
         self.event_messages.append(message)
+        if getattr(sys, "frozen", False) and not _is_download_progress_line(message):
+            # Installed app only, so test/dev windows don't write into the user's log.
+            self._write_event_log(message)
+
+    def _write_event_log(self, message):
+        # Unattended runs (channel watches) are checked afterwards from this file.
+        try:
+            from tools.clipflow_cache import clipflow_data_root
+        except ImportError:
+            from clipflow_cache import clipflow_data_root
+        path = clipflow_data_root() / "clipflow.log"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > EVENT_LOG_MAX_BYTES:
+                path.replace(path.with_suffix(".log.old"))
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+        except OSError:
+            pass  # logging must never break the app
 
 
 def main():
