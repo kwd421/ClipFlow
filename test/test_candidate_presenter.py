@@ -136,7 +136,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "mp4-av1-2160")
 
-    def test_select_candidate_codec_preference_can_choose_lower_resolution_match(self):
+    def test_select_candidate_codec_preference_does_not_lower_resolution(self):
         candidates = [
             {"id": "mp4-av1-2160", "output_ext": "mp4", "height": 2160, "fps": 30, "vcodec": "av01", "acodec": "none", "sort_bytes": 300},
             {"id": "mp4-h264-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 200},
@@ -147,7 +147,7 @@ class CandidatePresenterTests(unittest.TestCase):
             presenter.DownloadPreferences(quality="자동", output_format="자동", codec="H264", frame_rate="자동"),
         )
 
-        self.assertEqual(selected["id"], "mp4-h264-1080")
+        self.assertEqual(selected["id"], "mp4-av1-2160")
 
     def test_select_candidate_hdr_off_filters_hdr_candidates(self):
         candidates = [

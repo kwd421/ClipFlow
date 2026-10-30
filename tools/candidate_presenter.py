@@ -246,6 +246,10 @@ def _best_candidate(candidates, preferences):
         remote_api_score = _browser_remote_mp4_api_score(candidate)
         if codec_auto and quality_auto:
             return (_downloadable_score(candidate), remote_api_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size, codec_score)
+        if not codec_auto:
+            # A chosen codec only breaks ties: same-quality codec variants are merged
+            # before selection, so codec-first would fall to e.g. a lone 144p AV1.
+            return (_downloadable_score(candidate), remote_api_score, height, fps, codec_score, direct_score, _stable_audio_codec_score(candidate), size)
         return (_downloadable_score(candidate), remote_api_score, codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
 
     return max(candidates, key=score) if candidates else None

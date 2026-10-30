@@ -240,6 +240,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis_worker = None
         self._analysis_discard_result = False
         self._upcoming_live_urls = set()
+        self._channel_live_captures = {}  # channel /live URL -> watch URLs already queued for capture
         self.download_thread = None
         self.download_worker = None
         self.active_download_row = None
@@ -1762,6 +1763,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if self._analysis_discard_result:
             self._analysis_discard_result = False
             return
+        if engine.is_youtube_channel_live_url(self._analysis_url):
+            self._queue_channel_live_capture(analysis)
+            return
         self.analysis = analysis
         self._upcoming_live_urls.discard(self._analysis_url)
         self._remember_download_infos(analysis)
@@ -1794,11 +1798,28 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._analysis_discard_result = False
             return
         message = engine.strip_ansi(message)
-        detail = self._analysis_error_detail(message)
         live_wait = engine.upcoming_live_wait(message)
         if not live_wait and self._analysis_url in self._upcoming_live_urls and "needs to be reloaded" in message.lower():
             # YouTube returns this transient error while the waiting live is going on air.
             live_wait = (15, "시작 확인 중")
+        self._finish_analysis_rows_failed(message, live_wait)
+
+    def _queue_channel_live_capture(self, analysis):
+        # A watched channel keeps its waiting row; each new live it starts is captured as its own row.
+        channel_url = self._analysis_url
+        video_url = str(analysis.get("webpage_url") or "").strip()
+        captured = self._channel_live_captures.setdefault(channel_url, set())
+        if video_url and video_url not in captured:
+            captured.add(video_url)
+            self._queued_analysis_downloads.append(
+                {"url": video_url, "auto_download": True, "clip_range": None, "clip_cut_mode": None}
+            )
+            self._append_event_message(f"채널 라이브 녹화 시작: {video_url}")
+        message = f"채널 라이브 녹화 중: {video_url}"
+        self._finish_analysis_rows_failed(message, (engine.CHANNEL_LIVE_POLL_SECONDS, "채널 감시 중"))
+
+    def _finish_analysis_rows_failed(self, message, live_wait):
+        detail = self._analysis_error_detail(message)
         if live_wait:
             self._upcoming_live_urls.add(self._analysis_url)
             detail = f"라이브 시작 대기 중 · {live_wait[1]}"
@@ -2072,6 +2093,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             return False
         if row.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS}:
             return True
+        if row.get("_upcoming_live_wait"):
+            return True  # removing it would silently cancel the live/channel wait
         return self._row_is_downloading(row) or row in self.queued_download_rows
 
     def _preferred_output_ext(self):

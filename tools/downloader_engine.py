@@ -750,10 +750,24 @@ UPCOMING_LIVE_UNITS = {
 }
 
 
+CHANNEL_LIVE_POLL_SECONDS = 120
+
+
+def is_youtube_channel_live_url(url):
+    """True for a channel's /live address (e.g. youtube.com/@name/live), which resolves to its current live."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    return host in {"youtube.com", "m.youtube.com"} and bool(
+        re.fullmatch(r"/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)/live/?", parsed.path)
+    )
+
+
 def upcoming_live_wait(message):
     """(retry_seconds, 한글 남은 시간) when yt-dlp says a live/premiere has not started yet, else None."""
     text = str(message or "")
     lower = text.lower()
+    if "channel is not currently live" in lower:
+        return CHANNEL_LIVE_POLL_SECONDS, "채널 감시 중"
     if "live event will begin" not in lower and "premieres in" not in lower:
         return None
     match = re.search(r"\bin (\d+|an?) (second|minute|hour|day|week|month|year)s?\b", lower)
