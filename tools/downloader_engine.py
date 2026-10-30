@@ -782,6 +782,10 @@ def upcoming_live_wait(message):
     lower = text.lower()
     if "channel is not currently live" in lower:
         return CHANNEL_LIVE_POLL_SECONDS, "채널 감시 중"
+    if "instagram user is not live" in lower:
+        return INSTAGRAM_LIVE_POLL_SECONDS, "인스타 감시 중"
+    if "instagram user lookup rate-limited" in lower:
+        return INSTAGRAM_LIVE_POLL_SECONDS, "인스타 계정 확인 대기"
     if "live event will begin" not in lower and "premieres in" not in lower:
         return None
     match = re.search(r"\bin (\d+|an?) (second|minute|hour|day|week|month|year)s?\b", lower)
@@ -5562,6 +5566,9 @@ def analyze_url(
     if is_cime_page_url(url):
         return analyze_cime(url, on_event=on_event, cookie_source=cookie_source)
 
+    if INSTAGRAM_LIVE_URL_RE.match(url) or is_instagram_live_target_url(url):
+        return analyze_instagram_live(url, cookie_source=cookie_source, on_event=on_event)
+
     if is_soop_page_url(url):
         if ydl_factory is None:
             ydl_factory = youtube_dl_factory()
@@ -8565,6 +8572,305 @@ def bilibili_download_factory(base_factory, on_event=None):
     return BilibiliYoutubeDL
 
 
+INSTAGRAM_APP_ID = "936619743392459"
+INSTAGRAM_LIVE_POLL_SECONDS = 300
+INSTAGRAM_NOT_LIVE_MESSAGE = "Instagram user is not live"
+INSTAGRAM_LOOKUP_LIMITED_MESSAGE = "Instagram user lookup rate-limited"
+# Live DASH segment numbers started at 100 on every broadcast checked, and every
+# segment from the start stays on the CDN while the live runs.
+INSTAGRAM_LIVE_FIRST_SEGMENT = 100
+INSTAGRAM_LIVE_SEGMENT_SECONDS = 2
+INSTAGRAM_RESERVED_PATHS = {"p", "reel", "reels", "stories", "explore", "tv", "accounts", "direct", "live"}
+INSTAGRAM_LIVE_URL_RE = re.compile(r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]+)/live/(\d+)", re.IGNORECASE)
+
+
+def instagram_live_target_url(text):
+    """Account address (instagram.com/name, or one of its live links) -> its watch URL, else None."""
+    text = str(text or "").strip()
+    if not re.match(r"https?://", text):
+        text = f"https://{text}"
+    parsed = urllib.parse.urlparse(text)
+    if parsed.netloc.lower().removeprefix("www.").removeprefix("m.") != "instagram.com":
+        return None
+    match = re.match(r"/([A-Za-z0-9._]+)(?:/live(?:/\d+)?)?/?$", parsed.path)
+    if not match or match[1].lower() in INSTAGRAM_RESERVED_PATHS:
+        return None
+    return f"https://www.instagram.com/{match[1]}/live/"
+
+
+def is_instagram_live_target_url(url):
+    return bool(url) and instagram_live_target_url(url) == str(url).strip()
+
+
+def is_live_watch_target_url(url):
+    """URLs that keep waiting for the account's next live instead of naming one video."""
+    return is_youtube_channel_live_url(url) or is_instagram_live_target_url(url)
+
+
+def instagram_api_headers(cookie_source):
+    jar = load_cookie_jar(cookie_source)
+    cookies = {cookie.name: cookie.value for cookie in (jar or []) if "instagram.com" in str(cookie.domain)}
+    if not cookies.get("sessionid"):
+        raise RuntimeError("인스타 라이브는 Instagram에 로그인된 브라우저 쿠키가 필요합니다. 쿠키에서 로그인한 브라우저를 선택하세요.")
+    return {
+        "User-Agent": USER_AGENT,
+        "X-IG-App-ID": INSTAGRAM_APP_ID,
+        "X-CSRFToken": cookies.get("csrftoken", ""),
+        "Referer": "https://www.instagram.com/",
+        "Cookie": "; ".join(f"{name}={value}" for name, value in cookies.items()),
+    }
+
+
+def instagram_api_json(url, headers):
+    """(HTTP status, parsed JSON body); error statuses return their JSON body too."""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read() or b"{}")
+        except ValueError:
+            return exc.code, {}
+
+
+def instagram_user_id_cache_path():
+    return Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "ClipFlow" / "instagram_user_ids.json"
+
+
+def instagram_user_id(username, headers):
+    # Profile lookups are rate-limited much harder than live checks, so each account is looked up once.
+    cache_path = instagram_user_id_cache_path()
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if cache.get(username):
+        return cache[username]
+    status, data = instagram_api_json(f"https://i.instagram.com/api/v1/users/web_profile_info/?username={urllib.parse.quote(username)}", headers)
+    user_id = str(((data.get("data") or {}).get("user") or {}).get("id") or "")
+    if status == 429:
+        raise RuntimeError(INSTAGRAM_LOOKUP_LIMITED_MESSAGE)
+    if not user_id:
+        raise RuntimeError(f"Instagram 계정을 찾지 못했습니다: {username} (HTTP {status})")
+    cache[username] = user_id
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    return user_id
+
+
+def remember_instagram_user_id(username, user_id):
+    cache_path = instagram_user_id_cache_path()
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if user_id and cache.get(username) != user_id:
+        cache[username] = user_id
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache), encoding="utf-8")
+
+
+def instagram_live_info(broadcast_id, headers):
+    status, data = instagram_api_json(f"https://i.instagram.com/api/v1/live/{broadcast_id}/info/", headers)
+    return data if status == 200 else None
+
+
+def analyze_instagram_live(url, cookie_source="없음", on_event=None):
+    headers = instagram_api_headers(cookie_source)
+    match = INSTAGRAM_LIVE_URL_RE.match(str(url))
+    if match:
+        username, broadcast_id = match[1], match[2]
+        emit_event(on_event, "status", message=f"인스타 라이브 확인 중: {username}")
+        data = instagram_live_info(broadcast_id, headers)
+        if not data:
+            raise RuntimeError("인스타 라이브가 끝났거나 볼 수 없습니다.")
+    else:
+        username = urllib.parse.urlparse(url).path.strip("/").split("/")[0]
+        emit_event(on_event, "status", message=f"인스타 계정 라이브 확인 중: {username}")
+        user_id = instagram_user_id(username, headers)
+        status, data = instagram_api_json(f"https://www.instagram.com/api/v1/live/web_info/?target_user_id={user_id}", headers)
+        if status == 404 or not data.get("id"):
+            raise RuntimeError(f"{INSTAGRAM_NOT_LIVE_MESSAGE} ({username})")
+    if data.get("broadcast_status") not in ("active", "interrupted"):
+        raise RuntimeError(f"인스타 라이브가 진행 중이 아닙니다: {data.get('broadcast_status')}")
+    owner = data.get("broadcast_owner") or {}
+    username = owner.get("username") or username
+    remember_instagram_user_id(username, str(owner.get("pk") or owner.get("id") or ""))
+    broadcast_id = str(data.get("id"))
+    started = time.localtime(safe_int(data.get("published_time")) or time.time())
+    title = f"{username} Instagram Live {time.strftime('%Y-%m-%d %H-%M', started)}"
+    source_url = f"https://www.instagram.com/{username}/live/{broadcast_id}"
+    dimensions = data.get("dimensions") or {}
+    width, height = safe_int(dimensions.get("width")), safe_int(dimensions.get("height"))
+    candidate = {
+        "id": f"instagram-live-{broadcast_id}",
+        "format_id": "instagram-live",
+        "instagram_live_id": broadcast_id,
+        "url": data.get("dash_abr_playback_url") or data.get("dash_playback_url") or "",
+        "source": source_url,
+        "webpage_url": source_url,
+        "title": title,
+        "display_title": title,
+        "thumbnail": data.get("cover_frame_url") or "",
+        "duration": 0,
+        "ext": "mp4",
+        "output_ext": "mp4",
+        "resolution": f"{width}x{height}" if width and height else "unknown",
+        "height": height,
+        "vcodec": "avc1",
+        "acodec": "mp4a",
+        "sort_bytes": 0,
+        "is_live": True,
+        "live_status": "is_live",
+        "media_type": "video",
+        "is_manifest": True,
+    }
+    return {"url": url, "webpage_url": source_url, "title": title, "candidates": [candidate], "warnings": [], "is_playlist": False}
+
+
+def _instagram_mpd(mpd_url):
+    request = urllib.request.Request(mpd_url, headers={"User-Agent": USER_AGENT, "Referer": "https://www.instagram.com/"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def _instagram_best_representations(mpd):
+    bandwidths = {
+        match[1]: safe_int(re.search(r'bandwidth="(\d+)"', match[2]).group(1))
+        for match in re.finditer(r'<Representation\s+id="([^"]+)"(.*?)</Representation>', mpd, re.S)
+    }
+    video = max((rep for rep in bandwidths if rep.endswith("-v")), key=bandwidths.get)
+    audio = max((rep for rep in bandwidths if rep.endswith("-a")), key=bandwidths.get)
+    return video, audio
+
+
+def download_instagram_live(candidate, output_dir, cookie_source="없음", on_event=None):
+    """Record an Instagram live from its first segment until it ends, then mux to MP4.
+
+    Segments are kept as files under <output>.iglive so a restarted download resumes,
+    and segments that failed while live are retried once the broadcast is over.
+    """
+    headers = instagram_api_headers(cookie_source)
+    broadcast_id = str(candidate["instagram_live_id"])
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    work_dir = output_path.with_name(output_path.name + ".iglive")
+    data = instagram_live_info(broadcast_id, headers) or {}
+    mpd_url = data.get("dash_abr_playback_url") or data.get("dash_playback_url") or candidate.get("url")
+    if not mpd_url:
+        raise RuntimeError("인스타 라이브 스트림 주소를 찾지 못했습니다.")
+    reps = _instagram_best_representations(_instagram_mpd(mpd_url))
+    base = mpd_url.split("?")[0].rsplit("/", 1)[0] + "/"
+    query = "?ms=m_C&sc_t=1&ccb=2-4"
+    media_headers = {"User-Agent": USER_AGENT, "Referer": "https://www.instagram.com/"}
+
+    def fetch(relative):
+        request = urllib.request.Request(urllib.parse.urljoin(base, relative + query), headers=media_headers)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    return response.read()
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.5 + attempt)
+        return None
+
+    def segment_path(rep, number):
+        return work_dir / rep / f"{number}.m4v"
+
+    def fetch_segment(job):
+        rep, number = job
+        path = segment_path(rep, number)
+        if path.exists():
+            return True
+        chunk = fetch(f"../ID/{rep}/{broadcast_id}_0-{number}.m4v")
+        if chunk:
+            path.write_bytes(chunk)
+        return bool(chunk)
+
+    def live_edge():
+        try:
+            return safe_int(re.findall(r'FBPredictedMediaEndNumber="(\d+)"', _instagram_mpd(mpd_url))[0])
+        except (IndexError, OSError, urllib.error.URLError):
+            return 0
+
+    for rep in reps:
+        (work_dir / rep).mkdir(parents=True, exist_ok=True)
+        init_path = work_dir / rep / "init.m4v"
+        for _ in range(30):
+            if init_path.exists():
+                break
+            chunk = fetch(f"../{rep}/{broadcast_id}_0-init.m4v")
+            if chunk:
+                init_path.write_bytes(chunk)
+            else:
+                time.sleep(2)
+        if not init_path.exists():
+            raise RuntimeError(f"인스타 라이브 초기 세그먼트를 받지 못했습니다: {rep}")
+
+    emit_event(on_event, "status", message=f"인스타 라이브 녹화 시작 ({reps[0]})")
+    number, edge, idle = INSTAGRAM_LIVE_FIRST_SEGMENT, live_edge(), 0
+    downloaded = 0
+    with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        while True:
+            if number >= edge - 1:
+                # At the live edge: wait for new segments, stop once Instagram says the broadcast is over.
+                time.sleep(2)
+                new_edge = live_edge()
+                if new_edge > edge:
+                    edge, idle = new_edge, 0
+                    continue
+                idle += 1
+                if idle % 5 == 0:
+                    status = (instagram_live_info(broadcast_id, headers) or {}).get("broadcast_status")
+                    if status not in ("active", "interrupted"):
+                        break
+                if idle > 300:
+                    break
+                continue
+            batch = list(range(number, min(number + 8, edge - 1)))
+            list(pool.map(fetch_segment, [(rep, n) for n in batch for rep in reps]))
+            number = batch[-1] + 1
+            downloaded = sum(path.stat().st_size for path in work_dir.glob("*/*.m4v"))
+            recorded = (number - INSTAGRAM_LIVE_FIRST_SEGMENT) * INSTAGRAM_LIVE_SEGMENT_SECONDS
+            live = (edge - INSTAGRAM_LIVE_FIRST_SEGMENT) * INSTAGRAM_LIVE_SEGMENT_SECONDS
+            emit_event(
+                on_event, "progress", percent=0, downloaded=downloaded, total=0, is_live=True,
+                message=f"라이브 녹화 · {format_clock(recorded)} / {format_clock(live)} · {downloaded / (1024 * 1024):.2f} MiB",
+            )
+        final_edge = max(edge, live_edge())
+        jobs = [(rep, n) for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge) for rep in reps]
+        list(pool.map(fetch_segment, jobs))  # fill segments that failed while live
+    missing = sum(1 for rep, n in jobs if not segment_path(rep, n).exists())
+    if missing:
+        emit_event(on_event, "log", message=f"인스타 라이브: 서버에 없는 세그먼트 {missing}개는 건너뜁니다")
+
+    emit_event(on_event, "progress", percent=100, phase="finishing", message="마무리 중")
+    tracks = []
+    for rep in reps:
+        track = work_dir / f"{rep}.mp4"
+        with open(track, "wb") as handle:
+            handle.write((work_dir / rep / "init.m4v").read_bytes())
+            for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge):
+                if segment_path(rep, n).exists():
+                    handle.write(segment_path(rep, n).read_bytes())
+        tracks.append(track)
+    ffmpeg_exe = ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for Instagram live recordings")
+    part_path = output_path.with_name(output_path.name + ".part")
+    subprocess.run(
+        [ffmpeg_exe, "-y", "-loglevel", "error", "-i", str(tracks[0]), "-i", str(tracks[1]),
+         "-c", "copy", "-movflags", "+faststart", "-f", "mp4", str(part_path)],
+        check=True, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    part_path.replace(output_path)
+    shutil.rmtree(work_dir, ignore_errors=True)
+    emit_event(on_event, "progress", percent=100, message="100%")
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return {"ok": True, "output_dir": str(output_dir), "output_path": str(output_path), "target_url": candidate.get("source")}
+
+
 def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
     try:
         output_dir = ensure_output_directory(output_dir_for_candidate(candidate, output_dir))
@@ -8580,6 +8886,8 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
             "output_path": str(existing_output_path),
             "target_url": candidate.get("source") or page_url or candidate.get("url"),
         }
+    if (candidate or {}).get("instagram_live_id"):
+        return download_instagram_live(candidate, output_dir, cookie_source=cookie_source, on_event=on_event)
     remove_too_small_existing_output(candidate, output_dir, on_event=on_event)
     output_target = final_output_path_for_candidate(candidate, output_dir)
     if output_target and not is_youtube_live_candidate(candidate):
@@ -9106,6 +9414,7 @@ class AnalysisProcessPool:
         self.max_idle = max_idle
         self.command_factory = command_factory or persistent_analysis_worker_command
         self._idle = []
+        self._active = set()  # running workers, so close_all can unblock a waiting analysis
         self._lock = threading.Lock()
         self._trim_timer = None
 
@@ -9155,10 +9464,12 @@ class AnalysisProcessPool:
         with self._lock:
             self._trim_locked()
             worker = self._idle.pop() if self._idle else self._new_process()
+            self._active.add(worker)
         try:
             return worker.run(request, on_event=on_event)
         finally:
             with self._lock:
+                self._active.discard(worker)
                 if worker.is_alive():
                     self._idle.append(worker)
                     self._trim_locked()
@@ -9171,8 +9482,9 @@ class AnalysisProcessPool:
             if self._trim_timer:
                 self._trim_timer.cancel()
                 self._trim_timer = None
-            workers = list(self._idle)
+            workers = list(self._idle) + list(self._active)
             self._idle = []
+            self._active = set()
         for worker in workers:
             worker.close()
 

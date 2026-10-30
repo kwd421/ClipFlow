@@ -250,7 +250,7 @@ class LiveTargetsDialog(AppDialog):
             parent,
             window_title="자동 라이브 타겟",
             title_text="자동 라이브 타겟",
-            detail_text="등록한 YouTube 채널이 라이브를 시작하면 처음부터 자동으로 녹화합니다. 앱이 켜져 있어야 합니다.",
+            detail_text="등록한 YouTube 채널이나 Instagram 계정이 라이브를 시작하면 처음부터 자동으로 녹화합니다. 앱이 켜져 있어야 하며, Instagram은 로그인된 브라우저 쿠키가 필요합니다.",
             minimum_width=460,
         )
         self._add_target = add_target
@@ -259,7 +259,7 @@ class LiveTargetsDialog(AppDialog):
 
         input_row = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("채널 주소 또는 @아이디")
+        self.url_input.setPlaceholderText("YouTube @아이디·채널 주소 또는 instagram.com/아이디")
         self.url_input.returnPressed.connect(self._submit)
         add_button = OutlinedButton("추가")
         add_button.setObjectName("PrimaryPopupButton")
@@ -318,7 +318,7 @@ class LiveTargetsDialog(AppDialog):
     def _submit(self):
         url = self._add_target(self.url_input.text())
         if not url:
-            self.error_label.setText("YouTube 채널 주소(예: youtube.com/@아이디)를 넣어 주세요.")
+            self.error_label.setText("YouTube 채널(예: youtube.com/@아이디)이나 Instagram 계정(예: instagram.com/아이디) 주소를 넣어 주세요.")
             self.error_label.show()
             self.adjustSize()
             return

@@ -443,6 +443,16 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         worker = self.analysis_worker
         self.analysis_thread = None
         self.analysis_worker = None
+        try:
+            from tools.clipflow_updater import update_shutdown_requested
+        except ImportError:
+            from clipflow_updater import update_shutdown_requested
+        if not update_shutdown_requested():
+            # Close the analysis worker first so a waiting analysis thread can finish before detach.
+            try:
+                engine.analysis_process_pool().close_all()
+            except Exception:
+                pass
         self._detach_running_thread(thread, worker)
         for item in list(getattr(self, "active_downloads", []) or []):
             row = item.get("row")
@@ -1772,7 +1782,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if self._analysis_discard_result:
             self._analysis_discard_result = False
             return
-        if engine.is_youtube_channel_live_url(self._analysis_url):
+        if engine.is_live_watch_target_url(self._analysis_url):
             self._queue_channel_live_capture(analysis)
             return
         self.analysis = analysis
@@ -1831,7 +1841,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         LiveTargetsDialog(self._live_targets(), self._add_live_target, self._remove_live_target, self).exec()
 
     def _add_live_target(self, text):
-        url = engine.youtube_channel_live_url(text)
+        url = engine.youtube_channel_live_url(text) or engine.instagram_live_target_url(text)
         if not url:
             return None
         targets = self._live_targets()
@@ -2538,7 +2548,8 @@ def main():
     QTimer.singleShot(800, window.schedule_startup_update_check)
 
     if os.environ.get("CLIPFLOW_QT_SMOKE") == "1":
-        QTimer.singleShot(0, lambda: (print("ClipFlow smoke launch OK"), app.quit()))
+        # Close the window like a real exit so startup work (saved live target watches) shuts down cleanly.
+        QTimer.singleShot(0, lambda: (print("ClipFlow smoke launch OK"), window.close(), app.quit()))
 
     return app.exec()
 
