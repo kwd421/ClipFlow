@@ -179,6 +179,10 @@ class ActionMixin:
             return
         if row.get("status") in {"분석 중", DOWNLOAD_STATUS}:
             return
+        if row.get("_upcoming_live_wait"):
+            # Deleting a saved target's watch row stops watching it, also on later launches.
+            for url in self._row_urls_for_match(row) & set(self._live_targets()):
+                self._remove_live_target(url)
         if self._row_analysis_active(row) or self._row_matches_running_analysis(row):
             cancel = getattr(self, "_cancel_active_analysis", None)
             if callable(cancel):

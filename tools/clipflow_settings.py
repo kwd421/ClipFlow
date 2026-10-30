@@ -19,11 +19,11 @@ try:
     from tools import clipflow_theme as theme
     from tools.clipflow_updater import _dispatch_to_main_thread
     from tools.clipflow_dialogs import PreferencesDialog, _combo_text
-    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
+    from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, OutlinedButton, UpdateAvailableBanner
     from tools.clipflow_rows import build_quality_options, row_kind
     from tools.clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
-        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
+        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, LIVE_TARGETS_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
         PREF_FRAME_SETTING, PREF_HDR_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
@@ -33,11 +33,11 @@ except ImportError:
     import clipflow_theme as theme
     from clipflow_updater import _dispatch_to_main_thread
     from clipflow_dialogs import PreferencesDialog, _combo_text
-    from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
+    from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, OutlinedButton, UpdateAvailableBanner
     from clipflow_rows import build_quality_options, row_kind
     from clipflow_theme import (
         APP_NAME, COMPLETED_STATUS, COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES, COOKIE_SOURCE_SETTING,
-        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
+        COOKIE_SOURCE_TO_DISPLAY, DOWNLOAD_CONCURRENCY, DOWNLOAD_CONCURRENCY_SETTING, DOWNLOAD_HISTORY_SETTING, LIVE_TARGETS_SETTING, PREF_CODEC_SETTING, PREF_FORMAT_SETTING,
         PREF_FRAME_SETTING, PREF_HDR_SETTING, PREF_QUALITY_SETTING, PREFERENCE_DEFAULTS, SAVE_FOLDER_SETTING,
         cookie_source_from_display,
     )
@@ -49,6 +49,7 @@ PREFERENCE_TOOLTIPS = {
     "코덱": "자동이면 코덱을 제한하지 않고 best 방식으로 고릅니다. 특정 코덱을 고르면 같은 화질 안에서 그 코덱을 우선합니다. 화질이 코덱보다 우선합니다.",
     "HDR": "끔이면 SDR 후보를 우선합니다. 켬이면 HDR 후보도 허용합니다.",
     "병렬": "동시에 받을 다운로드 개수입니다. 기본값은 3입니다.",
+    "라이브": "등록한 YouTube 채널이 라이브를 시작하면 처음부터 자동으로 녹화합니다. 앱이 켜져 있어야 하며, 앱을 켜면 자동으로 감시를 다시 시작합니다.",
 }
 
 
@@ -311,6 +312,26 @@ class SettingsMixin:
         layout.addWidget(concurrency_combo, concurrency_row, 1)
         concurrency_combo.currentIndexChanged.connect(lambda *_args, c=concurrency_combo: self._set_download_concurrency(c.currentText()))
 
+        live_row = 5
+        live_label = QLabel("라이브")
+        live_label.setObjectName("PreferencePopupLabel")
+        live_label.setAlignment(Qt.AlignCenter)
+        live_tooltip = PREFERENCE_TOOLTIPS["라이브"]
+        live_label.setToolTip(live_tooltip)
+        live_button = OutlinedButton("자동 타겟")
+        live_button.setObjectName("SecondaryButton")
+        live_button.setCursor(Qt.PointingHandCursor)
+        live_button.setToolTip(live_tooltip)
+        live_button.setFixedWidth(88)
+        layout.addWidget(live_label, live_row, 0)
+        layout.addWidget(live_button, live_row, 1)
+
+        def open_live_targets():
+            popup.close()
+            self._open_live_targets_dialog()
+
+        live_button.clicked.connect(open_live_targets)
+
         refresh_controls()
         popup.adjustSize()
         popup.setFixedWidth(max(172, popup.sizeHint().width()))
@@ -327,6 +348,17 @@ class SettingsMixin:
         popup.destroyed.connect(lambda *_args: setattr(self, "preferences_popup", None))
         self.preferences_popup = popup
         popup.show()
+
+    def _live_targets(self):
+        raw = self.settings.value(LIVE_TARGETS_SETTING, "", str) or ""
+        try:
+            targets = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [target for target in targets if isinstance(target, str) and target]
+
+    def _set_live_targets(self, targets):
+        self.settings.setValue(LIVE_TARGETS_SETTING, json.dumps(list(targets)))
 
     def _initial_save_folder(self):
         saved = self.settings.value(SAVE_FOLDER_SETTING, "", str)

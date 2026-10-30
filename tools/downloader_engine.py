@@ -762,6 +762,20 @@ def is_youtube_channel_live_url(url):
     )
 
 
+def youtube_channel_live_url(text):
+    """Channel address in any common form (@name, channel URL, /streams, /live) -> its /live URL, else None."""
+    text = str(text or "").strip()
+    if re.fullmatch(r"@[\w.\-]+", text):
+        text = f"https://www.youtube.com/{text}"
+    if not re.match(r"https?://", text):
+        text = f"https://{text}"
+    parsed = urllib.parse.urlparse(text)
+    if parsed.netloc.lower().removeprefix("www.").removeprefix("m.") != "youtube.com":
+        return None
+    match = re.match(r"/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)(?:/[^/]*)?/?$", parsed.path)
+    return f"https://www.youtube.com/{match[1]}/live" if match else None
+
+
 def upcoming_live_wait(message):
     """(retry_seconds, 한글 남은 시간) when yt-dlp says a live/premiere has not started yet, else None."""
     text = str(message or "")

@@ -817,6 +817,7 @@ WINDOW_SIZE_SETTING = "window_size"
 DOWNLOAD_CONCURRENCY_SETTING = "download_concurrency"
 PERMANENT_DELETE_SETTING = "permanent_delete"
 THEME_MODE_SETTING = "theme_mode"
+LIVE_TARGETS_SETTING = "live_targets"
 
 PREFERENCE_DEFAULTS = {
     "quality": "자동",

@@ -35,7 +35,7 @@ try:
     from tools.clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
     from tools.clipflow_rows import build_quality_options
     from tools.clipflow_workers import AnalyzeWorker
-    from tools.clipflow_dialogs import DeleteConfirmDialog
+    from tools.clipflow_dialogs import DeleteConfirmDialog, LiveTargetsDialog
     from tools.clipflow_playlist import PlaylistMixin
     from tools.clipflow_downloads import DownloadMixin
     from tools.clipflow_views import RenderMixin
@@ -55,7 +55,7 @@ except ImportError:
     from clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
     from clipflow_rows import build_quality_options
     from clipflow_workers import AnalyzeWorker
-    from clipflow_dialogs import DeleteConfirmDialog
+    from clipflow_dialogs import DeleteConfirmDialog, LiveTargetsDialog
     from clipflow_playlist import PlaylistMixin
     from clipflow_downloads import DownloadMixin
     from clipflow_views import RenderMixin
@@ -287,6 +287,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self._refresh_primary_action()
         # Drop crash leftovers: TEMP clipflow-* dirs + orphan .part* in save folders.
         QTimer.singleShot(0, self._cleanup_stale_artifacts)
+        QTimer.singleShot(0, self._watch_saved_live_targets)
 
     def _cleanup_stale_artifacts(self):
         self._cleanup_stale_temp_artifacts()
@@ -1825,6 +1826,43 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._append_event_message(f"채널 라이브 녹화 시작: {video_url}")
         message = f"채널 라이브 녹화 중: {video_url}"
         self._finish_analysis_rows_failed(message, (engine.CHANNEL_LIVE_POLL_SECONDS, "채널 감시 중"))
+
+    def _open_live_targets_dialog(self):
+        LiveTargetsDialog(self._live_targets(), self._add_live_target, self._remove_live_target, self).exec()
+
+    def _add_live_target(self, text):
+        url = engine.youtube_channel_live_url(text)
+        if not url:
+            return None
+        targets = self._live_targets()
+        if url not in targets:
+            self._set_live_targets(targets + [url])
+        self._watch_live_target(url)
+        return url
+
+    def _remove_live_target(self, url):
+        self._set_live_targets([target for target in self._live_targets() if target != url])
+        self._queued_analysis_downloads = [item for item in self._queued_analysis_downloads if item.get("url") != url]
+        if self._analysis_url == url:
+            self._cancel_active_analysis()
+        # Dropping the waiting row also ends its retry timer (see _retry_upcoming_live).
+        self.rows = [row for row in self.rows if not (row.get("_upcoming_live_wait") and self._row_matches_url(row, url))]
+        self._render_rows()
+
+    def _watch_saved_live_targets(self):
+        for url in self._live_targets():
+            self._watch_live_target(url)
+
+    def _watch_live_target(self, url):
+        already = (
+            url == self._analysis_url
+            or any(item.get("url") == url for item in self._queued_analysis_downloads)
+            or any(row.get("_upcoming_live_wait") and self._row_matches_url(row, url) for row in self.rows)
+        )
+        if already:
+            return
+        self._queued_analysis_downloads.append({"url": url, "auto_download": True, "clip_range": None, "clip_cut_mode": None})
+        self._start_next_queued_analysis()
 
     def _finish_analysis_rows_failed(self, message, live_wait):
         detail = self._analysis_error_detail(message)

@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QLabel
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 try:
     from tools import candidate_presenter as presenter
@@ -240,3 +240,95 @@ class DeleteConfirmDialog(AppDialog):
             show_permanent_delete=show_perm,
             compact_action_buttons=False,
         )
+
+
+class LiveTargetsDialog(AppDialog):
+    """Edits the saved auto live targets; add/remove apply immediately through the callbacks."""
+
+    def __init__(self, targets, add_target, remove_target, parent=None):
+        super().__init__(
+            parent,
+            window_title="자동 라이브 타겟",
+            title_text="자동 라이브 타겟",
+            detail_text="등록한 YouTube 채널이 라이브를 시작하면 처음부터 자동으로 녹화합니다. 앱이 켜져 있어야 합니다.",
+            minimum_width=460,
+        )
+        self._add_target = add_target
+        self._remove_target = remove_target
+        self._targets = list(targets)
+
+        input_row = QHBoxLayout()
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("채널 주소 또는 @아이디")
+        self.url_input.returnPressed.connect(self._submit)
+        add_button = OutlinedButton("추가")
+        add_button.setObjectName("PrimaryPopupButton")
+        add_button.setCursor(Qt.PointingHandCursor)
+        add_button.setMinimumHeight(34)
+        add_button.clicked.connect(self._submit)
+        input_row.addWidget(self.url_input, 1)
+        input_row.addWidget(add_button)
+        input_box = QWidget()
+        input_box.setLayout(input_row)
+        input_row.setContentsMargins(0, 0, 0, 0)
+        self.add_body(input_box)
+
+        self.error_label = QLabel("")
+        self.error_label.setObjectName("MetaText")
+        self.error_label.hide()
+        self.add_body(self.error_label)
+
+        self.list_box = QWidget()
+        self.list_layout = QVBoxLayout(self.list_box)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setSpacing(6)
+        self.add_body(self.list_box)
+        self._render_targets()
+
+        self.add_action("close", "닫기", "SecondaryButton", reject=True, min_width=72)
+
+    def _render_targets(self):
+        while self.list_layout.count():
+            item = self.list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self._targets:
+            empty = QLabel("등록된 타겟이 없습니다.")
+            empty.setObjectName("MetaText")
+            self.list_layout.addWidget(empty)
+            return
+        for url in self._targets:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            label = QLabel(url)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            remove_button = OutlinedButton("삭제")
+            remove_button.setObjectName("SecondaryButton")
+            remove_button.setCursor(Qt.PointingHandCursor)
+            remove_button.setFixedSize(64, 34)
+            remove_button.clicked.connect(lambda *_args, u=url: self._remove(u))
+            row.addWidget(label, 1)
+            row.addWidget(remove_button)
+            box = QWidget()
+            box.setLayout(row)
+            box.setMinimumHeight(remove_button.height())
+            self.list_layout.addWidget(box)
+        self.adjustSize()
+
+    def _submit(self):
+        url = self._add_target(self.url_input.text())
+        if not url:
+            self.error_label.setText("YouTube 채널 주소(예: youtube.com/@아이디)를 넣어 주세요.")
+            self.error_label.show()
+            self.adjustSize()
+            return
+        self.error_label.hide()
+        self.url_input.clear()
+        if url not in self._targets:
+            self._targets.append(url)
+        self._render_targets()
+
+    def _remove(self, url):
+        self._remove_target(url)
+        self._targets = [target for target in self._targets if target != url]
+        self._render_targets()
