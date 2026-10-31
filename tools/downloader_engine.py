@@ -8837,8 +8837,9 @@ def download_instagram_live(candidate, output_dir, cookie_source="없음", on_ev
                 on_event, "progress", percent=0, downloaded=downloaded, total=0, is_live=True,
                 message=f"라이브 녹화 · {format_clock(recorded)} / {format_clock(live)} · {downloaded / (1024 * 1024):.2f} MiB",
             )
+        # The edge-numbered segment itself is published once the broadcast ends.
         final_edge = max(edge, live_edge())
-        jobs = [(rep, n) for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge) for rep in reps]
+        jobs = [(rep, n) for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge + 1) for rep in reps]
         list(pool.map(fetch_segment, jobs))  # fill segments that failed while live
     missing = sum(1 for rep, n in jobs if not segment_path(rep, n).exists())
     if missing:
@@ -8850,7 +8851,7 @@ def download_instagram_live(candidate, output_dir, cookie_source="없음", on_ev
         track = work_dir / f"{rep}.mp4"
         with open(track, "wb") as handle:
             handle.write((work_dir / rep / "init.m4v").read_bytes())
-            for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge):
+            for n in range(INSTAGRAM_LIVE_FIRST_SEGMENT, final_edge + 1):
                 if segment_path(rep, n).exists():
                     handle.write(segment_path(rep, n).read_bytes())
         tracks.append(track)
