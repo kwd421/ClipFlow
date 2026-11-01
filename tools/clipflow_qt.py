@@ -1837,6 +1837,18 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         message = f"채널 라이브 녹화 중: {video_url}"
         self._finish_analysis_rows_failed(message, (engine.CHANNEL_LIVE_POLL_SECONDS, "채널 감시 중"))
 
+    def _show_live_capture_on_watch_row(self, capture_row, clock):
+        # The watch row mirrors the recording clock of the live it queued; its next poll restores the waiting text.
+        text = f"라이브 녹화 중 · {clock}" if clock else "라이브 녹화 중"
+        for channel_url, videos in self._channel_live_captures.items():
+            if not any(self._row_matches_url(capture_row, video_url) for video_url in videos):
+                continue
+            for row in self.rows:
+                if row.get("_upcoming_live_wait") and self._row_matches_url(row, channel_url) and row.get("status_detail") != text:
+                    row["status_detail"] = row["progress_text"] = text
+                    if row.get("widget"):
+                        row["widget"].set_status()
+
     def _open_live_targets_dialog(self):
         LiveTargetsDialog(self._live_targets(), self._add_live_target, self._remove_live_target, self).exec()
 
@@ -2269,6 +2281,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             status_text = text or "다운로드 중"
             if hasattr(self, "status_label") and self.status_label.text() != status_text:
                 self.status_label.setText(status_text)
+            if row and event.get("is_live"):
+                self._show_live_capture_on_watch_row(row, event.get("live_clock"))
         elif event_type == "status" and self._event_is_finishing(event):
             text = self._finishing_progress_text(event)
             if row:

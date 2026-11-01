@@ -4122,14 +4122,20 @@ def progress_hook(on_event=None):
     unknown_total_reported = [False]
     fragments_by_format = {}
 
-    def live_clock_text(data):
+    def live_recorded_seconds(data):
         # Video and audio report separately; the slower one limits what is playable.
         info = data.get("info_dict") or {}
         fragment_seconds = info.get("target_duration")
         if not fragment_seconds or data.get("fragment_index") is None:
-            return ""
+            return None
         fragments_by_format[info.get("format_id")] = data["fragment_index"]
-        text = format_clock(min(fragments_by_format.values()) * fragment_seconds)
+        return min(fragments_by_format.values()) * fragment_seconds
+
+    def live_clock_text(data, recorded):
+        if recorded is None:
+            return ""
+        fragment_seconds = (data.get("info_dict") or {}).get("target_duration")
+        text = format_clock(recorded)
         if data.get("fragment_count"):
             text += f" / {format_clock(data['fragment_count'] * fragment_seconds)}"
         return text + " · "
@@ -4167,11 +4173,13 @@ def progress_hook(on_event=None):
                 )
                 unknown_total_reported[0] = False
             else:
+                recorded = live_recorded_seconds(data) if is_live else None
                 emit_event(
                     on_event, "progress", percent=0, downloaded=downloaded,
                     total=0, speed=data.get("speed") or 0, eta=None, is_live=is_live,
+                    live_clock=format_clock(recorded) if recorded is not None else "",
                     speed_text=(data.get("_speed_str") or "").strip(),
-                    message=f"{'라이브 녹화 · ' + live_clock_text(data) if is_live else ''}{downloaded / (1024 * 1024):.2f} MiB · {(data.get('_speed_str') or '').strip()}",
+                    message=f"{'라이브 녹화 · ' + live_clock_text(data, recorded) if is_live else ''}{downloaded / (1024 * 1024):.2f} MiB · {(data.get('_speed_str') or '').strip()}",
                 )
                 if not is_live and not unknown_total_reported[0]:
                     emit_event(on_event, "status", message="Downloading")
@@ -8835,6 +8843,7 @@ def download_instagram_live(candidate, output_dir, cookie_source="없음", on_ev
             live = (edge - INSTAGRAM_LIVE_FIRST_SEGMENT) * INSTAGRAM_LIVE_SEGMENT_SECONDS
             emit_event(
                 on_event, "progress", percent=0, downloaded=downloaded, total=0, is_live=True,
+                live_clock=format_clock(recorded),
                 message=f"라이브 녹화 · {format_clock(recorded)} / {format_clock(live)} · {downloaded / (1024 * 1024):.2f} MiB",
             )
         # The edge-numbered segment itself is published once the broadcast ends.
